@@ -3,8 +3,9 @@ import WinterCUPresentation
 import WinterKit
 
 // The Winter island's activity views (phase 2, `docs/claude/island.md`): the computer-use pill and its mirror, the
-// turn-result card, and the Watches tab. Same look as phase 1: black shells, the house type (`Typography` only —
-// `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the pills' hover glow, the island's hover grow
+// turn-result card and a plan alarm's notice (the Watches tab is `IslandWatchesTab.swift`). Same look as phase 1: black
+// shells, the house type (`Typography` only — `TypographyTests` sweeps this folder), white ✕ / blue ✓ circles with the
+// pills' hover glow, the island's hover grow
 // (`IslandHover`).
 
 enum IslandCUColors {
@@ -216,73 +217,53 @@ struct IslandResultContent: View {
     }
 }
 
-// MARK: - The Watches tab
+// MARK: - A plan alarm's notification
 
-/// Every armed computer-use watch — what the agent waits for, in which session and app, since when — each with Stop.
-struct IslandWatchesList: View {
-    @ObservedObject var activity: IslandActivityStore
-    var scrolls = true
-    /// Epoch ms (the gallery passes a fixed one).
-    var nowMs: () -> Int = { Int(Date().timeIntervalSince1970 * 1000) }
-
-    var body: some View {
-        if activity.watches.isEmpty {
-            IslandEmptyTab(symbol: "eye", line: "Nothing is being watched")
-        } else {
-            IslandTabScroll(scrolls: scrolls) { rows }
-        }
-    }
-
-    private var rows: some View {
-        let now = nowMs()
-        return VStack(alignment: .leading, spacing: IslandLayout.rowGap) {
-            ForEach(activity.watches, id: \.wakeId) { watch in
-                IslandWatchRow(watch: watch, nowMs: now, stopping: activity.disarming.contains(watch.wakeId),
-                               error: activity.disarmErrors[watch.wakeId]) { activity.disarmWatch(watch) }
-            }
-        }
-        .padding(.horizontal, IslandLayout.listInset)
-        .padding(.bottom, IslandLayout.listInset)
-    }
-}
-
-struct IslandWatchRow: View {
-    let watch: IslandWatchItem
-    let nowMs: Int
-    let stopping: Bool
-    let error: String?
-    let onStop: () -> Void
+/// A plan alarm fired (`docs/claude/usage.md`): the plan, the window and the threshold ("Claude Code · Weekly at 80%"),
+/// when it resets, ✕ and ↗ — a click anywhere on it opens the island's Usage tab.
+struct IslandUsageAlarmContent: View {
+    let item: IslandUsageAlarmItem
+    let now: Date
+    let onOpen: () -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
-        IslandHoverSurface { _ in row }
-    }
-
-    private var row: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: islandWatchSymbol(watch.condition))
-                .font(Typography.label(.semibold))
-                .foregroundStyle(IslandCUColors.accent)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.white.opacity(0.08)))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(islandWatchConditionLine(watch))
-                    .font(Typography.composerField())
-                    .foregroundStyle(Color.white)
-                    .lineLimit(2)
-                Text("\(islandWatchSessionLine(watch)) · \(watch.targetLabel)")
+        let title = UsagePresentation.alarmNoticeTitle(item)
+        let detail = UsagePresentation.alarmNoticeDetail(item, now: now)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: "bell.fill")
+                    .font(Typography.caption(.semibold))
+                    .foregroundStyle(UsagePlanColor.of(provider: item.provider))
+                Text("Usage alarm")
                     .font(Typography.caption(.medium))
                     .foregroundStyle(Theme.textMuted)
                     .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(error ?? islandWatchTimeLine(watch, nowMs: nowMs))
-                    .font(Typography.captionDigits())
-                    .foregroundStyle(error == nil ? Theme.textMuted : pillReviewAmber)
-                    .lineLimit(1)
+                Spacer(minLength: 4)
             }
-            Spacer(minLength: 8)
-            IslandAnswerButton(role: .refuse, symbol: "stop.fill", enabled: !stopping, action: onStop)
-                .accessibilityLabel("Stop waiting")
+            HStack(alignment: .bottom, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(Typography.composerField())
+                        .foregroundStyle(Color.white)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if let detail {
+                        Text(detail).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                    }
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                IslandAnswerButton(role: .refuse, action: onDismiss)
+                    .accessibilityLabel("Dismiss")
+                IslandAnswerButton(role: .accept, symbol: "arrow.up.right", action: onOpen)
+                    .accessibilityLabel("Open usage")
+            }
         }
-        .padding(12)
+        .padding(IslandLayout.cardPadding)
+        .frame(width: IslandLayout.cardWidth, alignment: .topLeading)
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onOpen)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Usage alarm: \(title)\(detail.map { ", \($0)" } ?? "")")
     }
 }

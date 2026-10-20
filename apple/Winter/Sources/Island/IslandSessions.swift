@@ -27,15 +27,6 @@ enum IslandSessionLiveState: Int, Equatable, Comparable {
         case .finished: return "Finished"
         }
     }
-
-    var symbol: String {
-        switch self {
-        case .waiting: return "hand.raised.fill"
-        case .working: return "bolt.fill"
-        case .idle: return "moon.zzz.fill"
-        case .finished: return "checkmark.circle.fill"
-        }
-    }
 }
 
 /// Where a session is.
@@ -59,17 +50,6 @@ enum IslandSessionHostKind: Equatable {
         case .nowhere: return "Not open"
         }
     }
-
-    var symbol: String {
-        switch self {
-        case .winterWindow: return "macwindow"
-        case .detachedWindow: return "macwindow.on.rectangle"
-        case .terminal: return "terminal"
-        case .dispatchPill: return "capsule"
-        case .phone: return "iphone"
-        case .nowhere: return "circle.dashed"
-        }
-    }
 }
 
 struct IslandSessionRow: Identifiable, Equatable {
@@ -79,7 +59,61 @@ struct IslandSessionRow: Identifiable, Equatable {
     let mode: String
     let state: IslandSessionLiveState
     let host: IslandSessionHostKind
+    /// What the row reveals under the pointer: its model (the session's pinned tag), the provider that served it, the
+    /// working folder's last component and when it was created (epoch seconds or ms, as the directory has it).
+    var model: String? = nil
+    var providerId: String? = nil
+    var folder: String? = nil
+    var createdAt: Int = 0
+    /// What it waits for you on (its oldest card) and since when — nil when it waits on nothing the island holds.
+    var wait: IslandSessionWait? = nil
+    /// A Dispatch child that ended with an error (its state is `finished`).
+    var failed = false
     var id: String { sessionId }
+}
+
+/// What a session waits for you on: its oldest card's kind, and when that card was issued.
+struct IslandSessionWait: Equatable {
+    let kind: IslandCard.Kind
+    var since: Date? = nil
+}
+
+/// A line under a row's title that is worth scanning at rest — what a session needs from you, or its error.
+struct IslandRowNote: Equatable {
+    let text: String
+    let color: Color
+}
+
+/// A session's model family — the colour its status line wears (`UsagePlanColor`: Codex green for OpenAI's models,
+/// Claude Code clay for Anthropic's, Antigravity blue for Google's; Winter's own accent for any other).
+enum IslandModelFamily: Equatable {
+    case openai, anthropic, google, other
+
+    /// PURE: from the session's model tag ("anthropic/claude-sonnet-4.5", "gpt-5-codex") and the provider that served it
+    /// ("anthropic", "codex-oauth", "openai", "google"…); the model's own words win, an unknown one is `other`.
+    static func of(model: String?, provider: String?) -> IslandModelFamily {
+        for raw in [model, provider] {
+            guard let s = raw?.lowercased(), !s.isEmpty else { continue }
+            if s.contains("claude") || s.contains("anthropic") || s.contains("opus") || s.contains("sonnet") || s.contains("haiku") {
+                return .anthropic
+            }
+            if s.contains("gpt") || s.contains("openai") || s.contains("codex") || s.hasPrefix("o3") || s.hasPrefix("o4")
+                || s.contains("/o3") || s.contains("/o4") {
+                return .openai
+            }
+            if s.contains("gemini") || s.contains("google") || s.contains("antigravity") { return .google }
+        }
+        return .other
+    }
+
+    var color: Color {
+        switch self {
+        case .openai: return UsagePlanColor.codex
+        case .anthropic: return UsagePlanColor.claudeCode
+        case .google: return UsagePlanColor.antigravity
+        case .other: return Theme.accent
+        }
+    }
 }
 
 /// What the app's own windows show.
@@ -167,7 +201,8 @@ enum IslandSessionsBuilder {
     /// a phone), marked active or background by the daemon, or a Dispatch child that finished; never a running
     /// Dispatch child. Waiting first, then working, idle, finished; newest first within each.
     static func rows(directory: [SessionSummary], hosts: [String: [IslandHost]], waiting: Set<String>,
-                     childStatuses: [String: String], windows: IslandWindowFacts) -> [IslandSessionRow] {
+                     childStatuses: [String: String], windows: IslandWindowFacts,
+                     waits: [String: IslandSessionWait] = [:]) -> [IslandSessionRow] {
         var out: [(IslandSessionRow, Int)] = []
         for row in directory {
             if row.archived == true || row.activity == "archived" { continue }
@@ -178,11 +213,91 @@ enum IslandSessionsBuilder {
                 || childStatuses[row.sessionId] != nil
             guard live else { continue }
             let title = row.title?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty ?? "Untitled \(modeLabel(row).lowercased())"
-            out.append((IslandSessionRow(sessionId: row.sessionId, title: title, mode: modeLabel(row), state: state, host: host),
+            let failed = childStatuses[row.sessionId].map { ChildPillStatus(wireStatus: $0) == .failed } ?? false
+            out.append((IslandSessionRow(sessionId: row.sessionId, title: title, mode: modeLabel(row), state: state, host: host,
+                                         model: row.model, providerId: row.providerId, folder: folderName(row.cwd),
+                                         createdAt: row.createdAt, wait: state == .waiting ? waits[row.sessionId] : nil,
+                                         failed: state == .finished && failed),
                         row.createdAt))
         }
         out.sort { a, b in a.0.state != b.0.state ? a.0.state < b.0.state : a.1 > b.1 }
         return Array(out.prefix(limit).map(\.0))
+    }
+
+    /// PURE: a working folder as the row names it — its last component ("winter"); nil without one.
+    static func folderName(_ cwd: String?) -> String? {
+        guard let cwd = cwd?.trimmingCharacters(in: .whitespacesAndNewlines), !cwd.isEmpty else { return nil }
+        let last = URL(fileURLWithPath: cwd).lastPathComponent
+        return last.isEmpty || last == "/" ? nil : last
+    }
+
+    /// PURE: what each session waits for you on — the kind of its OLDEST card (by the session an answer goes to) and
+    /// when that card was issued.
+    static func waits(_ cards: [IslandCard]) -> [String: IslandSessionWait] {
+        var oldest: [String: (card: IslandCard, at: Int)] = [:]
+        for card in cards {
+            let at = card.issuedAt ?? Int.max
+            if let held = oldest[card.answerSessionId], held.at <= at { continue }
+            oldest[card.answerSessionId] = (card, at)
+        }
+        return oldest.mapValues { held in
+            IslandSessionWait(kind: held.card.kind,
+                              since: held.card.issuedAt.map { Date(timeIntervalSince1970: Double($0) / 1000) })
+        }
+    }
+
+    /// PURE: the row's mark — a dot in its model family's colour while it works, amber while it waits for you, the same
+    /// family colour hollow while idle; a quiet check once finished, a red dot when it ended with an error.
+    static func mark(_ row: IslandSessionRow) -> IslandStatusMark {
+        let family = IslandModelFamily.of(model: row.model, provider: row.providerId).color
+        switch row.state {
+        case .waiting: return .dot(pillReviewAmber)
+        case .working: return .dot(family)
+        case .idle: return .ring(family)
+        case .finished: return row.failed ? .dot(Color(nsColor: .systemRed)) : .glyph("checkmark", Color.white.opacity(0.55))
+        }
+    }
+
+    /// PURE: what trails the title, muted — its mode and where it is ("Code · Winter window").
+    static func whereWords(_ row: IslandSessionRow) -> String { "\(row.mode) · \(row.host.label)" }
+
+    /// PURE: the line under the title at rest, only when it is worth scanning — what the session needs from you and for
+    /// how long ("Needs your approval · 2 min"), or that it ended with an error. Nil: the row is one line.
+    static func note(_ row: IslandSessionRow, now: Date) -> IslandRowNote? {
+        if row.failed { return IslandRowNote(text: "Ended with an error", color: Color(nsColor: .systemRed)) }
+        guard row.state == .waiting else { return nil }
+        var words = waitWords(row.wait?.kind)
+        if let since = row.wait?.since { words += " · " + waitedFor(since, now: now) }
+        return IslandRowNote(text: words, color: pillReviewAmber)
+    }
+
+    /// PURE: what a card asks of you, as a session's note (no card the island holds: the state's own words).
+    static func waitWords(_ kind: IslandCard.Kind?) -> String {
+        switch kind {
+        case .approval?: return "Needs your approval"
+        case .question?: return "Has a question for you"
+        case .elicitation?: return "Needs you to open a link"
+        case .viewRequest?: return "Asks to switch desktops"
+        case nil: return IslandSessionLiveState.waiting.label
+        }
+    }
+
+    /// PURE: how long it has waited — "just now", "2 min", "1 h 5 min".
+    static func waitedFor(_ since: Date, now: Date) -> String {
+        let ms = Int(now.timeIntervalSince(since) * 1000)
+        return ms < 60_000 ? "just now" : IslandWatchesPresentation.span(ms)
+    }
+
+    /// PURE: what the pointer reveals under the title — its model, how long ago it began and its folder ("gpt-5-codex ·
+    /// 3 h ago · winter"); the state's own words when it knows none of them.
+    static func details(_ row: IslandSessionRow, now: Date) -> String {
+        var parts: [String] = []
+        if let model = row.model?.trimmingCharacters(in: .whitespacesAndNewlines), !model.isEmpty {
+            parts.append(UsagePresentation.modelName(model))
+        }
+        if row.createdAt > 0 { parts.append(islandRelativePast(IslandDevicesPresentation.date(row.createdAt), now: now)) }
+        if let folder = row.folder { parts.append(folder) }
+        return parts.isEmpty ? row.state.label : parts.joined(separator: " · ")
     }
 
     /// PURE: the strip's working count — sessions the daemon last said are working (not archived).
@@ -206,6 +321,8 @@ final class IslandSessionsModel: ObservableObject {
     var refreshDirectory: () async -> Void = {}
     var fetchHosts: () async throws -> [String: [IslandHost]] = { [:] }
     var waiting: () -> Set<String> = { [] }
+    /// What each waiting session waits on and since when (`IslandSessionsBuilder.waits` over the island's cards).
+    var waits: () -> [String: IslandSessionWait] = { [:] }
     var childStatuses: () -> [String: String] = { [:] }
     var windows: () -> IslandWindowFacts = { IslandWindowFacts() }
     /// Moves the user's view (the app's windows, a terminal, a new detached window).
@@ -221,7 +338,7 @@ final class IslandSessionsModel: ObservableObject {
     /// Rebuilds the rows from what is known (a directory change, a card change).
     func recompute() {
         let next = IslandSessionsBuilder.rows(directory: directory(), hosts: hosts, waiting: waiting(),
-                                              childStatuses: childStatuses(), windows: windows())
+                                              childStatuses: childStatuses(), windows: windows(), waits: waits())
         if next != rows { rows = next }
     }
 
@@ -258,71 +375,55 @@ struct IslandSessionsList: View {
     }
 
     private var list: some View {
-        VStack(spacing: IslandLayout.rowGap) {
+        VStack(spacing: IslandQuietRow.rowGap) {
             ForEach(model.rows) { row in
                 IslandSessionRowView(row: row) { onOpen(row) }
             }
         }
-        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.horizontal, IslandQuietRow.inset)
+        .padding(.top, 2)
         .padding(.bottom, IslandLayout.listInset)
     }
 }
 
+/// A session as a row in the island's language (`docs/claude/island.md`): a status dot in its model's colour (amber
+/// while it waits for you, hollow while idle), its title, and its mode and where it is, muted — one line, unless it needs
+/// you or ended with an error, which a second line says at rest. Under the pointer the row lifts: the title grows, and
+/// its model, age and folder show under it with the ↗. A click goes where the session is.
 struct IslandSessionRowView: View {
     let row: IslandSessionRow
+    var now = Date()
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            IslandHoverSurface { hovered in
-                HStack(spacing: 10) {
-                    Image(systemName: row.state.symbol)
-                        .font(Typography.label(.semibold))
-                        .foregroundStyle(islandSessionStateColor(row.state))
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(row.title)
-                            .font(Typography.composerField())
-                            .foregroundStyle(Color.white)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                        HStack(spacing: 5) {
-                            Text(row.mode)
-                            Text("·")
-                            Image(systemName: row.host.symbol)
-                            Text(row.host.label)
-                        }
-                        .font(Typography.caption())
+            HoverLiftReader(id: "session:\(row.sessionId)") { hovered in
+                IslandLiftRow(title: row.title, quiet: row.state == .finished, hovered: hovered) {
+                    IslandStatusMarkView(mark: IslandSessionsBuilder.mark(row))
+                } trailing: {
+                    Text(IslandSessionsBuilder.whereWords(row))
+                        .font(IslandQuietRow.wordsFont)
                         .foregroundStyle(Theme.textMuted)
                         .lineLimit(1)
+                } below: {
+                    if let note = IslandSessionsBuilder.note(row, now: now) {
+                        IslandRowWords(text: note.text, color: note.color)
                     }
-                    Spacer(minLength: 8)
-                    Text(row.state.label)
-                        .font(Typography.caption(.medium))
-                        .foregroundStyle(row.state == .waiting ? Color.black : Color.white)
-                        .padding(.horizontal, 8)
-                        .frame(height: 20)
-                        .background(Capsule().fill(row.state == .waiting ? pillReviewAmber : Color.white.opacity(hovered ? 0.16 : 0.1)))
-                    Image(systemName: "arrow.up.right")
-                        .font(Typography.caption(.semibold))
-                        .foregroundStyle(hovered ? Color.white : Theme.textMuted)
+                    if hovered {
+                        // Where a click goes, at the end of what the pointer reveals.
+                        IslandRowWords(text: IslandSessionsBuilder.details(row, now: now)) {
+                            Image(systemName: "arrow.up.right")
+                                .font(Typography.tiny(.bold))
+                                .foregroundStyle(Color.white)
+                        }
+                        .transition(.opacity)
+                    }
                 }
-                .padding(.horizontal, 12)
-                .frame(height: 50)
             }
         }
         .buttonStyle(IslandPressStyle())
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(row.title), \(row.mode), \(row.state.label), \(row.host.label). Show it.")
-    }
-}
-
-func islandSessionStateColor(_ state: IslandSessionLiveState) -> Color {
-    switch state {
-    case .waiting: return pillReviewAmber
-    case .working: return Theme.accent
-    case .idle: return Theme.textMuted
-    case .finished: return Color.white
     }
 }
 

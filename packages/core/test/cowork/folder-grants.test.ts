@@ -123,7 +123,7 @@ test("empty schema11 safely rolls back and future schema writer refused",()=>{
 test("default Mac adapter cannot provision or consume despite durable storage",()=>{
   const f=fixture(),ports=createMacCoworkHost(f.home,f.options,f.db),service=new CoworkWorkspaceService(f.records,ports);hosts.push(ports.selections!);
   const p=ports.selections!.prepare(ports.principal(connection)!,1,Buffer.from("bookmark").toString("base64"),"Folder","read-write");
-  expect(service.call(connection,"workspace.capabilities.get",{})).toEqual({folderPreparation:true,repositoryPreparation:false,provisioning:false,execution:false});
+  expect(service.call(connection,"workspace.capabilities.get",{})).toEqual({folderPreparation:false,repositoryPreparation:false,provisioning:false,execution:false}); // no provisioning, so no folder preparation
   expect(()=>service.call(connection,"workspace.create",f.request(p.selectionId))).toThrow("unsupported_topology");expect(f.records.list()).toEqual([]);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});service.close();
 });
 
@@ -206,3 +206,14 @@ test("legacy folder retry after preparation loss refuses without inventing selec
   expect(()=>f.service.call(connection,"workspace.create",request)).toThrow("authority_denied");
   expect(f.records.get(old.workspaceId).configRevision).toBe(1);expect(f.records.list()).toHaveLength(1);expect(f.db.db.query("SELECT count(*) AS n FROM cowork_folder_grants").get()).toEqual({n:0});
 });
+
+test("production-shaped host: prepareFolder is refused like create (unsupported_topology), holds no descriptor and arms no sweep timer",()=>{
+  const f=fixture(),ports=createMacCoworkHost(f.home,f.options,f.db),service=new CoworkWorkspaceService(f.records,ports);hosts.push(ports.selections!);
+  const params={requestId:"prepare-gated",bookmarkBase64:Buffer.from("bookmark").toString("base64"),label:"Folder",access:"read-write"};
+  expect(()=>service.call(connection,"workspace.selection.prepareFolder",params)).toThrow("unsupported_topology");
+  const selections=ports.selections as unknown as {timer?:unknown;entries:Map<string,unknown>};
+  expect(selections.entries.size).toBe(0);   // nothing opened, so no file descriptor is held
+  expect(selections.timer).toBeUndefined();  // and no sweep timer was armed
+  expect(f.records.list()).toEqual([]);
+});
+

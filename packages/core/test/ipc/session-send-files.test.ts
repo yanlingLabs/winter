@@ -264,11 +264,14 @@ describe("session.send / session.steer — files (code-mode file attachments)", 
     c.close();
   });
 
-  test("a non-code session refuses file_session_not_code; a remote caller can never send files; nothing appended", async () => {
+  test("a chat session refuses file_session_not_code; a remote caller can never send files; nothing appended", async () => {
     const chat = await session("chat");
     const before = chat.store.read(chat.sid).length;
-    const refused = await chat.c.request(METHODS.sessionSend, { sessionId: chat.sid, text: "[File #1]", files: [{ n: 1, path: "/tmp" }] });
-    expect(refused.error.data.code).toBe(FILE_SESSION_NOT_CODE);
+    for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+      const refused = await chat.c.request(method, { sessionId: chat.sid, text: "[File #1]", files: [{ n: 1, path: "/tmp" }] });
+      expect(refused.error.data.code).toBe(FILE_SESSION_NOT_CODE);
+      expect(refused.error.message).toBe("files can only be added to code and dispatch sessions");
+    }
     expect(chat.store.read(chat.sid).length).toBe(before);
     chat.c.close(); stop?.(); stop = undefined;
 

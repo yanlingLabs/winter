@@ -478,3 +478,78 @@ test("the key is never printed: captured console and stream output, thrown error
   expect(wrapped).toBeDefined();
   for (const secret of secrets) expect(`${wrapped!.message}${wrapped!.stack}${inspect(wrapped, { depth: 8 })}`.includes(secret)).toBe(false);
 });
+
+// ================================================================================================ S7B part 1: the secret bound and the environment hooks
+
+/** A slot whose reads never settle until the test lets them (a Keychain prompt waiting for a person). */
+function stuckSlot() {
+  const values = new Map<string, string>(), pending: (() => void)[] = []; let reads = 0;
+  return { values, get reads() { return reads; }, release: () => pending.splice(0).forEach(run => run()),
+    get: (name: string) => { reads += 1; return new Promise<string | null>(resolve => { pending.push(() => resolve(values.get(name) ?? null)); }); },
+    set: async (name: string, value: string) => { values.set(name, value); } };
+}
+
+test("a Keychain read that never answers refuses the start with receipt_key_unavailable, before anything moves, and a late answer sets no key", async () => {
+  const h = createHarness(), slot = stuckSlot();
+  const wiring = wiringFor(h, { secrets: slot, keyReadTimeoutMs: 30 });
+  const before = snapshot(h);
+  const began = Date.now();
+  await expect(wiring.start(h.workspaceId)).rejects.toMatchObject({ code: "receipt_key_unavailable" });
+  expect(Date.now() - began).toBeLessThan(2000);
+  expect(h.launcher.spawned).toEqual([]);
+  expect(snapshot(h)).toBe(before);
+  slot.release(); // the late answer arrives now
+  await new Promise(resolve => setTimeout(resolve, 10));
+  expect(h.launcher.spawned).toEqual([]);
+  // nothing was cached from the expired ask: the next one is bounded and refused the same way
+  await expect(wiring.start(h.workspaceId)).rejects.toMatchObject({ code: "receipt_key_unavailable" });
+  expect(h.launcher.spawned).toEqual([]);
+});
+
+test("a Keychain read that never answers at boot counts as no key: the receipt is Class B and the daemon's start is not held", async () => {
+  const h = createHarness({ crashAt: "power-running" }), slot = stuckSlot();
+  await expect(h.host.start(h.workspaceId)).rejects.toBeInstanceOf(CoworkNativeSimulatedCrash);
+  const text = (await import("../../src/cowork/native/protocol")).serializeCoworkNativeStopReceipt(h.launcher.last.stagedOrderly("cc".repeat(16), { origin: "owner-loss-drain" }));
+  h.restart();
+  const record = h.records.get(h.workspaceId);
+  h.receipts.set(`${h.workspaceId}|${record.incarnationId}|${record.leaseEpoch}`, text);
+  const ports = { receipts: { load: (scope: { workspaceId: string; incarnationId: string; leaseEpoch: number }) => { const t = h.receipts.get(`${scope.workspaceId}|${scope.incarnationId}|${scope.leaseEpoch}`); return t === undefined ? null : { text: t, attested: true as const }; }, retire: () => {} }, guards: { processAbsent: () => true, imagesUnlocked: () => true } };
+  const began = Date.now();
+  const boot = await wiringFor(h, { secrets: slot, keyReadTimeoutMs: 30 }, ports).reconcileAtBoot();
+  expect(Date.now() - began).toBeLessThan(2000);
+  expect(boot.reports).toMatchObject([{ action: "retained", ownerRetained: true }]);
+  expect(slot.values.size).toBe(0);
+});
+
+test("the environment hooks: bindHost is handed the live host once, prepareStart runs before every start and a failure refuses it, close runs after the drain and only once per shutdown", async () => {
+  const h = createHarness(), order: string[] = [];
+  let bound: { activeWorkspaces(): string[] } | null = null, bindings = 0, failPrepare = false;
+  const wiring = wiringFor(h, {}, {
+    bindHost: host => { bindings += 1; bound = host; order.push("bind"); },
+    prepareStart: async () => { order.push("prepare"); if (failPrepare) throw new Error("pressure unreadable"); },
+    close: () => { order.push("close"); },
+  });
+  await wiring.start(h.workspaceId);
+  expect(bindings).toBe(1);
+  expect(bound!.activeWorkspaces()).toEqual([h.workspaceId]);
+  expect(order).toEqual(["bind", "prepare"]);
+  const other = h.addWorkspace();
+  failPrepare = true;
+  await expect(wiring.start(other)).rejects.toMatchObject({ code: "native_unavailable" });
+  expect(h.launcher.spawned.map(request => request.workspaceId)).toEqual([h.workspaceId]);
+  await wiring.beginShutdown();
+  expect(order).toEqual(["bind", "prepare", "prepare", "close"]);
+  expect(owners(h)).toEqual([null, null]);
+});
+
+test("close also runs when no guest was live at shutdown, and a close that throws does not break the shutdown", async () => {
+  const h = createHarness();
+  let closes = 0;
+  const wiring = wiringFor(h, {}, { close: () => { closes += 1; throw new Error("ledger already closed"); } });
+  await wiring.start(h.workspaceId);
+  await wiring.beginShutdown();
+  expect(closes).toBe(1);
+  const idle = wiringFor(createHarness(), {}, { close: () => { closes += 1; } });
+  expect(idle.beginShutdown()).toBeUndefined(); // never built: nothing to close
+  expect(closes).toBe(1);
+});

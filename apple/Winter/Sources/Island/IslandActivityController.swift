@@ -52,11 +52,14 @@ final class IslandActivityController {
         started = true
         store.onChange = { [weak self] in self?.layout() }
         store.scheduleWake = { [weak self] deadline in self?.armWake(deadline) }
+        observeScreen()
         layout()
     }
 
     func stop() {
         started = false
+        for (center, token) in screenObservers { center.removeObserver(token) }
+        screenObservers = []
         wake?.cancel()
         removePointerMonitors()
         panel.orderOut(nil)
@@ -83,9 +86,11 @@ final class IslandActivityController {
         let cards = island.store
         let cardOnTop = cards.currentCard != nil || cards.waitingCard != nil
         store.setCardOnTop(cardOnTop)
+        store.setIslandOpen(island.isOpen)
         let cu = store.cuPresentation
+        // An alarm's notice before a turn result: it waited its turn, and it is acknowledged only once seen.
         decision = IslandActivityArbiter.decide(cardOnTop: cardOnTop, islandOpen: island.isOpen,
-                                                result: store.currentResult?.id, computerUse: cu?.sessionId,
+                                                result: store.currentAlarm?.id ?? store.currentResult?.id, computerUse: cu?.sessionId,
                                                 mirrorOpen: store.mirrorOpen, realMouse: store.usingRealMouse)
         // The in-island mirror's pictures flow only while it is on screen.
         if case .computerUse(let sid, true) = decision.slot { mirrors?.setIslandMirror(sid) } else { mirrors?.setIslandMirror(nil) }
@@ -128,11 +133,18 @@ final class IslandActivityController {
         let shape = island.screenShape
         let geometry: DesktopIslandGeometry
         var result: IslandResultItem?
+        var alarm: IslandUsageAlarmItem?
         switch decision.slot {
-        case .result:
-            guard let item = store.currentResult else { return nil }
-            result = item
-            geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+        case .result(let id):
+            if let item = store.currentAlarm, item.id == id {
+                alarm = item
+                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            } else if let item = store.currentResult {
+                result = item
+                geometry = IslandLayout.cardGeometry(shape, size: measure(item), rounded: true)
+            } else {
+                return nil
+            }
         case .computerUse:
             geometry = IslandLayout.cardGeometry(shape, size: CGSize(width: IslandActivityLayout.cuPillWidth,
                                                                       height: DesktopIslandGeometry.pillHeight), rounded: false)
@@ -148,11 +160,16 @@ final class IslandActivityController {
                 self?.layout()
             }
         }
-        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, lastCU: store.cuPresentation)
+        return IslandActivityShown(key: key, geometry: geometry, state: state, result: result, alarm: alarm, lastCU: store.cuPresentation)
     }
 
     private func measure(_ item: IslandResultItem) -> CGSize {
         let host = NSHostingView(rootView: IslandResultContent(item: item, onOpen: {}, onDismiss: {}).environment(\.colorScheme, .dark))
+        return CGSize(width: IslandLayout.cardWidth, height: max(ceil(host.fittingSize.height), DesktopIslandGeometry.pillHeight))
+    }
+
+    private func measure(_ item: IslandUsageAlarmItem) -> CGSize {
+        let host = NSHostingView(rootView: IslandUsageAlarmContent(item: item, now: Date(), onOpen: {}, onDismiss: {}).environment(\.colorScheme, .dark))
         return CGSize(width: IslandLayout.cardWidth, height: max(ceil(host.fittingSize.height), DesktopIslandGeometry.pillHeight))
     }
 
@@ -325,6 +342,32 @@ final class IslandActivityController {
         if case .result = decision.slot { store.hoverResult(over) }
     }
 
+    // MARK: Who can see the screen
+
+    private var screenObservers: [(NotificationCenter, NSObjectProtocol)] = []
+
+    /// The screen lock, the displays' sleep and the console session (`IslandScreenPresence`): an alarm's notice counts its
+    /// time only while someone can see it. Event-driven: nothing runs between the system's own notifications.
+    private func observeScreen() {
+        guard screenObservers.isEmpty else { return }
+        let signals: [(NotificationCenter, Notification.Name, IslandScreenPresence.Signal)] = [
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsLocked"), .locked),
+            (DistributedNotificationCenter.default(), Notification.Name("com.apple.screenIsUnlocked"), .unlocked),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidSleepNotification, .displaysSlept),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.screensDidWakeNotification, .displaysWoke),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.sessionDidResignActiveNotification, .sessionResigned),
+            (NSWorkspace.shared.notificationCenter, NSWorkspace.sessionDidBecomeActiveNotification, .sessionActivated),
+        ]
+        for (center, name, signal) in signals {
+            let token = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.store.screenSignal(signal) }
+            }
+            screenObservers.append((center, token))
+        }
+        // …and where it stands now: a launch behind a locked screen (Sparkle's relaunch) must not start "present".
+        store.screenAtStart()
+    }
+
     // MARK: The wake-up
 
     private func armWake(_ deadline: TimeInterval?) {
@@ -355,17 +398,20 @@ final class IslandActivityShown: ObservableObject {
     let geometry: DesktopIslandGeometry
     let state: DesktopIslandState
     let result: IslandResultItem?
+    /// A fired plan alarm's notification (in the result's slot).
+    let alarm: IslandUsageAlarmItem?
     /// The computer-use pill's last words (kept while it goes back up, when the store has none any more).
     @Published var lastCU: IslandCUPresentation?
     @Published var expanded = false
     @Published var hovered = false
 
     init(key: String, geometry: DesktopIslandGeometry, state: DesktopIslandState, result: IslandResultItem?,
-         lastCU: IslandCUPresentation?) {
+         alarm: IslandUsageAlarmItem? = nil, lastCU: IslandCUPresentation?) {
         self.key = key
         self.geometry = geometry
         self.state = state
         self.result = result
+        self.alarm = alarm
         self.lastCU = lastCU
     }
 }
@@ -486,6 +532,8 @@ struct IslandActivitySlotView: View {
     private func content(expanded: Bool) -> some View {
         if let item = shown.result {
             IslandResultContent(item: item, onOpen: { onOpenResult(item.id) }, onDismiss: { onDismissResult(item.id) })
+        } else if let item = shown.alarm {
+            IslandUsageAlarmContent(item: item, now: Date(), onOpen: { onOpenResult(item.id) }, onDismiss: { onDismissResult(item.id) })
         } else if let p = presentation {
             ZStack {
                 if expanded {
