@@ -15,8 +15,8 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
 | Patch queue | `patch-queue.json` | 22 patches, 0004-0025, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `b42484237c4e9ae63c64ae9ead8e8759f7849f41be12b1d8ca1bbe7a71eeaa56` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `5d7d23d0c535e9ef1e23796a3234231058230c01241b6c5c54bd55ebe54869a0`, stripped `630095a6d130dbeff89fbf1ec7fbbd3c671dcffa88b24d82a406e73b52a5b423` |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `3e7cd2681d8b4053a5b5d7d1273e860f234bb36be7e892552957299707df2510` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `75c458241a45b67d9d924fbb044c2502110ad527dce2cf40018c62aa7c655d15`, stripped `06e8b8f39f8666eaa19c57090f03a321d24f7e8d468e77a48fc4242cd21566a4` |
 | Exports | `expected-hashes.json` | 69 `krun_*` symbols: the 62 upstream ones for this feature set plus 7 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (619 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (627 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -77,7 +77,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
 | `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, not wired yet (the device, ABI and gate come in later patches) | `c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85` |
-| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, not wired yet (the device, ABI and gate come in a later patch) | `70e52f454938ab011f796f6645aee9013f35434a41ba9e3e423a7d2fb070507e` |
+| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, not wired yet (the device, ABI and gate come in a later patch) | `c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
 entry points, but later patches (0007 onward, 0016, 0020) edit the files they create, so leaving one out means rewriting the stack and
@@ -116,6 +116,12 @@ Refusals are `EPERM`; refusals and writes to watched names (`.envrc`, `.vscode/t
 that the device layer will drain. **R16** (every read-write share): `com.apple.quarantine` = `0081;<hex seconds>;Winter Cowork;` by
 `fsetxattr` on the server's own descriptor, on CREATE, MKDIR, a SETATTR adding an execute bit, and a write-open or truncate of an
 executable; a tag failure is `EIO` and a new node is removed. Still not wired: no device, export or gate change.
+Symbolic links (follow-up after review): no link is made, moved or hard-linked into a `.git` chain or the zone except git's own
+`core.symlinks` probe; a protected name or a `.git` that is a link made on the Mac is resolved by the server's own walk inside the share
+and what it reaches is held immutable (a linked `.git` makes its git directory the zone instead); the written path of every tracked
+target, and each link on its way, is a protected name that cannot be removed, moved, replaced or re-pointed; a config the server cannot
+read or parse fails closed (held immutable, reported); nested git directories below `modules/` and `worktrees/` are read at discovery,
+and past 4,096 directories the whole git directory is held immutable.
 
 ## Production ABI (`include/libkrun.h` after the queue)
 
