@@ -186,6 +186,31 @@ final class DispatchPillController: ObservableObject {
     /// A click on the card is what made the panel key (the pill was resting): when the card leaves, the keyboard goes
     /// back to the app the user was in, as Esc would hand it back.
     private var cardEngagedPanel = false
+    /// A message was just SENT (not steered) and the turn it starts has not reached the pill yet: the daemon appends the
+    /// `turn_started` before it answers the send, but the event comes over the session feed (a reader task, then a
+    /// main-actor drain) while the answer resumes the submit directly — so the answer usually lands FIRST. Without
+    /// this the pill showed, for that gap, the idle compact pill (the "Type here" placeholder, the voice glyph, an
+    /// empty composer) between the typing pill and the working one, and the circle swapped send → voice → stop: the
+    /// rapid flashes after Enter (user, 2026-10-20). Held from the send's answer until the turn shows as running,
+    /// ends (`completedTurns`), or `turnStartGrace` passes with neither.
+    @Published private(set) var awaitingTurnStart = false
+    private var awaitingTurnStartGeneration = 0
+    /// `completedTurns` when the hold began: a turn ending since (an error before it ever ran) ends the hold too.
+    private var completedTurnsAtAwait = 0
+    private struct TurnStartSignal: Equatable {
+        let running: Bool
+        let completed: Int
+    }
+    /// How long the working look is held for a turn that does not show up — a send the daemon held (a handoff in
+    /// progress), never a normal one, whose `turn_started` is already on its way when the answer lands.
+    static let turnStartGrace: TimeInterval = 5
+    /// Tests shorten the grace.
+    var turnStartGraceOverrideForTesting: TimeInterval?
+
+    /// Whether the pill wears a running turn's look (the plume, the stop circle): the session's turn is running, or
+    /// a message was just sent and its turn is on its way (`awaitingTurnStart`).
+    var showsTurnRunning: Bool { adapter.turnRunning || awaitingTurnStart }
+
     /// A short line a command left above the pill (`DispatchPillNoticePill`), cleared after a few seconds.
     @Published private(set) var commandNotice: String?
     private var noticeTask: Task<Void, Never>?
@@ -691,6 +716,7 @@ final class DispatchPillController: ObservableObject {
         let stayFullScreen = presentation == .fullScreen
         // Steer or send is decided at Enter, as the code windows decide it.
         let steer = session.state.turnRunning
+        let completedAtEnter = session.state.completedTurns
         Task { @MainActor [weak self] in
             guard let self else { return }
             let sentAttachments: Set<Int>?
@@ -701,6 +727,11 @@ final class DispatchPillController: ObservableObject {
             }
             self.adapter.endComposerSubmit()
             guard let sentAttachments else { return } // failure: the draft (and its chips) stays — never lost
+            // A send (not a steer) whose turn has not shown up yet, and has not come and gone either: hold the working
+            // look until it does, so the pill goes from typing straight to working (`awaitingTurnStart`).
+            if !self.session.state.turnRunning, self.session.state.completedTurns == completedAtEnter {
+                self.beginAwaitingTurnStart()
+            }
             self.adapter.composerSendSucceeded(sentDraft: text, sentAttachments: sentAttachments)
             self.commandMode.reset()
             self.draftCache.clear()
@@ -715,6 +746,23 @@ final class DispatchPillController: ObservableObject {
 
     /// The stop button.
     func interrupt() { onInterrupt?() }
+
+    private func beginAwaitingTurnStart() {
+        awaitingTurnStartGeneration += 1
+        let generation = awaitingTurnStartGeneration
+        completedTurnsAtAwait = session.state.completedTurns
+        awaitingTurnStart = true
+        let grace = turnStartGraceOverrideForTesting ?? Self.turnStartGrace
+        DispatchQueue.main.asyncAfter(deadline: .now() + grace) { [weak self] in
+            guard let self, generation == self.awaitingTurnStartGeneration else { return }
+            self.endAwaitingTurnStart()
+        }
+    }
+
+    private func endAwaitingTurnStart() {
+        awaitingTurnStartGeneration += 1
+        if awaitingTurnStart { awaitingTurnStart = false }
+    }
 
     // MARK: - Attachments (2026-10-19)
 
@@ -979,12 +1027,21 @@ final class DispatchPillController: ObservableObject {
     /// The running tool's name, nil while thinking.
     var runningToolName: String? { workingToolName(session.state.status) }
 
-    /// What the working plume throws: the running turn's tool uses so far (`plumeThrows(for:)`).
-    var plumeThrows: [PlumeThrow] { Winter.plumeThrows(for: session.state.exchanges.last) }
+    /// What the working plume throws: the running turn's tool uses so far (`plumeThrows(for:)`). Nothing while a sent
+    /// message's turn is still on its way (`awaitingTurnStart`): the last exchange is the PREVIOUS turn's until the
+    /// new one opens, and its tools must not leave the nozzle again.
+    var plumeThrows: [PlumeThrow] {
+        plumeExchangeIsTheTurns ? Winter.plumeThrows(for: session.state.exchanges.last) : []
+    }
 
     /// The current tool round's throws, which the plume streams again while the round runs
-    /// (`plumeRepeatingThrows(for:)`).
-    var plumeRepeatingThrows: [PlumeThrow] { Winter.plumeRepeatingThrows(for: session.state.exchanges.last) }
+    /// (`plumeRepeatingThrows(for:)`) — none while the turn is on its way, as `plumeThrows`.
+    var plumeRepeatingThrows: [PlumeThrow] {
+        plumeExchangeIsTheTurns ? Winter.plumeRepeatingThrows(for: session.state.exchanges.last) : []
+    }
+
+    /// The last exchange belongs to the turn the plume stands for: a turn is running (a held send's is not yet).
+    private var plumeExchangeIsTheTurns: Bool { session.state.turnRunning || !awaitingTurnStart }
 
     /// The swiped-to turn's preview, or nil at the composer.
     var turnPreview: DispatchPillTurnPreview? {
@@ -1574,6 +1631,11 @@ final class DispatchPillController: ObservableObject {
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
     var composerTextViewForTesting: NSTextView? { composerView?.documentView as? NSTextView }
+    /// The bar's look as `DispatchPillComposerBar` derives it now (`dispatchPillBarLook`).
+    var barLookForTesting: DispatchPillBarLook {
+        dispatchPillBarLook(expanded: presentation == .expanded, running: showsTurnRunning, draft: adapter.composerDraft,
+                            cardShown: cardShowsOnPill && frontCard != nil, verbText: adapter.verbText)
+    }
     /// The floating layers' (cards + child row) last reported frame, canvas coordinates.
     var accessoryFrameForTesting: CGRect { accessoryFrame }
 
@@ -1982,6 +2044,18 @@ final class DispatchPillController: ObservableObject {
             .sink { [weak self] running in
                 guard !running else { return }
                 DispatchQueue.main.async { self?.revealReplyIfDue() }
+            }
+            .store(in: &cancellables)
+
+        // The sent message's turn showed up (running), or came and went (`completedTurns` — an error before it ran):
+        // the session's own state carries the look from here (`awaitingTurnStart`). Read off the sink's argument —
+        // `$state` publishes on willSet.
+        session.$state
+            .map { TurnStartSignal(running: $0.turnRunning, completed: $0.completedTurns) }
+            .removeDuplicates()
+            .sink { [weak self] signal in
+                guard let self, self.awaitingTurnStart else { return }
+                if signal.running || signal.completed != self.completedTurnsAtAwait { self.endAwaitingTurnStart() }
             }
             .store(in: &cancellables)
     }
