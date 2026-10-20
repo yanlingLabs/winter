@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
+import { BIND_DETAIL_CAP, ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, helperDetail, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -736,6 +736,36 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(text(r)).toContain("screenshot({ live: true, reason }) takes one where the window is (the user is asked first)");
     expect(label.length).toBeLessThan(SCREENSHOT_DETAIL_CAP);
   }, 30_000);
+
+  macOnly("a bind's off-desktop note reaches the model whole (the 300-character cap cut it mid-word)", async () => {
+    const w = world();
+    // The helper's words as the live Dispatch run got them (2026-10-20), cut at "…each screenshot says ho".
+    const note = "Notes's window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (each screenshot says how fresh it is) — screenshot({ live: true, reason }) gets what is on screen now, and an action that can't land from here asks the user to let Winter take them to its desktop for a moment (and back)";
+    expect(note.length).toBeGreaterThan(300);
+    expect(note.length).toBeLessThan(BIND_DETAIL_CAP);
+    const notesApp = w.fake.apps.find((a) => a.bundleId === "com.apple.Notes")!;
+    w.fake.handlers["target.bind"] = () => {
+      (w.fake as unknown as { targets: Map<string, unknown> }).targets.set("t1", notesApp);
+      return { targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 9, title: "Notes window", frame: [0, 0, 800, 600] }, detail: note };
+    };
+    const r = await w.run("const notes = await apps.open('Notes')");
+    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain(`${note}\n`);
+    const quiet = await w.run("const again = await apps.open('Notes', { emit: false })");
+    expect(text(quiet)).toContain("asks the user to let Winter take them to its desktop for a moment (and back)");
+  }, 30_000);
+
+  test("helperDetail: a note past its cap is cut at a clause boundary and says so — never mid-word", () => {
+    const long = `${"word ".repeat(30).trim()}, then the second clause runs on and on ${"more ".repeat(40).trim()}`;
+    const cut = helperDetail(long, 200)!;
+    expect(cut.length).toBeLessThanOrEqual(200);
+    expect(cut).toBe(`${"word ".repeat(30).trim()}…`);
+    // No boundary in the back half: the last whole word.
+    expect(helperDetail("alpha beta gamma delta epsilon", 14)).toBe("alpha beta…");
+    // Within the cap: whitespace folded, nothing added; nothing to say → undefined.
+    expect(helperDetail("  one\n two  ", 300)).toBe("one two");
+    expect(helperDetail("   ", 300)).toBeUndefined();
+    expect(helperDetail(42, 300)).toBeUndefined();
+  });
 
   macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {
     const w = world();

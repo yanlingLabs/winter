@@ -779,7 +779,7 @@ export class ComputerV2Service {
         if (typeof res?.window?.id === "number" && res.window.id > 0) t.windowId = res.window.id; else delete t.windowId;
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
         ctx.state.lastTargetShot.delete(targetId);
-        const detail = helperDetail(res?.detail);
+        const detail = helperDetail(res?.detail, BIND_DETAIL_CAP);
         if (detail !== undefined) ctx.builder.daemonLine(detail);
         if (res?.webContent === true) this.hoverNote(ctx, t);
         return undefined;
@@ -981,7 +981,7 @@ export class ComputerV2Service {
     // `{ emit: false }`: bound, nothing of the window read or printed (no screen read, no diff base) — what the bind had
     // to do and Winter's own adapter block still say themselves.
     if (req.quiet === true) {
-      const detail = helperDetail(res.detail);
+      const detail = helperDetail(res.detail, BIND_DETAIL_CAP);
       if (detail !== undefined) ctx.builder.daemonLine(detail);
       if (res.webContent === true) this.hoverNote(ctx, info);
       const adapted = await this.deps.adapters?.onBind(this.adapterScope(ctx, metric), info);
@@ -1000,7 +1000,7 @@ export class ComputerV2Service {
     metric.settleExit = snap.settled ? "quiet" : "cap";
     // What the bind had to do to reach a window (another Space, a new window): the first line of its state,
     // outside the fence — the helper's fixed wording, not screen text.
-    const detail = helperDetail(res.detail);
+    const detail = helperDetail(res.detail, BIND_DETAIL_CAP);
     if (detail !== undefined) ctx.builder.daemonLine(detail);
     if (res.webContent === true) this.hoverNote(ctx, info);
     if (base !== undefined && snap.isDiff === true) {
@@ -2075,11 +2075,23 @@ export function countCharacters(text: string): string {
  *  act (its detail + the off-desktop caveat, which comes last). */
 export const SCREENSHOT_DETAIL_CAP = 800;
 export const ACT_DETAIL_CAP = 1_000;
+/** A bind's or `useWindow`'s note: what reaching the window took, and — for a window on another desktop — the guidance
+ *  for working it from here (the helper's sentence runs past 400 characters; the 300 default cut it mid-word, live
+ *  2026-10-20: "…each screenshot says ho"). */
+export const BIND_DETAIL_CAP = 1_000;
 
-function helperDetail(detail: unknown, cap = 300): string | undefined {
+/** The helper's own sentence, whitespace folded, within `cap` characters. One that runs past the cap is cut at its last
+ *  sentence or clause boundary inside it (else its last word) and says it was cut — never mid-word. */
+export function helperDetail(detail: unknown, cap = 300): string | undefined {
   if (typeof detail !== "string") return undefined;
-  const line = detail.replace(/\s+/g, " ").trim().slice(0, cap);
-  return line.length === 0 ? undefined : line;
+  const line = detail.replace(/\s+/g, " ").trim();
+  if (line.length === 0) return undefined;
+  if (line.length <= cap) return line;
+  const room = line.slice(0, Math.max(0, cap - 1));
+  const clause = Math.max(room.lastIndexOf(". "), room.lastIndexOf("; "), room.lastIndexOf(" — "), room.lastIndexOf(", "));
+  const word = room.lastIndexOf(" ");
+  const end = clause >= cap / 2 ? clause : word > 0 ? word : room.length;
+  return `${room.slice(0, end).trimEnd()}…`;
 }
 
 /** What the worker appends to an error thrown inside a saved script (`worker/runtime.ts`'s `savedPlace`). */
