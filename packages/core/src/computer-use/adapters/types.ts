@@ -22,6 +22,9 @@ export interface AppAdapter {
   versions?: { min?: string; max?: string };
   /** At most one guide: id `"<key>@<rev>"` (a content change bumps the rev), text ≤ 2,000 UTF-8 bytes. */
   guide?: { id: string; text: string };
+  /** A browser's guide while Winter for Chrome is NOT connected in it (`AppAdaptersDeps.browserConnected` false): its tabs
+   *  can't be bound then, so the guide must not send the model to `browsers.tab`. Same limits and id rules as `guide`. */
+  guideWithoutExtension?: { id: string; text: string };
   extras: readonly ExtraDef[];
 }
 

@@ -629,6 +629,16 @@ export class BrowserEngine {
     }
   }
 
+  /** Is Winter for Chrome connected in the browser with this bundle id? Its own instance when one is registered, else any
+   *  of its family's; undefined for an app that is not a browser of the Chromium family (the app guides' switch). */
+  connectedForBundle(bundleId: string): boolean | undefined {
+    const family = browserForBundleId(bundleId)?.family;
+    if (family === undefined) return undefined;
+    const rows = this.deps.registry.list();
+    const own = rows.filter((r) => r.bundleId !== undefined && r.bundleId.toLowerCase() === bundleId.toLowerCase());
+    return (own.length > 0 ? own : rows.filter((r) => r.family === family)).some((r) => r.connected);
+  }
+
   /** The backends for `computerUse.status` and `browsers.list()`. */
   listRows(): BrowserListRow[] {
     const rows = new Map<string, BrowserListRow>();

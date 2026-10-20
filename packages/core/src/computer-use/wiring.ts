@@ -284,7 +284,12 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
 
   const recentApps = new RecentApps(deps.home);
   const diffBases = new DiffBases();
-  const adapters = new AppAdapters({ ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log });
+  // Late-bound: the browser engine is built below; until then (and for a non-browser) the ordinary guide.
+  let browsersForGuides: { connectedForBundle(bundleId: string): boolean | undefined } | undefined;
+  const adapters = new AppAdapters({
+    ...(deps.inject?.adapters === undefined ? {} : { extra: deps.inject.adapters }), log,
+    browserConnected: (bundleId) => browsersForGuides?.connectedForBundle(bundleId),
+  });
   // Late-bound: the helper's notifications go to the service, which is built after the helper — and to the wake
   // registry's backends (the app backend routes the helper's `watchEvent`).
   let service: ComputerV2Service | undefined;
@@ -415,6 +420,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     ownAppInputAt: (bundleId, at) => service?.ownAppInputAt(bundleId, at) === true,
     log,
   });
+  browsersForGuides = browsers;
 
   // Wake triggers (2026-10-12): the registry, and the two backends it routes to by target kind — a tab binding → the
   // browser engine's backend, an app target → the helper's. A test daemon may inject fakes in their place.
