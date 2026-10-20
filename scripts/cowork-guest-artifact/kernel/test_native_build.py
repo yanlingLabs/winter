@@ -78,7 +78,7 @@ class CommandTests(unittest.TestCase):
 
 class PathIndependenceTests(unittest.TestCase):
     """The kernel must not carry the runner's work path: run 39471145301 differed from run 39406043639 only by the random work folder."""
-    WORK = "/home/runner/work/_temp/winter-kernel-work"
+    WORK = "/runner-temp/winter-kernel-work"
 
     def test_the_build_passes_file_debug_and_macro_prefix_maps_for_the_work_folder_to_c_and_assembly(self):
         env = nb.build_environment("/w/llvm/bin", self.WORK)
