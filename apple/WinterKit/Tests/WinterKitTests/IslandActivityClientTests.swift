@@ -23,7 +23,26 @@ final class IslandActivityClientTests: XCTestCase {
         XCTAssertEqual(snapshot.watches, [IslandWatchItem(sessionId: "s2", wakeId: "wk_1", condition: "clicked",
                                                           targetLabel: "Chrome — Dashboard", elementLabel: "“Submit”",
                                                           armedAt: 5, expiresAt: 99, session: IslandSessionFacts(mode: "dispatch"))])
+        XCTAssertEqual(snapshot.usageAlarms, [], "an older daemon sends no alarms")
         XCTAssertEqual(WinterClient.decodeIslandActivity(.object([:])), .empty, "an older daemon's empty answer")
+    }
+
+    func testAFiredPlanAlarmDecodesAndAMalformedOneIsSkipped() throws {
+        let json = #"""
+        {"computerUse":[],"results":[],"watches":[],
+         "usageAlarms":[{"id":"al-1","provider":"claude-code","windowKey":"weekly","kind":"weekly","windowMinutes":10080,
+                         "thresholdPercent":80,"usedPercent":81.5,"resetsAt":1760900000000,"at":1760800000000},
+                        {"id":"al-2","provider":"antigravity","windowKey":"weekly:claude & gpt","kind":"weekly","scope":"Claude & GPT",
+                         "thresholdPercent":50,"usedPercent":50,"at":5},
+                        {"id":"al-3","provider":"codex","kind":"five_hour","thresholdPercent":50,"usedPercent":51,"at":5}]}
+        """#
+        let snapshot = WinterClient.decodeIslandActivity(try JSONDecoder().decode(JSONValue.self, from: Data(json.utf8)))
+        XCTAssertEqual(snapshot.usageAlarms, [
+            IslandUsageAlarmItem(id: "al-1", provider: "claude-code", windowKey: "weekly", kind: "weekly", windowMinutes: 10080,
+                                 thresholdPercent: 80, usedPercent: 81.5, resetsAt: 1_760_900_000_000, at: 1_760_800_000_000),
+            IslandUsageAlarmItem(id: "al-2", provider: "antigravity", windowKey: "weekly:claude & gpt", kind: "weekly", scope: "Claude & GPT",
+                                 thresholdPercent: 50, usedPercent: 50, at: 5),
+        ], "the one with no window key is skipped")
         XCTAssertEqual(WinterClient.islandActivityChangedNotification, "island.activityChanged")
     }
 }

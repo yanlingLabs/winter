@@ -140,6 +140,18 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertTrue(seen.allSatisfy { !$0.contains(.opencode) })
     }
 
+    func testTheWindowShowsTheIslandsPlansUntilItsOwnAnswerLands() async {
+        // User 2026-10-19: the cached limits until the fresh read arrives — the window opens on the island's last plans.
+        let model = UsageWindowModel()
+        model.seed = UsageSummary(range: "24h", codexPlan: UsagePlanReading(provider: "codex", source: "codex-app-server", at: 1, windows: []))
+        XCTAssertEqual(model.plansSummary?.codexPlan?.source, "codex-app-server")
+        model.fetchSeries = { r, _ in UsageSeries(range: r.rawValue) }
+        model.fetchSummary = { r, _ in UsageSummary(range: r.rawValue) }
+        await model.refresh()
+        // Its own answer replaces the seed.
+        XCTAssertNil(model.plansSummary?.codexPlan)
+    }
+
     func testTheWindowModelSendsEachTrackingSwitch() async {
         let model = UsageWindowModel()
         var sent: [[Bool?]] = []
@@ -211,12 +223,176 @@ final class UsageWindowTests: XCTestCase {
         XCTAssertEqual(UsagePlanSlotCard.headerScale(hovered: false), 1)
     }
 
+    /// The ticks (and the marker) are taller than the track: they must never size it. In the track's stack they did, and
+    /// the fill stretched to their height — the line thickened under an alarm (user 2026-10-19). Drawn: the fill's rows,
+    /// in a column clear of the tick, are the line's own thickness, with and without a tick.
+    @MainActor
+    func testAnAlarmTickNeverThickensTheLine() throws {
+        func fillRows(_ alarms: [UsageAlarm]) throws -> Int {
+            let ring = UsagePlanRing(id: "weekly", title: "Weekly", fraction: 0.5, resets: nil, stale: false)
+            let view = UsagePlanLine(ring: ring, color: Color(red: 1, green: 0, blue: 0), compact: true, alarms: alarms)
+                .frame(width: 300).background(Color.black)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            let image = try XCTUnwrap(renderer.cgImage)
+            let w = image.width, h = image.height
+            var px = [UInt8](repeating: 0, count: w * h * 4)
+            let ctx = try XCTUnwrap(CGContext(data: &px, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                              space: CGColorSpaceCreateDeviceRGB(),
+                                              bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue))
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+            // A column inside the fill (about a quarter along the track), far from the 80 % tick.
+            let x = Int(Double(w) * 0.32)
+            return (0..<h).filter { y in let i = (y * w + x) * 4; return px[i] > 200 && px[i + 1] < 60 && px[i + 2] < 60 }.count
+        }
+        let plain = try fillRows([])
+        let ticked = try fillRows([UsageAlarm(id: "a", provider: "codex", windowKey: "weekly", thresholdPercent: 80)])
+        XCTAssertEqual(plain, Int(UsagePlanLine.thickness(compact: true, hovered: false) * 2), accuracy: 1)
+        XCTAssertEqual(ticked, plain, "a tick must not thicken the line")
+    }
+
     func testTheHoverFiguresAreUsedAndLeftSummingToAHundred() {
         XCTAssertEqual(UsagePlanLine.percents(0.344).used, 34)
         XCTAssertEqual(UsagePlanLine.percents(0.344).left, 66)
         XCTAssertEqual(UsagePlanLine.percents(0.995).used + UsagePlanLine.percents(0.995).left, 100)
         XCTAssertEqual(UsagePlanLine.percents(-0.2).used, 0)
         XCTAssertEqual(UsagePlanLine.percents(1.4).left, 0)
+    }
+
+    // MARK: alarms
+
+    func testThePointersPercentAccountsForTheHoveredTracksGrowth() {
+        // The track rests at x 60…260 in its row; under the pointer it reaches out 9.48 pt at each end.
+        let slot = CGRect(x: 60, y: 4, width: 200, height: 5)
+        let grow = UsagePlanLine.lengthGrowth(hovered: true)
+        let hovered = UsageAlarmRules.trackPoint(rowX: 210, slot: slot, hovered: true)!
+        XCTAssertEqual(hovered.width, 200 + grow, accuracy: 1e-9)
+        XCTAssertEqual(hovered.x, 150 + grow / 2, accuracy: 1e-9)
+        XCTAssertEqual(UsageAlarmRules.percent(x: hovered.x, width: hovered.width), 73, "three quarters of the RESTING track is 73 % of the grown one")
+        let resting = UsageAlarmRules.trackPoint(rowX: 210, slot: slot, hovered: false)!
+        XCTAssertEqual(UsageAlarmRules.percent(x: resting.x, width: resting.width), 75)
+        // The middle is the middle either way; the grown ends are on the track only while hovered.
+        let mid = UsageAlarmRules.trackPoint(rowX: 160, slot: slot, hovered: true)!
+        XCTAssertEqual(UsageAlarmRules.percent(x: mid.x, width: mid.width), 50)
+        XCTAssertNotNil(UsageAlarmRules.trackPoint(rowX: 55, slot: slot, hovered: true))
+        XCTAssertNil(UsageAlarmRules.trackPoint(rowX: 55, slot: slot, hovered: false))
+        XCTAssertNil(UsageAlarmRules.trackPoint(rowX: 40, slot: slot, hovered: true), "the title column is not the track")
+        // The ends: never 0 %, at most 100 %.
+        XCTAssertEqual(UsageAlarmRules.percent(x: 0, width: 200), 1)
+        XCTAssertEqual(UsageAlarmRules.percent(x: 200, width: 200), 100)
+        XCTAssertEqual(UsageAlarmRules.tickX(80, width: 200), 160)
+    }
+
+    func testAClickOnATickRemovesTheNearestWithinAFewPoints() {
+        let alarms = [UsageAlarm(id: "a80", provider: "codex", windowKey: "weekly", thresholdPercent: 80),
+                      UsageAlarm(id: "a82", provider: "codex", windowKey: "weekly", thresholdPercent: 82)]
+        XCTAssertEqual(UsageAlarmRules.tickHit(x: 161, width: 200, alarms: alarms)?.id, "a80")
+        XCTAssertEqual(UsageAlarmRules.tickHit(x: 163.5, width: 200, alarms: alarms)?.id, "a82")
+        XCTAssertNil(UsageAlarmRules.tickHit(x: 160 - UsageAlarmRules.tickTolerance - 0.5, width: 200, alarms: alarms))
+        XCTAssertEqual(UsageAlarmRules.tap(x: 161, width: 200, usedPercent: 10, alarms: alarms), .remove("a80"))
+        // A tick below what is used still comes off (it may not have fired yet).
+        XCTAssertEqual(UsageAlarmRules.tap(x: 160, width: 200, usedPercent: 95, alarms: alarms), .remove("a80"))
+    }
+
+    func testAClickAtOrBelowWhatIsUsedIsAlreadyPast() {
+        XCTAssertTrue(UsageAlarmRules.isAlreadyPast(thresholdPercent: 45, usedPercent: 45))
+        XCTAssertTrue(UsageAlarmRules.isAlreadyPast(thresholdPercent: 45, usedPercent: 45.4))
+        XCTAssertFalse(UsageAlarmRules.isAlreadyPast(thresholdPercent: 46, usedPercent: 45.4))
+        XCTAssertEqual(UsageAlarmRules.tap(x: 90, width: 200, usedPercent: 45.4, alarms: []), .alreadyPast)
+        XCTAssertEqual(UsageAlarmRules.tap(x: 92, width: 200, usedPercent: 45.4, alarms: []), .set(46))
+        XCTAssertEqual(UsageAlarmRules.tap(x: 200, width: 200, usedPercent: 99.6, alarms: []), .set(100))
+        XCTAssertEqual(UsageAlarmRules.tap(x: 200, width: 200, usedPercent: 100, alarms: []), .alreadyPast)
+        // A stale line's share is not what is used now: no "Already past" there.
+        XCTAssertEqual(UsageAlarmRules.tap(x: 90, width: 200, usedPercent: 45.4, stale: true, alarms: []), .set(45))
+    }
+
+    func testTheMarkersLabelSitsRightUnlessItRunsOffAndTheWordsUnderItStepAside() {
+        // Half used on 300 pt: the used figure ends at 150, the left one sits at 270…300.
+        let atFillEnd = UsageAlarmRules.markerLayout(x: 145, width: 300, fraction: 0.5, compact: true, resetWidth: 0)
+        XCTAssertTrue(atFillEnd.labelOnRight)
+        XCTAssertTrue(atFillEnd.hidesUsed)
+        XCTAssertFalse(atFillEnd.hidesLeft)
+        let atEnd = UsageAlarmRules.markerLayout(x: 290, width: 300, fraction: 0.5, compact: true, resetWidth: 0)
+        XCTAssertFalse(atEnd.labelOnRight, "no room right of it: the label goes left")
+        XCTAssertTrue(atEnd.hidesLeft)
+        XCTAssertFalse(atEnd.hidesUsed)
+        let clear = UsageAlarmRules.markerLayout(x: 60, width: 300, fraction: 0.5, compact: true, resetWidth: 0)
+        XCTAssertEqual(clear, .init(labelOnRight: true, hidesUsed: false, hidesLeft: false, hidesReset: false))
+        // The reset words in the grey (a fifth used): a marker over them hides them.
+        let words = UsagePlanLine.resetWidth("Resets Oct 19 at 2pm")
+        XCTAssertTrue(UsageAlarmRules.markerLayout(x: 200, width: 300, fraction: 0.2, compact: true, resetWidth: words).hidesReset)
+        XCTAssertFalse(UsageAlarmRules.markerLayout(x: 70, width: 300, fraction: 0.2, compact: true, resetWidth: words).hidesReset)
+    }
+
+    func testEachRingCarriesItsWindowsStableKey() {
+        let reading = UsagePlanReading(provider: "claude-code", source: "claude-cli", at: ms(0), windows: [
+            UsagePlanWindow(id: "weekly_scoped:Fable:2", kind: "weekly_scoped", usedPercent: 80, scope: "Fable", windowKey: "weekly_scoped:fable"),
+            UsagePlanWindow(id: "session:0", kind: "five_hour", usedPercent: 10),
+        ])
+        XCTAssertEqual(UsagePresentation.rings(reading, now: now).map(\.alarmKey), ["five_hour", "weekly_scoped:fable"])
+        // An older daemon sends no key: the same rule, in the app.
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "g", kind: "weekly", usedPercent: 1, scope: "Claude & GPT")), "weekly:claude & gpt")
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "o", kind: "other", windowMinutes: 1440, usedPercent: 1)), "other@1440")
+        // A per-model limit by its model family, whichever of Claude Code's sources named it (the daemon's rule).
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "x", kind: "weekly_scoped", usedPercent: 1, scope: "Claude Opus 4.5")),
+                       "weekly_scoped:opus")
+        XCTAssertEqual(UsagePresentation.windowKey(UsagePlanWindow(id: "y", kind: "weekly_scoped", usedPercent: 1, scope: "opus")), "weekly_scoped:opus")
+    }
+
+    func testTheAlarmsNotificationNamesThePlanTheWindowAndTheThresholdAndWhenItResets() {
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        let en = Locale(identifier: "en_US")
+        let weekly = IslandUsageAlarmItem(id: "a", provider: "claude-code", windowKey: "weekly", kind: "weekly", windowMinutes: 10_080,
+                                          thresholdPercent: 80, usedPercent: 81, resetsAt: ms(30 * 3600), at: 0)
+        XCTAssertEqual(UsagePresentation.alarmNoticeTitle(weekly), "Claude Code · Weekly at 80%")
+        XCTAssertEqual(UsagePresentation.alarmNoticeDetail(weekly, now: now, calendar: utc, locale: en),
+                       UsagePresentation.hoverResetWords(Date(timeIntervalSince1970: ms(30 * 3600) / 1000), now: now, calendar: utc, locale: en))
+        XCTAssertEqual(UsagePresentation.alarmNoticeDetail(weekly, now: now, calendar: utc, locale: en)?.hasPrefix("Resets "), true)
+        let other = IslandUsageAlarmItem(id: "b", provider: "antigravity", windowKey: "weekly:claude & gpt", kind: "weekly", scope: "Claude & GPT",
+                                         thresholdPercent: 80, usedPercent: 80, at: 0)
+        XCTAssertEqual(UsagePresentation.alarmNoticeTitle(other), "Antigravity · Other W at 80%")
+        XCTAssertNil(UsagePresentation.alarmNoticeDetail(other, now: now), "no reset: no second line")
+        let fable = IslandUsageAlarmItem(id: "c", provider: "claude-code", windowKey: "weekly_scoped:fable", kind: "weekly_scoped", scope: "Fable",
+                                         thresholdPercent: 90, usedPercent: 90, resetsAt: ms(-60), at: 0)
+        XCTAssertEqual(UsagePresentation.alarmNoticeTitle(fable), "Claude Code · Fable at 90%")
+        XCTAssertNil(UsagePresentation.alarmNoticeDetail(fable, now: now), "a passed reset says nothing")
+        XCTAssertEqual(UsagePresentation.alarmNoticeTitle(IslandUsageAlarmItem(id: "d", provider: "codex", windowKey: "five_hour", kind: "five_hour",
+                                                                               thresholdPercent: 50, usedPercent: 50, at: 0)),
+                       "Codex · 5-hour at 50%")
+    }
+
+    func testBothModelsTakeTheAlarmsFromTheSummaryAndApplyEachEditsAnswer() async {
+        let first = [UsageAlarm(id: "a1", provider: "codex", windowKey: "five_hour", thresholdPercent: 50)]
+        let island = IslandUsageModel()
+        island.fetchSummary = { r in UsageSummary(range: r.rawValue, alarms: first) }
+        var asked: [(String, String, Int)] = []
+        island.setAlarm = { p, k, t in asked.append((p, k, t)); return first + [UsageAlarm(id: "a2", provider: p, windowKey: k, thresholdPercent: t)] }
+        island.removeAlarm = { _ in [] }
+        XCTAssertNil(island.alarmActions, "no answer yet: the lines take no clicks")
+        await island.refreshSummary()
+        XCTAssertEqual(island.alarms, first)
+        island.alarmActions?.set("claude-code", "weekly", 80)
+        for _ in 0..<100 where island.alarms?.count != 2 { await Task.yield() }
+        XCTAssertEqual(asked.first?.0, "claude-code")
+        XCTAssertEqual(asked.first?.2, 80)
+        XCTAssertEqual(island.alarms?.map(\.id), ["a1", "a2"])
+        island.alarmActions?.remove("a1")
+        for _ in 0..<100 where island.alarms?.isEmpty != true { await Task.yield() }
+        XCTAssertEqual(island.alarms, [])
+        // An older daemon (no alarms in its summary): no clicks.
+        island.fetchSummary = { r in UsageSummary(range: r.rawValue) }
+        await island.refreshSummary()
+        XCTAssertNil(island.alarmActions)
+
+        let window = UsageWindowModel()
+        window.fetchSummary = { r, _ in UsageSummary(range: r.rawValue, alarms: first) }
+        window.setAlarm = { p, k, t in [UsageAlarm(id: "w1", provider: p, windowKey: k, thresholdPercent: t)] }
+        await window.refresh()
+        XCTAssertEqual(window.alarms, first)
+        window.alarmActions?.set("antigravity", "weekly:gemini", 70)
+        for _ in 0..<100 where window.alarms?.first?.id != "w1" { await Task.yield() }
+        XCTAssertEqual(window.alarms, [UsageAlarm(id: "w1", provider: "antigravity", windowKey: "weekly:gemini", thresholdPercent: 70)])
     }
 
     func testResetWordsCountDownAShortWindowAndDateALongOne() {

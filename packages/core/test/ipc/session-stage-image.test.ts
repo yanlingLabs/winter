@@ -6,20 +6,20 @@
 // never over anything — and the daemon never writes through an agent-planted symlink (the session temp
 // dir is a sandbox WRITABLE root).
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
-import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   ConnWriter, ERR, IMAGE_DATA_INVALID, IMAGE_INPUT_UNSUPPORTED, IMAGE_INPUT_UNSUPPORTED_MESSAGE, IMAGE_SESSION_NOT_CODE,
   IMAGE_SESSION_NO_MODEL, IMAGE_SESSION_NO_MODEL_MESSAGE, IMAGE_STAGE_FAILED, IMAGE_TOO_LARGE, IMAGE_TOO_LARGE_MESSAGE, IMAGE_TYPE_MISMATCH, IMAGE_TYPE_UNSUPPORTED, LineDecoder, METHODS, PROTOCOL_VERSION,
-  IMAGE_FILE_EXTENSIONS, NDJSON_MAX_LINE_BYTES, STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_LINE_HEADROOM_BYTES, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MEDIA_TYPES, encodeLine, type WritableSocket,
+  IMAGE_FILE_EXTENSIONS, NDJSON_MAX_LINE_BYTES, STAGE_IMAGE_B64_MAX_LENGTH, STAGE_IMAGE_LINE_HEADROOM_BYTES, STAGE_IMAGE_MAX_BYTES, STAGE_IMAGE_MEDIA_TYPES, encodeLine, type SessionEvent, type WritableSocket,
 } from "@yanlinglabs/winter-protocol";
 import { loadCatalog } from "@yanlinglabs/winter-provider-catalog";
 import { startIpcServer, REMOTE_ALLOWED_METHODS } from "../../src/ipc/server";
 import { SessionStore } from "../../src/sessions/store";
 import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
-import { StageImageRefusal, decodeStrictBase64, imageDimensions, sniffImageMediaType, stageSessionImage } from "../../src/agent/stage-image";
+import { STAGED_IMAGE_RETENTION_MS, StageImageRefusal, decodeStrictBase64, imageDimensions, pruneStagedImages, sniffImageMediaType, stageSessionImage, stagedPathsNamedBy } from "../../src/agent/stage-image";
 import { makePng } from "../helpers/png-fixture";
 import { execFileSync } from "node:child_process";
 
@@ -297,17 +297,21 @@ describe("session.stageImage (code-mode image input)", () => {
     expect(imageDimensions(new Uint8Array([0xff, 0xd8, 0xff]))).toBeUndefined();
   });
 
-  test("code sessions only: a chat or dispatch session refuses image_session_not_code; an absent mode is code", async () => {
+  test("code and dispatch sessions only: a chat session refuses image_session_not_code; an absent mode is code", async () => {
     const { store, c } = await boot();
-    for (const mode of ["chat", "dispatch"] as const) {
-      const sid = store.createSession("global", { mode, model: IMAGE_TAG });
-      const res = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) });
-      expect(res.error.code).toBe(ERR.INVALID_PARAMS);
-      expect(res.error.data).toEqual({ code: IMAGE_SESSION_NOT_CODE });
-      expect(existsSync(join(tmpBase, `winter-session-${sid}`, "images"))).toBe(false);
+    const chat = store.createSession("global", { mode: "chat", model: IMAGE_TAG });
+    const res = await c.request(METHODS.sessionStageImage, { sessionId: chat, mediaType: "image/png", dataBase64: b64(PNG) });
+    expect(res.error.code).toBe(ERR.INVALID_PARAMS);
+    expect(res.error.data).toEqual({ code: IMAGE_SESSION_NOT_CODE });
+    expect(res.error.message).toBe("images can only be added to code and dispatch sessions");
+    expect(existsSync(join(tmpBase, `winter-session-${chat}`, "images"))).toBe(false);
+    // Dispatch (2026-10-19) and code stage alike; an absent mode is code.
+    for (const mode of ["code", "dispatch", undefined] as const) {
+      const sid = store.createSession("global", { ...(mode === undefined ? {} : { mode }), model: IMAGE_TAG });
+      const ok = await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) });
+      expect(ok.error).toBeUndefined();
+      expect(ok.result.path).toBe(join(imagesDirOf(sid), "image_1.png"));
     }
-    const code = store.createSession("global", { mode: "code", model: IMAGE_TAG });
-    expect((await c.request(METHODS.sessionStageImage, { sessionId: code, mediaType: "image/png", dataBase64: b64(PNG) })).error).toBeUndefined();
     c.close();
   });
 
@@ -453,5 +457,196 @@ describe("session.stageImage (code-mode image input)", () => {
     expect(res.result.path.endsWith("/image_2.png")).toBe(true);
     expect(readFileSync(victim, "utf8")).toBe("original");
     c.close();
+  });
+});
+
+// 2026-10-19 (Dispatch takes attachments, and Dispatch is ONE session that lives for months): staging in DISPATCH lets go
+// of the session's staged copies older than STAGED_IMAGE_RETENTION_MS — never one a message in the recent log still
+// names, never the highest-numbered one (so a pruned number is never handed out again), never anything but an
+// `image_<k>.<ext>` regular file directly in `images/`, and every delete through a descriptor of the session's own
+// folder, so a folder the agent swaps for a symlink never aims it elsewhere. A CODE session's copies are never pruned.
+describe("Dispatch's staged copies are let go of after STAGED_IMAGE_RETENTION_MS", () => {
+  let stop: (() => void) | undefined;
+  let tmpBase = "";
+  let savedTmp: string | undefined;
+  const cleanup: string[] = [];
+  beforeEach(() => {
+    savedTmp = process.env.WINTER_TMPDIR;
+    tmpBase = realpathSync(mkdtempSync(join(tmpdir(), "winter-prune-tmp-")));
+    process.env.WINTER_TMPDIR = tmpBase;
+  });
+  afterEach(() => {
+    stop?.(); stop = undefined;
+    if (savedTmp === undefined) delete process.env.WINTER_TMPDIR; else process.env.WINTER_TMPDIR = savedTmp;
+    rmSync(tmpBase, { recursive: true, force: true });
+    for (const d of cleanup.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  const DAY = 24 * 60 * 60 * 1000;
+  /** Back-dates a file's mtime by `days`. */
+  const age = (path: string, days: number) => { const t = (Date.now() - days * DAY) / 1000; utimesSync(path, t, t); };
+  const stage = (sid: string, keep?: () => Iterable<string>) =>
+    stageSessionImage({ sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) }, keep === undefined ? {} : { keep });
+
+  async function boot() {
+    const home = mkdtempSync(join(tmpdir(), "winter-prune-"));
+    cleanup.push(home);
+    const store = new SessionStore(home);
+    const socketPath = join(home, "core.sock");
+    const authority = new TokenAuthority(new FileSecretStore(join(home, "secrets.json")));
+    const tokens = await authority.ensureTokens();
+    const server = startIpcServer({ socketPath, serverVersion: "test", tokens: authority, store });
+    stop = () => { server.stop(); store.close(); };
+    const c = await TestClient.connect(socketPath);
+    await c.hello(tokens.harness, "orb");
+    return { store, c };
+  }
+
+  test("the retention is two weeks", () => {
+    expect(STAGED_IMAGE_RETENTION_MS).toBe(14 * DAY);
+  });
+
+  test("through session.stageImage on a Dispatch session: old unnamed copies go — never the highest-numbered one — an old copy a logged message names stays, fresh ones stay, the number climbs on", async () => {
+    const { store, c } = await boot();
+    const sid = store.createSession("global", { mode: "dispatch", model: IMAGE_TAG });
+    expect((await c.request(METHODS.sessionAttach, { sessionId: sid, fromSeq: 0 })).error).toBeUndefined();
+    const stageRpc = async () => (await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) })).result.path as string;
+    const [one, two, three, four] = [await stageRpc(), await stageRpc(), await stageRpc(), await stageRpc()];
+    // image_1 is named by a message the user sent (the log); the others never were.
+    expect((await c.request(METHODS.sessionSend, { sessionId: sid, text: "see [Image #1]", images: [{ n: 1, path: one }] })).error).toBeUndefined();
+    const images = join(tmpBase, `winter-session-${sid}`, "images");
+    // Neither of these is a staged copy: an old file of another name, an old FOLDER with a staged-looking name.
+    writeFileSync(join(images, "notes.txt"), "keep me");
+    mkdirSync(join(images, "image_0.png"));
+    for (const p of [one, two, four, join(images, "notes.txt"), join(images, "image_0.png")]) age(p, 20);
+    age(three, 13); // inside the retention
+    const five = await stageRpc();
+    expect(five).toBe(join(images, "image_5.png"));
+    // image_2 went; image_4 is old and unnamed too, but it is the highest number — what the next one counts from.
+    expect(readdirSync(images).sort()).toEqual(["image_0.png", "image_1.png", "image_3.png", "image_4.png", "image_5.png", "notes.txt"]);
+    expect(new Uint8Array(readFileSync(one))).toEqual(PNG); // the named one is still the bytes the model was given
+    // The next stage: image_4 is no longer the highest, so it goes now.
+    await stageRpc();
+    expect(existsSync(four)).toBe(false);
+    expect(existsSync(five)).toBe(true);
+    c.close();
+  });
+
+  test("a CODE session's staged copies are never pruned — however old, named or not", async () => {
+    const { store, c } = await boot();
+    for (const mode of ["code", undefined] as const) {
+      const sid = store.createSession("global", { ...(mode === undefined ? {} : { mode }), model: IMAGE_TAG });
+      const stageRpc = async () => (await c.request(METHODS.sessionStageImage, { sessionId: sid, mediaType: "image/png", dataBase64: b64(PNG) })).result.path as string;
+      const old = [await stageRpc(), await stageRpc(), await stageRpc()];
+      for (const p of old) age(p, 60);
+      await stageRpc();
+      for (const p of old) expect(existsSync(p)).toBe(true);
+      expect(readdirSync(join(tmpBase, `winter-session-${sid}`, "images")).sort()).toEqual(["image_1.png", "image_2.png", "image_3.png", "image_4.png"]);
+    }
+    c.close();
+  });
+
+  test("a pruned number is never handed out again — even when the newest copy goes away after the prune", () => {
+    const sid = "s_numbers";
+    const images = join(tmpBase, `winter-session-${sid}`, "images");
+    const first = [1, 2, 3, 4, 5].map(() => stage(sid, () => []));
+    for (const p of first) age(p, 20);
+    // Day 20: the prune takes 1–4 and keeps 5 (the highest); the new copy is image_6.
+    const sixth = stage(sid, () => []);
+    expect(sixth).toBe(join(images, "image_6.png"));
+    expect(readdirSync(images).sort()).toEqual(["image_5.png", "image_6.png"]);
+    // image_6 goes away (the model moved it, say): the next copy still climbs past every pruned number.
+    rmSync(sixth);
+    const next = stage(sid, () => []);
+    expect(next).toBe(join(images, "image_6.png"));
+    for (const n of [1, 2, 3, 4]) expect(next).not.toBe(join(images, `image_${n}.png`));
+  });
+
+  test("a staged copy named by a still-owed (held) message survives however old — what a resume re-pushes", () => {
+    const sid = "s_held";
+    const first = stage(sid);
+    age(first, 40);
+    const held = { type: "user_message", sessionId: sid, threadId: "main", seq: 7, ts: 1, text: "[Image #1]", clientName: "orb", images: [{ n: 1, path: first }] } as SessionEvent;
+    stage(sid, () => stagedPathsNamedBy([held]));
+    expect(existsSync(first)).toBe(true);
+    // Without the message it goes (it is no longer the highest number).
+    stage(sid, () => stagedPathsNamedBy([]));
+    expect(existsSync(first)).toBe(false);
+  });
+
+  test("no keep (every session but Dispatch) prunes nothing; a keep that throws prunes nothing; keep is read only when there is a candidate", () => {
+    const sid = "s_keep";
+    const first = stage(sid);
+    let reads = 0;
+    stage(sid, () => { reads++; return []; });
+    expect(reads).toBe(0); // nothing old yet: the log is never read
+    age(first, 30);
+    stage(sid);
+    expect(existsSync(first)).toBe(true);
+    stage(sid, () => { throw new Error("log unreadable"); });
+    expect(existsSync(first)).toBe(true);
+  });
+
+  test("the descriptor calls cannot load (not macOS on Apple silicon): nothing is pruned — never a fallback to deleting by path", () => {
+    const sid = "s_nofd";
+    const root = join(tmpBase, `winter-session-${sid}`);
+    const images = join(root, "images");
+    const old = [stage(sid), stage(sid), stage(sid)];
+    for (const p of old) age(p, 60);
+    const cannotLoad = { openDirAt: (): number => { throw new Error("directory-relative file calls are bound for macOS on Apple silicon only"); }, unlinkAt: () => {}, closeFd: () => {} };
+    expect(pruneStagedImages(root, images, () => [], Date.now(), { fd: cannotLoad })).toBe(0);
+    for (const p of old) expect(existsSync(p)).toBe(true);
+  });
+
+  test("a symlink planted in images/ under a staged-looking name is never followed: neither the link's target nor the link is touched", () => {
+    const sid = "s_link";
+    stage(sid);
+    const images = join(tmpBase, `winter-session-${sid}`, "images");
+    const outside = realpathSync(mkdtempSync(join(tmpdir(), "winter-prune-victim-")));
+    cleanup.push(outside);
+    const victim = join(outside, "image_1.png");
+    writeFileSync(victim, "the user's own");
+    age(victim, 60);
+    symlinkSync(victim, join(images, "image_9.png"));
+    const root = join(tmpBase, `winter-session-${sid}`);
+    expect(pruneStagedImages(root, images, () => [], Date.now() + 365 * DAY)).toBe(1); // only the real staged copy
+    expect(readFileSync(victim, "utf8")).toBe("the user's own");
+    expect(lstatSync(join(images, "image_9.png")).isSymbolicLink()).toBe(true);
+  });
+
+  test("the images folder — or the session folder — swapped for a symlink right before the unlink: the delete lands in the session's OWN folder, never elsewhere", () => {
+    for (const swap of ["images", "session"] as const) {
+      const sid = `s_swap_${swap}`;
+      const root = join(tmpBase, `winter-session-${sid}`);
+      const images = join(root, "images");
+      for (let i = 0; i < 3; i++) stage(sid); // image_1..3; image_3 is the highest and stays
+      // Elsewhere: same-named old files a PATH unlink would hit after the swap.
+      const elsewhere = realpathSync(mkdtempSync(join(tmpdir(), "winter-prune-elsewhere-")));
+      cleanup.push(elsewhere);
+      mkdirSync(join(elsewhere, "images"));
+      for (const name of ["image_1.png", "image_2.png"]) {
+        writeFileSync(join(elsewhere, "images", name), "not the daemon's");
+        age(join(elsewhere, "images", name), 60);
+      }
+      let swapped = false;
+      // After every check, right before the unlinkAt: the window a path unlink could not close.
+      const removed = pruneStagedImages(root, images, () => [], Date.now() + 365 * DAY, {
+        beforeUnlink: () => {
+          if (swapped) return;
+          swapped = true;
+          if (swap === "images") { renameSync(images, `${images}-moved`); symlinkSync(join(elsewhere, "images"), images); }
+          else { renameSync(root, `${root}-moved`); symlinkSync(elsewhere, root); }
+        },
+      });
+      // Elsewhere is untouched…
+      expect(readdirSync(join(elsewhere, "images")).sort()).toEqual(["image_1.png", "image_2.png"]);
+      // …the one delete made went to the session's own (moved) folder, through its descriptor; the moved folder
+      // fails the next check, so nothing more is tried.
+      expect(removed).toBe(1);
+      const own = swap === "images" ? `${images}-moved` : join(`${root}-moved`, "images");
+      const left = readdirSync(own).sort();
+      expect(left).toHaveLength(2);
+      expect(left).toContain("image_3.png"); // the highest stays; one of image_1/image_2 went (listing order)
+    }
   });
 });

@@ -131,11 +131,13 @@ final class IslandDevicesTests: XCTestCase {
         let rows = IslandDevicesPresentation.phones([record("a", "Old phone", daysAgo: 30), record("b", "  ", daysAgo: 2)],
                                                    connected: ["a"], mirrored: ["s1"], titleFor: { _ in "Fix the build" }, now: now)
         XCTAssertEqual(rows.map(\.title), ["Old phone", "iPhone", "Phone mirror"])
-        XCTAssertEqual(rows[0].detail, "Connected · paired 30 d ago")
+        XCTAssertEqual(rows.map(\.status), ["Connected", "Not connected", "Watching"])
+        XCTAssertEqual(rows[0].detail, "Paired 30 d ago")
         XCTAssertEqual(rows[0].tone, .ok)
-        XCTAssertEqual(rows[1].detail, "Not connected · paired 2 d ago", "never a 'last seen' the store does not keep")
+        XCTAssertEqual(rows[1].detail, "Paired 2 d ago", "never a 'last seen' the store does not keep")
         XCTAssertEqual(rows[1].tone, .off)
-        XCTAssertEqual(rows[2].detail, "Watching Fix the build")
+        XCTAssertEqual(rows[2].detail, "Fix the build")
+        XCTAssertEqual(IslandDevicesPresentation.accessibilityLabel(rows[0]), "Old phone, Connected, Paired 30 d ago")
         XCTAssertTrue(IslandDevicesPresentation.phones([], connected: [], mirrored: [], titleFor: { _ in nil }, now: now).isEmpty)
     }
 
@@ -149,13 +151,15 @@ final class IslandDevicesTests: XCTestCase {
                                                   ComputerUseBrowserStatus(id: "headless", name: "Winter (headless)", connected: false)])
         let rows = IslandDevicesPresentation.helpers(status)
         XCTAssertEqual(rows.map(\.title), ["Computer Use helper", "Winter", "Winter for Chrome · Google Chrome", "Winter (headless)"])
-        XCTAssertEqual(rows[0].detail, "Running — version 2.0")
+        XCTAssertEqual(rows[0].status, "Running · 2.0")
+        XCTAssertEqual(rows[0].detail, "", "running: its status says it all")
         XCTAssertEqual(rows[0].tone, .warning, "a missing permission is worth a look")
         XCTAssertEqual(rows[0].chips, [IslandDeviceChip(label: "Accessibility", state: .granted),
                                        IslandDeviceChip(label: "Screen Recording", state: .denied)])
-        XCTAssertEqual(rows[1].detail, "Connected")
-        XCTAssertEqual(rows[2].detail, "Winter for Chrome is not installed in Google Chrome")
-        XCTAssertEqual(rows[3].detail, "Not connected")
+        XCTAssertEqual(rows.dropFirst().map(\.status), ["Connected", "Not connected", "Not connected"])
+        XCTAssertEqual(rows[1].detail, "")
+        XCTAssertEqual(rows[2].detail, "Winter for Chrome is not installed in Google Chrome", "the daemon's own reason")
+        XCTAssertEqual(rows[3].detail, "")
     }
 
     func testAHelperNotRunningHasUnknownPermissionsAndComputerUseOffSaysSo() {
@@ -164,10 +168,19 @@ final class IslandDevicesTests: XCTestCase {
         let row = IslandDevicesPresentation.helpers(idle)[0]
         XCTAssertEqual(row.chips.map(\.state), [.unknown, .unknown], "not running is not denied")
         XCTAssertEqual(row.tone, .off)
+        XCTAssertEqual(row.status, "Not running")
+        XCTAssertEqual(row.detail, "Installed — starts when a session needs it", "Settings' own words under the pointer")
         let off = ComputerUseStatus(enabled: false, legacyComputer: false, mirror: false, privateEventPath: false,
                                     helper: ComputerUseHelperStatus(installed: true, running: false))
+        XCTAssertEqual(IslandDevicesPresentation.helpers(off)[0].status, "Off")
         XCTAssertEqual(IslandDevicesPresentation.helpers(off)[0].detail, "Computer use is off")
-        XCTAssertEqual(IslandDevicesPresentation.helpers(nil)[0].detail, "Couldn't read its status")
+        let missing = ComputerUseStatus(enabled: true, legacyComputer: false, mirror: false, privateEventPath: false,
+                                        helper: ComputerUseHelperStatus(installed: false, running: false))
+        XCTAssertEqual(IslandDevicesPresentation.helpers(missing)[0].status, "Not installed")
+        XCTAssertEqual(IslandDevicesPresentation.helpers(missing)[0].detail, "", "nothing the status does not say")
+        let unread = IslandDevicesPresentation.helpers(nil)[0]
+        XCTAssertEqual(unread.detail, "Couldn't read its status")
+        XCTAssertTrue(IslandDevicesPresentation.showsDetail(unread, hovered: false), "a problem is shown at rest")
     }
 
     func testTheModelGathersPhonesConnectionsMirrorAndStatus() async {
@@ -179,7 +192,8 @@ final class IslandDevicesTests: XCTestCase {
         model.fetchStatus = { nil }
         await model.refresh()
         XCTAssertTrue(model.loaded)
-        XCTAssertEqual(model.phones.map(\.detail), ["Connected · paired 1 d ago"])
+        XCTAssertEqual(model.phones.map(\.status), ["Connected"])
+        XCTAssertEqual(model.phones.map(\.detail), ["Paired 1 d ago"])
         XCTAssertEqual(model.helpers.map(\.detail), ["Couldn't read its status"])
     }
 

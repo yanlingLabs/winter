@@ -66,6 +66,7 @@ export type CoworkPolicyChangeKind = "unchanged" | "widening" | "narrowing" | "l
 export const COWORK_CLASSIFIER_CELLS: ReadonlyArray<readonly [CoworkGuestToolClass, CoworkPathClass]> = Object.freeze([
   ["Read", "admitted"], ["Read", "shared-instructions"], ["Write", "admitted"], ["Edit", "admitted"],
   ["Read", "outputs"], ["Write", "outputs"], ["Edit", "outputs"], ["Read", "scratch"], ["Write", "scratch"], ["Edit", "scratch"],
+  ["Read", "planScratch"], ["Write", "planScratch"], ["Edit", "planScratch"],
   ["Bash", "admitted"], ["Bash", "none"], ["Workflow", "admitted"], ["Workflow", "none"], ["InstructionEdit", "shared-instructions"],
 ]);
 /** Every cell of the connector row: stored setting (`undefined` = unset) x classified read-only. */

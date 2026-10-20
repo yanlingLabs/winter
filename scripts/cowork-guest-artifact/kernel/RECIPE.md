@@ -12,7 +12,7 @@ result may run.
 | Base config | `base-apple-6.18.35.config` (the cached Apple/Kata feasibility config, copied here byte for byte), SHA-256 `a5dfc1ee...c21` |
 | Change from the base | `memory-fragment.config`: `CONFIG_DEBUG_INFO_BTF=n`, and nothing else |
 | Crypto fragment | **none.** No dm-crypt, dm-integrity or crypto user API: there is no encrypted-disk claim in this slice |
-| Compiler | kernel.org slim LLVM 20.1.8 aarch64 bundle, SHA-256 `945d2228...ba7`, detached signature verified |
+| Compiler | kernel.org slim LLVM 20.1.8 aarch64 bundle, SHA-256 `945d2228...ba7`, detached signature over the decompressed tar |
 | Builder | the isolated, offline, non-root Ubuntu 24.04 arm64 container of the crypto comparison build (image ID, base manifest, Dockerfile digest and package snapshot are in `pins.json`) |
 
 The base config already has what the guest needs (`VIRTIO_CONSOLE`, `VIRTIO_BLK`, `VIRTIO_MMIO`, `VIRTIO_BALLOON`,

@@ -136,6 +136,20 @@ describe("embed-cowork-native.sh (the Cowork native pair's build phase, standalo
     expect(existsSync(stray)).toBe(false);
   });
 
+  test("COWORK_NATIVE=omit removes a stale pair and a stale pins file, embeds nothing and succeeds", () => {
+    const r = rig();
+    expect(embed(r).status).toBe(0); // a previous build left the pair behind
+    const pins = join(r.dir, "built", "Winter.app", "Contents", "Resources", "cowork-native-pins.json");
+    mkdirSync(join(pins, ".."), { recursive: true });
+    writeFileSync(pins, "{}");
+    expect(existsSync(dest(r))).toBe(true);
+    const out = embed(r, { COWORK_NATIVE: "omit" });
+    expect(out.status).toBe(0);
+    expect(out.stdout).toContain("COWORK_NATIVE=omit");
+    expect(existsSync(dest(r))).toBe(false);
+    expect(existsSync(pins)).toBe(false);
+  });
+
   test("refuses a missing input", () => {
     const r = rig();
     rmSync(r.worker);
@@ -263,7 +277,7 @@ describe("cowork-native-lib", () => {
   });
 });
 
-describe("the pair stays unwired and agrees with the Swift launcher", () => {
+describe("the pair is wired only where S7B says, and agrees with the Swift launcher", () => {
   const read = (...p: string[]) => readFileSync(join(REPO, ...p), "utf8");
 
   test("the script's identifiers, team and flag are the lib's and the Swift launcher's", () => {
@@ -290,7 +304,7 @@ describe("the pair stays unwired and agrees with the Swift launcher", () => {
     expect(statSync(SCRIPT).mode & 0o111).not.toBe(0);
   });
 
-  test("nothing in the app project, the release gate or the daemon/CLI sources refers to the launcher, the pair or this script (S7 wires them)", () => {
+  test("only the app project, the release gate and the daemon's host-env refer to the pair; the daemon has no other reference and the feature stays off", () => {
     const needles = ["embed-cowork-native", "cowork-native-lib", "winter-cowork-launcher", "winter-cowork-worker", "WinterCoworkLauncher"];
     const files = [
       join("apple", "Winter", "project.yml"), join("scripts", "release.ts"), join("scripts", "release-lib.ts"), join("package.json"),
@@ -298,7 +312,22 @@ describe("the pair stays unwired and agrees with the Swift launcher", () => {
       ...walk(join(REPO, "packages", "cli", "src")).map((p) => p.slice(REPO.length + 1)),
     ];
     const hits = files.filter((file) => existsSync(join(REPO, file)) && needles.some((needle) => read(file).includes(needle)));
-    expect(hits).toEqual([]);
+    expect(hits.sort()).toEqual([
+      join("apple", "Winter", "project.yml"), join("packages", "core", "src", "cowork", "host-env", "environment.ts"), join("packages", "core", "src", "cowork", "host-env", "launcher-port.ts"), join("scripts", "release.ts"),
+    ]);
+    // The phase runs the script, and the release gate runs the same checks the verify gate does.
+    expect(read("apple", "Winter", "project.yml")).toContain('"${SRCROOT}/../../scripts/embed-cowork-native.sh"');
+    const release = read("scripts", "release.ts");
+    for (const call of ["checkCoworkNativeBundle(readCoworkBundleFacts(", "checkSignedNative(role, TEAM_ID,", "buildCoworkNative({ out: join(ROOT", "coworkNativeReleasePlan(process.env)", "if (nativePlan.mode === \"refuse\") fail(nativePlan.message)", "checkCoworkNativeOmitted({", "if (omitted.length > 0) fail(`the release omits the Cowork native pair but the bundle carries it", "nativePlan.mode === \"omit\""]) expect(release).toContain(call);
+    // Every other script that runs a Release xcodebuild says what it does about the pair (the sparkle feed rig omits it explicitly).
+    expect(read("scripts", "sparkle-feed-gate.ts")).toContain("COWORK_NATIVE=omit xcodebuild");
+    // The opt-out is loud, total and asserted in release.ts: it prints, builds and gates nothing, skips both hardening pins, and requires the helpers and the pins file to be ABSENT.
+    expect(release).toContain("Cowork native pair: OMITTED by COWORK_NATIVE=omit");
+    expect(release).toContain('if (nativePlan.mode === "build") {');
+    expect(release).toContain('...(nativePlan.mode === "omit" ? [] : [');
+    expect(release).toContain('helpersDirectoryExists: existsSync(join(app, COWORK_NATIVE_EMBED_RELATIVE))');
+    // The daemon's reading of the pair is behind the activation seam, which is off.
+    expect(read("packages", "core", "src", "cowork", "native-activation.ts")).toContain("COWORK_NATIVE_ENVIRONMENT_ACTIVATED: boolean = false");
   });
 });
 
