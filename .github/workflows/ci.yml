@@ -450,7 +450,7 @@ jobs:
           python3 -I -B -c "
           import json
           d = json.load(open('$RUNNER_TEMP/prepare.json'))
-          assert d['fullSourceDiffSha256'] == '3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01', d
+          assert d['fullSourceDiffSha256'] == 'b42484237c4e9ae63c64ae9ead8e8759f7849f41be12b1d8ca1bbe7a71eeaa56', d
           print('composed hash ok', d['fullSourceDiffSha256'])"
 
       - name: Guard tests (including the composition test)
