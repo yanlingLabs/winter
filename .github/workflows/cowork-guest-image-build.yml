@@ -8,12 +8,12 @@ name: cowork-guest-image-build
 # The first steps refuse unless REVIEWED_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
 on:
   push:
-    branches: [cowork/guest-image-build]
+    branches: [cowork/guest-image-build-2]
 permissions:
   contents: read
 env:
   REVIEWED_HEAD: '0000000000000000000000000000000000000000'
-  AGENT_SDK_HEAD: '7e71929d0231be2d77645bfa47ee2b550f3add22'
+  AGENT_SDK_HEAD: 'f5612e4671b16a5fa2cb771e78a2dd6a6b0b4789'
   BUILDER_HEAD: '180d3effd7ddbb9406aeea0912f76c78ef20cf75'
   BUN_ARCHIVE_URL: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip'
   BUN_ARCHIVE_SHA256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b'
@@ -35,7 +35,7 @@ env:
   LLVM_KEY_SHA256: 'dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8'
 jobs:
   build:
-    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build' && github.event.created == true && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build-2' && github.event.created == true && github.run_attempt == '1'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 210
     steps:
