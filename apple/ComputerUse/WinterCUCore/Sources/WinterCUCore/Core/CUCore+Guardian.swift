@@ -572,7 +572,7 @@ extension CUCore {
     /// The `user_working` refusal's words: what lets the agent act again (live 2026-10-20: "wait and retry" kept a child
     /// retrying for three minutes while the app stayed in front).
     static func userWorkingWords(_ app: String) -> String {
-        "the user is working in \(app) right now — ask the user to switch away from \(app) for a moment, or to say go ahead (their next message lets you act)"
+        "the user is working in \(app) right now — ask the user to switch away from \(app) for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)"
     }
 
     /// The user let the agent go ahead in these apps (`work.lift`, from the daemon: the user's own message to a session
@@ -633,6 +633,8 @@ extension CUCore {
         }
         // A granted requestForeground card lifted the mark that was there when the user said yes (`holdForegroundNow`);
         // their work in the app since marks it anew and stops the agent here as anywhere (the review of 2026-10-20).
+        // Work no watcher saw (nothing was bound then) is read from the HID state first.
+        markRecentUserWork(t)
         guard userIsWorking(in: t.pid) else { return }
         CULog.act.notice("act in \(t.appName, privacy: .public): refused — the user is working in it")
         throw CUError.refused(.userWorking, Self.userWorkingWords(t.appName))

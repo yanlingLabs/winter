@@ -44,6 +44,16 @@ final class CUActScope {
 final class CUActWriteGuard: @unchecked Sendable {
     weak var core: CUCore?
 
+    /// When the helper last posted an input event of its own (`clock` seconds): the HID counters may hold it, so
+    /// `markRecentUserWork` never reads them as the user's input that soon after.
+    private let postLock = NSLock()
+    private var lastPost: TimeInterval = -.infinity
+    var lastPostAt: TimeInterval { postLock.withLock { lastPost } }
+    func notePost() {
+        guard let now = core?.clock.nowSeconds() else { return }
+        postLock.withLock { lastPost = now }
+    }
+
     /// May the act running on this thread write to (or post to) `owner` now? `owner` nil: not known — the target's
     /// (fail closed). For an event, `owner` is the process it is posted to (the target, or a content process of it).
     /// STICKY (the review of round 17, M1): once the act was stopped, or the user worked in the target at any moment since
@@ -127,6 +137,7 @@ struct CUActGuardedPoster: CUEventPoster {
             default: break
             }
         }
+        guardian.notePost()
         return inner.post(event, pid: pid, route: route, authenticate: authenticate)
     }
 
@@ -146,7 +157,7 @@ struct CUActGuardedPoster: CUEventPoster {
 
 extension CUActWriteGuard {
     static var refusal: CUError {
-        CUError.refused(.userWorking, "the user started working in the app while the act ran — the rest was not sent; ask the user to switch away from the app for a moment, or to say go ahead (their next message lets you act)")
+        CUError.refused(.userWorking, "the user started working in the app while the act ran — the rest was not sent; ask the user to switch away from the app for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)")
     }
 }
 
@@ -190,7 +201,7 @@ extension CUCore {
     }
 
     static func stoppedRefusal(_ t: CUTarget) -> CUError {
-        CUError.refused(.userWorking, "the user started working in \(t.appName) while the act ran, so the rest of it was not sent — ask the user to switch away from \(t.appName) for a moment, or to say go ahead (their next message lets you act)")
+        CUError.refused(.userWorking, "the user started working in \(t.appName) while the act ran, so the rest of it was not sent — ask the user to switch away from \(t.appName) for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)")
     }
 
     static func isUserWorkingRefusal(_ e: CUError) -> Bool {

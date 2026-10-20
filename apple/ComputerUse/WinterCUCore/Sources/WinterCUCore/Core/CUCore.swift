@@ -108,6 +108,7 @@ public final class CUCore: @unchecked Sendable {
             blipPasteHoldMs = 0
             blipDrainMs = 0
             returnLoadWatchMs = 0
+            userInputAgesOverride = { (key: .greatestFiniteMagnitude, flags: .greatestFiniteMagnitude, click: .greatestFiniteMagnitude) }  // never the real HID state
             holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
@@ -709,6 +710,9 @@ public final class CUCore: @unchecked Sendable {
     /// How to stop the running watcher (nil: off), and its tap's port (for re-enabling). Under `workWatcherLock`.
     var workWatcherStop: (() -> Void)?
     var workWatcherPort: CFMachPort?
+    /// When the running watcher started (`clock` seconds; nil: off). Under `workWatcherLock`. Input older than this was
+    /// seen by no tap — what `markRecentUserWork` reads the HID state for.
+    var workWatcherSince: TimeInterval?
     /// When a scroll last had the window under the pointer read for I6 (guarded by `guardianLock`).
     var lastScrollWorkCheck: TimeInterval = -.infinity
     /// When the user's last scroll GESTURE began (a began-phase event), for R18-b's scroll-as-use (under `guardianLock`).
@@ -765,6 +769,9 @@ public final class CUCore: @unchecked Sendable {
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     var secondsSinceUserClickOverride: (() -> TimeInterval)?
+    /// Seconds since the user's last key-down, modifier change and mouse-down (HID state), for `markRecentUserWork`;
+    /// injectable — a test core reads none (all "long ago").
+    var userInputAgesOverride: (() -> (key: TimeInterval, flags: TimeInterval, click: TimeInterval))?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
     var keyFocusPidOverride: (() -> pid_t?)?
 

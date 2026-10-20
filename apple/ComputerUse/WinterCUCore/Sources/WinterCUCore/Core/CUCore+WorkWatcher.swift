@@ -27,9 +27,13 @@ extension CUCore {
             let bound = !boundTargets().isEmpty
             if bound, workWatcherStop == nil {
                 workWatcherStop = (workWatcherStarter ?? { [self] in startWorkWatcherTap() })()
-                if workWatcherStop != nil { CULog.guardian.notice("the work watcher is on (a target is bound)") }
+                if workWatcherStop != nil {
+                    workWatcherSince = clock.nowSeconds()
+                    CULog.guardian.notice("the work watcher is on (a target is bound)")
+                }
             } else if !bound, let stop = workWatcherStop {
                 workWatcherStop = nil
+                workWatcherSince = nil
                 stop()
                 CULog.guardian.notice("the work watcher is off (nothing is bound)")
             }
@@ -75,6 +79,41 @@ extension CUCore {
     }
 
     var workWatcherRunning: Bool { workWatcherLock.withLock { workWatcherStop != nil } }
+
+    /// How long a fresh binding looks back at the user's input the watcher could not see (it was off: nothing bound).
+    static let recentWorkSeconds: TimeInterval = 3
+
+    /// I6 with no watcher before the bind (the review of 2026-10-20): holds now last a turn, so between turns nothing is
+    /// bound and nothing watches. At an act's start, when the target is in front by the user's own doing (no hold, no
+    /// visit, no live cause of the agent's) and has no mark yet, and the watcher has not been on for the last few seconds,
+    /// the HID state tells: their typing within `recentWorkSeconds` with the key focus in the app — a key-down AFTER their
+    /// last modifier change, so a ⌘-Tab there to look is no typing — or their click within it with the pointer over the
+    /// app's window (a click on Winter's own card is not) is their work in it: it is marked, and the check refuses.
+    func markRecentUserWork(_ t: CUTarget) {
+        guard sys.frontmostPid() == t.pid, !holdsForeground(t), !insideArrivedVisit(t) else { return }
+        let now = clock.nowSeconds()
+        if let since = workWatcherLock.withLock({ workWatcherSince }), now - since >= Self.recentWorkSeconds { return }
+        // The helper's own input that recently may be what the HID counters hold.
+        if now - writeGuard.lastPostAt < Self.recentWorkSeconds { return }
+        let unmarked = guardianLock.withLock { guardianCore.userWorkingApp != t.pid && !guardianCore.isTouched(t.pid, now: now) }
+        guard unmarked else { return }
+        let ages = userInputAgesOverride?() ?? (key: secondsSinceUserKey, flags: secondsSinceUserFlags, click: secondsSinceUserClick)
+        var how: String?
+        if ages.key < Self.recentWorkSeconds, ages.key < ages.flags, let keys = keyFocusPidForTarget(t),
+           keys == t.pid || sys.isContentProcess(keys, of: t.pid) {
+            how = "typed in it"
+        } else if ages.click < Self.recentWorkSeconds, let p = sys.cursorLocation(), windowUnder(p)?.pid == t.pid {
+            how = "clicked in it"
+        }
+        guard let how else { return }
+        CULog.act.notice("act in \(t.appName, privacy: .public): the user \(how, privacy: .public) moments ago, before anything watched — working in it")
+        userInteracted(t.pid)
+    }
+
+    /// The least time since a physical key-down (HID state).
+    var secondsSinceUserKey: TimeInterval { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown) }
+    /// The least time since a physical modifier change (HID state).
+    var secondsSinceUserFlags: TimeInterval { CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .flagsChanged) }
 
     /// One event the watcher saw. While the guardian runs its own tap handles it; else the user's own action on a bound
     /// app in front is their work in it.

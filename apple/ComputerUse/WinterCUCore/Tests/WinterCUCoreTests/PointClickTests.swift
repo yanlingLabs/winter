@@ -296,7 +296,7 @@ final class PointClickTests: XCTestCase {
         sys.front = pid
         core.testUserInput(pid: pid, switching: false)  // they clicked into it, in front
         let e = await expectUserWorking { try await self.click([600, 600]) }
-        XCTAssertEqual(e?.message, "the user is working in Browser right now — ask the user to switch away from Browser for a moment, or to say go ahead (their next message lets you act)")
+        XCTAssertEqual(e?.message, "the user is working in Browser right now — ask the user to switch away from Browser for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)")
         XCTAssertFalse(e?.message.contains("wait and retry") ?? true)
         // Their message to the session: the daemon's work.lift.
         let r = try await core.workLift(WorkLiftParams(pids: [pid, 4242], reason: "message"))
@@ -336,6 +336,77 @@ final class PointClickTests: XCTestCase {
         }) { e in XCTAssertEqual((e as? CUError)?.data?["reason"], .string("user_working")) }
         XCTAssertEqual(poster.entries.map(\.keycode), [0], "the key before their work went; the one after did not")
         core.releaseHeldForeground(sessionId: "s")
+    }
+
+    /// The review of 2026-10-20: with holds lasting a turn, nothing is bound — and nothing watches — between turns. A fresh
+    /// binding's first act reads the HID state: the user's typing (focus in the app) or click (over its window) moments ago.
+    func testWorkNoWatcherSawMomentsAgoMarksTheAppAndRefuses() async throws {
+        world(browser: false)
+        sys.front = pid
+        core.keyFocusPidOverride = { [unowned self] in pid }
+        // They typed into it a second ago (their last modifier change before it): working in it.
+        core.userInputAgesOverride = { (key: 1, flags: 9, click: 60) }
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+        XCTAssertEqual(downs.count, 0)
+        XCTAssertTrue(core.userIsWorking(in: pid), "marked: the ordinary mark from now on")
+    }
+
+    func testRecentInputElsewhereOrLongAgoIsNoWorkInTheApp() async throws {
+        world(browser: false)
+        sys.front = pid
+        // Their typing went to Winter's own pill (the key focus is not the app's): not work in it.
+        core.keyFocusPidOverride = { 4242 }
+        core.userInputAgesOverride = { (key: 0.5, flags: 9, click: 60) }
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1)
+        // A ⌘-Tab there to look (the modifier released after the key) is no typing.
+        world(browser: false)
+        sys.front = pid
+        core.keyFocusPidOverride = { [unowned self] in pid }
+        core.userInputAgesOverride = { (key: 0.6, flags: 0.4, click: 60) }
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1)
+        // A click a moment ago with the pointer elsewhere (Winter's card), and input long ago: none.
+        world(browser: false)
+        sys.front = pid
+        sys.cursor = CGPoint(x: 2000, y: 2000)
+        core.userInputAgesOverride = { (key: 60, flags: 60, click: 0.5) }
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1)
+        XCTAssertFalse(core.userIsWorking(in: pid))
+    }
+
+    func testARecentClickOverTheAppsWindowIsWorkInIt() async throws {
+        world(browser: false)
+        sys.front = pid
+        sys.cursor = CGPoint(x: 300, y: 300)  // over its window
+        core.userInputAgesOverride = { (key: 60, flags: 60, click: 0.8) }
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+        // Not when the app is in front by the agent's own doing (its consented hold), nor once the helper's own input could
+        // be what the counters hold.
+        world(browser: false)
+        sys.front = pid
+        sys.cursor = CGPoint(x: 300, y: 300)
+        core.userInputAgesOverride = { (key: 60, flags: 60, click: 0.8) }
+        XCTAssertTrue(core.holdForegroundNow(target).front)
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1)
+        core.releaseHeldForeground(sessionId: "s")
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 2, "its own click a moment ago is in the counters: never read as the user's")
+    }
+
+    func testAWatcherOnLongEnoughHasSeenEverythingItself() async throws {
+        world(browser: false)
+        sys.front = pid
+        sys.cursor = CGPoint(x: 300, y: 300)
+        core.workWatcherStarter = { {} }
+        core.updateWorkWatcher()
+        XCTAssertTrue(core.workWatcherRunning)
+        core.workWatcherLock.withLock { core.workWatcherSince = core.clock.nowSeconds() - 10 }
+        core.userInputAgesOverride = { (key: 60, flags: 60, click: 0.8) }
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1, "the watcher saw that click and judged it: not read again")
     }
 
     /// The review of 2026-10-20: a release never lifts the mark — a target released and bound again finds it still there.

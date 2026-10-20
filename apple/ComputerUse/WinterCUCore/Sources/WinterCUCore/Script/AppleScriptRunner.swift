@@ -151,7 +151,7 @@ enum CUAppleScriptRunner {
         var display: NSAttributedString?
         let value = script.executeAndReturnDisplayValue(&display, error: &error)
         if let why = state.stopped {
-            throw CUError.refused(.userWorking, "the AppleScript was stopped part-way: \(why) — what it did before stays done; ask the user to switch away from the app for a moment, or to say go ahead (their next message lets you act)")
+            throw CUError.refused(.userWorking, "the AppleScript was stopped part-way: \(why) — what it did before stays done; ask the user to switch away from the app for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)")
         }
         if let refused = state.refused {
             throw CUError.notAllowed("applescript", "the AppleScript was stopped: \(refused)")
