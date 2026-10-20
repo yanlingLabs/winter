@@ -461,7 +461,8 @@ test("pins (structural): no src module supplies the N3 cold-resume or the N4 hel
   // A composition that supplied either gate would add a line here: that is the D6 flip, and for cold resume only after the
   // owner applies the cold-resume owner patch (the unmodified native owner refuses a resume record).
   expect(portNameWrites(["coldResume", "heldInput", "ownerPatchApplied"])).toEqual([
-    "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(() => (entry.closed || sessi",
+    "core/src/agent/session-messaging.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
+    "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(queryNow, () => handle.cowor",
     "core/src/cowork/session-driver.ts PropertySignature readonly coldResume?: { readonly ownerPatchApplied: true };",
     "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true; /** Design ru",
     "core/src/cowork/session-driver.ts PropertySignature readonly ownerPatchApplied: true",
