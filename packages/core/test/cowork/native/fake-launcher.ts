@@ -171,7 +171,7 @@ export class FakeSession implements CoworkLauncherSession {
       if (this.behavior.bootstrap === "duplicate-receipt") this.muxUp({ t: "receipt", operationId, nonce, receipt: receipt as unknown as Record<string, unknown> });
       return;
     }
-    if (message.t === "ready" && this.behavior.conversations === "early-ready") this.muxUp({ t: "runtime_ready", operationId: message.operationId, nonce: message.nonce, conversations: 1 });
+    if (message.t === "ready" && this.behavior.conversations === "early-ready") this.muxUp({ t: "runtime_ready", operationId: message.operationId, nonce: message.nonce, conversations: 1, continuations: [] });
     if (message.t === "ready" && this.behavior.mounted !== "silent") this.muxUp({ t: "mounted", operationId: message.operationId, nonce: message.nonce });
     if (message.t === "conversations") {
       this.conversationSets.push(message);
@@ -181,12 +181,12 @@ export class FakeSession implements CoworkLauncherSession {
         case "bad": return this.muxUp({ t: "fault", operationId, nonce, code: "bad_conversations" });
         case "supervisor-failed": return this.muxUp({ t: "fault", operationId, nonce, code: "supervisor_failed" });
         case "second": return this.muxUp({ t: "fault", operationId, nonce, code: "second_conversations" });
-        case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1 });
-        case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count });
-        case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count });
-        case "late-ready": { setTimeout(() => { if (this.scope) this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); }, 600); return; }
-        case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
-        default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
+        case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1, continuations: [] });
+        case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count, continuations: [] });
+        case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count, continuations: [] });
+        case "late-ready": { setTimeout(() => { if (this.scope) this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: [] }); }, 600); return; }
+        case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: [] }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: [] });
+        default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: [] });
       }
     }
   }

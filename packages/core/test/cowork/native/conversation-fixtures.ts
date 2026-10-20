@@ -13,7 +13,7 @@ const roots = (logical: string): CoworkNativeConversationRoot[] => [
   { id: "root-outputs", guestPath: `/workspace/outputs/${logical}`, source: `/workspace/outputs/${logical}`, readOnly: false }];
 export const guidedConversation = (context: CoworkNativeConversationContext, logical: string, backend: string, uid: number): CoworkNativeConversation => ({
   logicalSessionId: logical, authority: authority(context, backend), runtimeUid: uid, toolUid: uid + 1, workspaceGid: uid + 5000, policy: "auto", roots: roots(logical),
-  runtime: { model: "model-alpha", timeoutMs: 600000, toolClasses: ["read", "write", "execute"], provider: provider(context, logical, backend), guided: { bindingId: "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b", generation: 1 } } });
+  runtime: { model: "model-alpha", timeoutMs: 600000, toolClasses: ["read", "write", "execute"], provider: provider(context, logical, backend), guided: { bindingId: "3f2b8c1e-5d4a-4e6f-9a7b-1c2d3e4f5a6b", generation: 1 }, continuation: "fresh", endedGuestBoots: [] } });
 export const guidedSet = (context: CoworkNativeConversationContext): CoworkNativeConversationSet => ({ profile: "host-query-guided-v1", conversations: [guidedConversation(context, "conv-0001", "backend-0001", 20000)] });
 export const twoGuidedSet = (context: CoworkNativeConversationContext): CoworkNativeConversationSet => ({ profile: "host-query-guided-v1", conversations: [guidedConversation(context, "conv-0001", "backend-0001", 20000), guidedConversation(context, "conv-0002", "backend-0002", 20010)] });
 export const toolsOnlySet = (context: CoworkNativeConversationContext): CoworkNativeConversationSet => ({ profile: null, conversations: ["conv-0001", "conv-0002"].map((logical, index) => ({

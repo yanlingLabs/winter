@@ -127,7 +127,7 @@ class ScriptedGuest {
 
 /** The conversation set as the guest receives it: through the native wire's own validator. */
 function onTheWire(set: CoworkGuestConversationSet, incarnationId: string): CoworkGuestConversationSet {
-  const message = { t: "conversations", operationId: "operation", nonce: "cd".repeat(16), incarnationId, profile: set.profile, conversations: set.conversations } as const;
+  const message = { t: "conversations", operationId: "operation", nonce: "cd".repeat(16), incarnationId, profile: set.profile, browseUid: null, conversations: set.conversations } as const;
   const frame = parseCoworkNativeMuxFrame(serializeCoworkNativeMuxFrame({ class: "bootstrap", seq: 1, message }, "down"), "down");
   if (frame.class !== "bootstrap" || frame.message.t !== "conversations") throw new Error("shape");
   return { profile: frame.message.profile, conversations: frame.message.conversations };

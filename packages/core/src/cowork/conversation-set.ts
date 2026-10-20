@@ -50,7 +50,8 @@ export function coworkGuestPermissionModeFor(policy: ApprovalPolicy): CoworkGues
 /** Fixed host picks for conversation index 0 (N2 carries one host-query conversation per guest): distinct, inside the
  *  contract's 1000..65533, the group equal to neither user. */
 export const COWORK_GUEST_IDENTITIES = Object.freeze({ runtimeUid: 2001, toolUid: 2002, workspaceGid: 2000 });
-/** The guest runtime's per-call timeout, the contract's ceiling (`RUNTIME_SPEC.timeoutMs` allows 1..600000). */
+/** The guest runtime's per-call timeout. Contract revision 3 admits up to 86400000 (the 24 h host-query backstop), but an agent SDK
+ *  supervisor before its CR2 release refuses more than 600000, so the host sends 600000 until the image pins CR2. */
 export const COWORK_GUEST_RUNTIME_TIMEOUT_MS = 600_000;
 
 type GuestToolClass = "read" | "write" | "execute";
@@ -185,7 +186,11 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
     policy,
     roots: Object.freeze([root]),
     runtime: Object.freeze({ model: route.model, timeoutMs: COWORK_GUEST_RUNTIME_TIMEOUT_MS, toolClasses: Object.freeze(toolClasses),
-      provider: Object.freeze(sorted({ scope, selection }) as Record<string, unknown>), guided: null }),
+      provider: Object.freeze(sorted({ scope, selection }) as Record<string, unknown>), guided: null,
+      // Contract revision 3: a driver sends its set once per incarnation and the conversation never restarts on another (cold
+      // resume is not wired yet), so the host's store_state is always `none`: `fresh`, with no ended boots. A non-empty store
+      // then fails the start closed (`fresh_store_not_empty`).
+      continuation: "fresh", endedGuestBoots: Object.freeze([]) }),
   });
   return Object.freeze({ profile: "host-query-v1", conversations: Object.freeze([conversation]) });
 }
