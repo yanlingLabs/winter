@@ -121,10 +121,11 @@ export function mainTurnOpenInLog(events: readonly SessionEvent[]): boolean {
 
 /** Turns started by the daemon on someone else's behalf — never "owned" by a terminal that merely
  *  attached to watch (`activity-enforcement.ts`): another session's SendMessage, Dispatch's spawn
- *  prompt and its own wake, and a ComputerV2 wake trigger's message (`computer-use/wakes/`) — so a detach
+ *  prompt and its own wake, a ComputerV2 wake trigger's message (`computer-use/wakes/`), a scheduled routine's prompt (`routine`,
+ *  `routines/runner.ts`) and a Workflow's `agent()` turn (`workflow`, `daemon.ts`) — so a detach
  *  never aborts a wake turn, a dispatch child's card in one stays bounded, and it lifts no desktop-switch
  *  refusal (it is not the user writing). */
-export const AUTOMATED_TURN_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "dispatch-wake", COMPUTER_WAKE_CLIENT_NAME]);
+export const AUTOMATED_TURN_ORIGINS: ReadonlySet<string> = new Set(["messaging", "dispatch", "dispatch-wake", COMPUTER_WAKE_CLIENT_NAME, "routine", "workflow"]);
 
 /** Was a turn of this origin started by a HUMAN — a known client's message (the Mac, the TUI, the phone, a
  *  client that named itself nothing, `"session"`) rather than one of `AUTOMATED_TURN_ORIGINS`? An unknown

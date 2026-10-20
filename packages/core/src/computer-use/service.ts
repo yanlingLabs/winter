@@ -794,9 +794,21 @@ export class ComputerV2Service {
       case "useWindow": {
         const w = args.window;
         if (typeof w !== "string" && typeof w !== "number") throw bad("useWindow() takes a window title or id");
+        // A window another session holds, named by its id: refused before the binding moves.
+        const app: AppRef = { bundleId: t.bundleId, name: t.name };
+        if (typeof w === "number") this.refuseIfHeldElsewhere(ctx, app, w);
         const res = await this.helperCall<TargetUseWindowResult>(ctx, "target.useWindow", { targetId, window: w }, metric);
         // The bound window is now this one (app adapters address it); unknown when the helper did not say.
         if (typeof res?.window?.id === "number" && res.window.id > 0) t.windowId = res.window.id; else delete t.windowId;
+        // Holds are per window (the review of 2026-10-20): the window it moved to, once known, may be one another session
+        // holds (picked by title) — then this binding is let go and the move refused, naming the holder.
+        try {
+          this.refuseIfHeldElsewhere(ctx, app, t.windowId, t.windowId === undefined);
+        } catch (err) {
+          this.releaseTargets(ctx.sessionId, ctx.state, [t], "window_held");
+          ctx.bound.delete(targetId);
+          throw err;
+        }
         this.diffBases.clearTarget(ctx.sessionId, targetId); // a different window: the next state() is full
         ctx.state.lastTargetShot.delete(targetId);
         const detail = helperDetail(res?.detail, BIND_DETAIL_CAP);
@@ -1969,6 +1981,42 @@ export class ComputerV2Service {
     return undefined;
   }
 
+  /**
+   * A tab of a user's browser bound through Winter for Chrome (`browsers.tab`), while another session holds that browser
+   * as an app: the refusal, or undefined. Held app-wide: refused. Held per window: the extension knows the tab's window by
+   * its own id, the helper by the window server's — they meet on the window's title, which is its active tab's
+   * (`activeTitle`). A held window whose title can't be read, or a tab whose window can't be told, is taken to be the
+   * one (refused rather than acting in a window another agent works in).
+   */
+  async heldBrowserWindow(sessionId: string, bundleId: string, name: string, activeTitle: string | undefined): Promise<string | undefined> {
+    const want = bundleId.toLowerCase();
+    const held: Array<{ sessionId: string; windowId?: number }> = [];
+    for (const [sid, st] of this.sessions) {
+      if (sid === sessionId) continue;
+      for (const t of st.targets.values()) {
+        if (t.lost === undefined && t.bundleId.toLowerCase() === want) held.push({ sessionId: sid, ...(t.windowId === undefined ? {} : { windowId: t.windowId }) });
+      }
+    }
+    if (held.length === 0) return undefined;
+    const refuse = (h: { sessionId: string }, perWindow: boolean): string => {
+      let mode: string | undefined;
+      try { mode = this.deps.sessionMode?.(h.sessionId); } catch { mode = undefined; }
+      return heldMessage(name, h.sessionId, mode, perWindow);
+    };
+    const wide = held.find((h) => h.windowId === undefined);
+    if (wide !== undefined) return refuse(wide, false);
+    const title = activeTitle?.trim() ?? "";
+    if (title.length === 0 || !this.deps.helper.connected) return refuse(held[0]!, true);
+    let windows: ScreenWindowsResult["windows"];
+    try { windows = (await this.deps.helper.request<ScreenWindowsResult>("screen.windows", {}, { timeoutMs: 5_000 })).windows; } catch { return refuse(held[0]!, true); }
+    for (const h of held) {
+      const w = windows.find((x) => x.windowId === h.windowId);
+      const shown = w?.title.trim() ?? "";
+      if (shown.length === 0 || shown.startsWith(title) || title.startsWith(shown)) return refuse(h, true);
+    }
+    return undefined;
+  }
+
   /** A bind (or an open) of an app, or a window of it, another session holds: refused, naming the holder (its mode and
    *  id — never its title) and how to get it released. */
   private refuseIfHeldElsewhere(ctx: RunCtx, app: AppRef, windowId?: number, appWide = false): void {
@@ -2001,7 +2049,7 @@ export class ComputerV2Service {
   /** Lets go of these targets (`lost` = `reason`): the helper releases each. The names released, once each. Releasing
    *  NEVER lifts the user's work mark (the review of 2026-10-20: `apps.release(x); apps.open(x)` would have been a way for
    *  a model to lift it itself) — only the user's own message does (`userSaidGoAhead`). */
-  private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended" | "archived"): string[] {
+  private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended" | "archived" | "window_held"): string[] {
     const names: string[] = [];
     for (const t of targets) {
       if (t.lost !== undefined) continue;
@@ -2317,6 +2365,7 @@ export function targetLostMessage(name: string, reason: string): string {
     case "released": return `${name} was released (apps.release) — bind it again with apps.open() if you need it`;
     case "turn_ended": return `this session let go of ${name} when its last turn ended (an app is held only during a turn) — bind it again with apps.open()`;
     case "archived": return `this session let go of ${name} when it was archived — bind it again with apps.open()`;
+    case "window_held": return `this binding of ${name} was let go: the window useWindow() moved it to is held by another session — bind another window with apps.open()`;
     case "app_quit": return `${name} quit — open it again with apps.open()`;
     case "window_closed": return `${name}'s window closed — call apps.open or useWindow to pick another`;
     case "helper_restart": return `Winter Computer Use restarted, so ${name} is no longer bound — bind it again with apps.open()`;
@@ -2333,7 +2382,7 @@ function refusedWords(reason: string, name: string, workLift = true): string {
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
-    case "user_working": return `the user is working in ${name} right now — ask the user to switch away from ${name} for a moment${workLift ? ", or to say go ahead (their next message lets you act)" : ""}; reading it with state(), find() or screenshot() still works`;
+    case "user_working": return `the user is working in ${name} right now — ask the user to switch away from ${name} for a moment${workLift ? ", or to say go ahead (their next message, or their answer to a question you ask them, lets you act)" : ""}; reading it with state(), find() or screenshot() still works`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

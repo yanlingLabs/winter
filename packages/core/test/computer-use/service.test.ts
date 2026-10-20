@@ -583,6 +583,30 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     expect(text(await w.run("try { await apps.open('/tmp/a.note') } catch (e) { print(e.name, e.message) }", { sessionId: "s_c" }))).toContain("TargetBusy");
   }, 30_000);
 
+  macOnly("useWindow() to a window another session holds: refused by id before it moves; moved there by title, let go and refused", async () => {
+    const w = world();
+    let next = 0;
+    w.fake.handlers["target.bind"] = (p) => {
+      next += 1;
+      const win = typeof p.window === "number" ? p.window : 7;
+      return { targetId: `tw${next}`, app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: win, title: `w${win}`, frame: [0, 0, 800, 600] } };
+    };
+    w.fake.handlers["target.useWindow"] = (p) => ({ window: { id: p.window === "Shopping" ? 7 : 12, title: String(p.window), frame: [0, 0, 1, 1] } });
+    await w.run("const a = await apps.open('Notes', { emit: false })", { sessionId: "s_a" });  // window 7
+    await w.run("const b = await apps.open('Notes', { window: 9, emit: false })", { sessionId: "s_b" });
+    const byId = await w.run("try { await b.useWindow(7) } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(byId)).toContain("TargetBusy That window of Notes is held by another session (s_a)");
+    expect(w.fake.calls("target.useWindow")).toHaveLength(0);
+    // Another window, free: moved.
+    expect(text(await w.run("await b.useWindow('Other'); print('moved')", { sessionId: "s_b" }))).toContain("moved");
+    // By title onto the held window: the binding is let go, and the refusal names the holder.
+    const byTitle = await w.run("try { await b.useWindow('Shopping') } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(byTitle)).toContain("TargetBusy That window of Notes is held by another session (s_a)");
+    expect(w.fake.calls("target.release").at(-1)).toEqual({ targetId: "tw2" });
+    const stale = await w.run("try { await b.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(stale)).toContain("TargetLost this binding of Notes was let go: the window useWindow() moved it to is held by another session");
+  }, 30_000);
+
   macOnly("apps.release(): by name, all, or nothing held — and nothing of the user's work mark lifts", async () => {
     const w = world();
     await w.run("const notes = await apps.open('Notes')\nconst te = await apps.open('TextEdit')");
@@ -600,7 +624,7 @@ describe("ComputerV2: locks, timeouts and cancellation", () => {
     const w = world();
     let working = true;
     w.fake.handlers["target.act"] = () => {
-      if (working) throw new FakeHelperError("refused", "the user is working in Notes right now — ask the user to switch away from Notes for a moment, or to say go ahead (their next message lets you act)", { reason: "user_working" });
+      if (working) throw new FakeHelperError("refused", "the user is working in Notes right now — ask the user to switch away from Notes for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)", { reason: "user_working" });
       return { rung: 1 };
     };
     await w.run("const notes = await apps.open('Notes')");

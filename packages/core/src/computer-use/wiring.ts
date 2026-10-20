@@ -194,6 +194,27 @@ export function desktopRefusalLiftFor(event: SessionEvent): string | undefined {
   return isHumanTurnOrigin(clientName ?? "session") ? event.sessionId : undefined;
 }
 
+/** The ways a question resolves with nobody answering (`runtime-sdk/question-bridge.ts`'s `by`). */
+const UNANSWERED_QUESTION_BY: ReadonlySet<string> = new Set(["timeout", "aborted", "superseded"]);
+
+/**
+ * The user's GO-AHEAD for the apps a session was refused in because they were working there (`user_working`): their own
+ * message to it (`desktopRefusalLiftFor`), or their answer to a question card of it — "Go ahead?" answered through
+ * `ask_user.respond` (`QuestionBroker.respond` → the question bridge's `question_resolved`, `by` = the answering
+ * client), which is no `user_message` (the review of 2026-10-20: a card's yes lifted nothing, the live failure's dead
+ * end). Never a question that resolved unanswered or empty, nor one answered by an automated origin. A Dispatch child's
+ * question relayed to the coordinator resolves in the child's own log, so the child is the session lifted.
+ */
+export function goAheadFor(event: SessionEvent): string | undefined {
+  const human = desktopRefusalLiftFor(event);
+  if (human !== undefined) return human;
+  if (event.type !== "question_resolved") return undefined;
+  const q = event as { by?: string; answers?: Record<string, string>; childSessionId?: string };
+  if (q.by === undefined || UNANSWERED_QUESTION_BY.has(q.by) || !isHumanTurnOrigin(q.by)) return undefined;
+  if (q.answers === undefined || Object.keys(q.answers).length === 0) return undefined;
+  return q.childSessionId ?? event.sessionId;
+}
+
 /**
  * The desktop-switch ruling (2026-10-10): the prompt's ON-SCREEN half — the helper's panel on the user's current
  * desktop (`prompt.desktopVisit`), with its own call id so closing it never cancels the script's other helper work.
@@ -405,6 +426,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
     installed: deps.inject?.browserInstalled ?? ((bundleId) => installedBrowser(bundleId)),
     persistentlyAllowed: (sessionId, bundleId) => policy.persistentlyAllowed(sessionId, bundleId),
     stopScript: (sessionId, reason) => service?.stopScript(sessionId, reason),
+    heldElsewhere: async (sessionId, bundleId, name, activeTitle) => await service?.heldBrowserWindow(sessionId, bundleId, name, activeTitle),
     ...(deps.turnRunning === undefined ? {} : { turnRunning: deps.turnRunning }),
     headlessSessionEnded: (sessionId) => headless.disposeSession(sessionId),
     headlessReason: () => headless.reason,
@@ -584,11 +606,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       svc.hoverNotes.observe(event);
       // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
       const lift = desktopRefusalLiftFor(event);
-      if (lift !== undefined) {
-        policy.liftDesktopRefusals(lift);
-        // …and "go ahead" in the apps it (and its Dispatch children) hold: the user's work mark lifts there.
-        svc.userSaidGoAhead(lift);
-      }
+      if (lift !== undefined) policy.liftDesktopRefusals(lift);
+      // The user's go-ahead — their message, or their answer to a question card of the session: the work mark lifts on
+      // the apps it (and its Dispatch children) were refused in because the user was working there.
+      const goAhead = goAheadFor(event);
+      if (goAhead !== undefined) svc.userSaidGoAhead(goAhead);
       // A built-in tab closed in the strip (by the user, or by Winter): the engine lets go of it.
       if (event.type === "panel_tab_closed") browsers.panelTabClosed(event.sessionId, (event as { tabId: string }).tabId);
       if (event.type === "turn_completed") {
