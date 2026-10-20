@@ -36,7 +36,7 @@ const PINS = {
   readinessKeys: true as Same<CoworkGuestReadinessKey, CoworkReadinessKey>,
   providerScope: true as Mutual<CoworkProviderRouteScope, CoworkProviderScope>,
   providerScopeKeys: true as Same<keyof CoworkProviderRouteScope, keyof CoworkProviderScope>,
-  legSession: true as Same<Omit<CoworkLegSession, "mode" | "coworkEpoch">, Omit<LegSession, "mode">>,
+  legSession: true as Same<Omit<CoworkLegSession, "mode" | "coworkEpoch" | "heldInput">, Omit<LegSession, "mode">>,
   legSessionMode: true as Same<CoworkLegSession["mode"], "cowork">,
   // D3: the peer inbox's `PeerEpoch` (`Pick<GuestEpoch, "incarnationId" | "leaseEpoch">`), absent before the guest starts.
   legSessionEpoch: true as Mutual<CoworkLegSession["coworkEpoch"], Pick<GuestEpoch, "incarnationId" | "leaseEpoch"> | undefined>,

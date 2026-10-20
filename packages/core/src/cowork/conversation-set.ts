@@ -156,6 +156,8 @@ export interface CoworkConversationSetInput {
    *  contract (`allowedView`, plan's read-only rule) and the supervisor do not admit that view, so a set carrying it is
    *  refused on the wire (pinned). Ignored outside plan. */
   readonly planScratchEpoch?: number;
+  /** #92 N3 (L7): the conversation's stable uids (`CoworkRepository.allocateGuestUids`). Absent: the fixed picks. */
+  readonly uids?: { readonly runtimeUid: number; readonly toolUid: number };
 }
 
 /** The plan scratch guest path of one conversation at one policy epoch (`/workspace/plan/<sid>/<epoch>`, outside `.winter`). */
@@ -197,6 +199,7 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
     authority: Object.freeze({ workspaceId: context.workspaceId, sessionId: input.backendSessionId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch,
       configRevision: input.configRevision, grantRevision: input.grantRevision, policyRevision: input.policyRevision }),
     ...COWORK_GUEST_IDENTITIES,
+    ...(input.uids === undefined ? {} : { runtimeUid: input.uids.runtimeUid, toolUid: input.uids.toolUid }),
     policy,
     roots: Object.freeze(planRoot === undefined ? [root] : [root, planRoot]),
     runtime: Object.freeze({ model: route.model, timeoutMs: COWORK_GUEST_RUNTIME_TIMEOUT_MS, toolClasses: Object.freeze(toolClasses),
