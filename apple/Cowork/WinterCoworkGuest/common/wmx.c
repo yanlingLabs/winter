@@ -278,8 +278,16 @@ size_t wmx_encode_control(const struct wmx_control *message, uint8_t *out, size_
 enum wmx_status wmx_parse_runtime_payload(const uint8_t *payload, size_t length, enum wmx_direction direction, struct wmx_runtime_prefix *out) {
     if (!payload || length < WMX_RUNTIME_PREFIX_BYTES) return WMX_MALFORMED;
     unsigned conversation = payload[0], stream = payload[1], flags = payload[2];
-    if (conversation >= WMX_RUNTIME_CONVERSATIONS || stream < WMX_STREAM_IN || stream > WMX_STREAM_ERR || flags > 1 || payload[3] != 0) return WMX_BAD_FIELD;
-    if ((stream == WMX_STREAM_IN) != (direction == WMX_DOWN)) return WMX_BAD_DIRECTION;
+#ifdef WG_FILE_CHANNEL_V1
+    const unsigned last_stream = WMX_STREAM_FILE_OUT;
+#else
+    const unsigned last_stream = WMX_STREAM_ERR;
+#endif
+    if (conversation >= WMX_RUNTIME_CONVERSATIONS || stream < WMX_STREAM_IN || stream > last_stream || flags > 1 || payload[3] != 0) return WMX_BAD_FIELD;
+    /* The file streams exist on conversation 0 only (the index is transport, a request names its own session). */
+    if (stream >= WMX_STREAM_FILE_IN && conversation != 0) return WMX_BAD_FIELD;
+    /* IN and FILE_IN travel down; OUT, ERR and FILE_OUT travel up. */
+    if ((stream == WMX_STREAM_IN || stream == WMX_STREAM_FILE_IN) != (direction == WMX_DOWN)) return WMX_BAD_DIRECTION;
     if (length == WMX_RUNTIME_PREFIX_BYTES && flags == 0) return WMX_BAD_FIELD;
     if (out) { out->conversation = conversation; out->stream = (enum wmx_stream)stream; out->end = (int)flags; }
     return WMX_OK;
