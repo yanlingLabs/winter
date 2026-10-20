@@ -508,6 +508,13 @@ class GuardedFsDevice(unittest.TestCase):
         self.assertIn('self.share.forward_notices();', device)
         self.assertIn('share.forward_notices();', '\n'.join(self.by_file['src/libkrun/src/lib.rs']))
 
+    def test_a_reply_area_under_the_out_header_is_refused(self):
+        device = '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork.rs'])
+        self.assertIn('pub const OUT_HEADER_BYTES: u64 = std::mem::size_of::<super::fuse::OutHeader>() as u64;', device)
+        self.assertIn('if !reply_area_fits(index, &request, total(&writable)) {', device)
+        self.assertIn('if writable != 0 || index != HPQ_INDEX {', device)
+        self.assertIn('fn guarded_fs_a_reply_area_under_the_out_header_is_refused_before_pinning()', '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork_tests.rs']))
+
     def test_its_suites_are_run(self):
         import run_cargo_tests
         self.assertIn(('krun-devices', 'blk', 'fs::cowork'), run_cargo_tests.RUNS)
@@ -660,6 +667,10 @@ class CiJob(unittest.TestCase):
     def setUp(self):
         text = (ROOT.parents[2] / '.github/workflows/ci.yml').read_text()
         self.job = text[text.index('\n  libkrun-queue:'):]
+
+    def test_the_composed_hash_asserted_is_the_pinned_one(self):
+        expected = json.loads((ROOT / 'expected-hashes.json').read_text())['composedSourceDiffSha256']
+        self.assertEqual(re.findall(r"d\['fullSourceDiffSha256'\] == '([0-9a-f]{64})'", self.job), [expected])
 
     def test_the_scope_step_does_not_follow_renames(self):
         step = self.job[self.job.index('name: Is this change in scope?'):self.job.index('name: Fetch the pinned upstream source')]

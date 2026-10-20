@@ -15,8 +15,8 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
 | Patch queue | `patch-queue.json` | 23 patches, 0004-0026, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `9947fbbed900606ccd235249076d9b5dcb1003b95e8832c15c7c4dbaa450cfc9` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `40acc4d64375d5b447cb6aab5ff27c16172df0265a139df6df097853518ec6b5`, stripped `01032c02cb09eba7ecadd71ef420c038760abc1c4030d67353f8c9b24a196fb6` |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `b27f1ad7286f5dfe654f2270741c6063a359c46903177690c640910a90ce8c3d` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `2e2eb8534bf243af9725faf36691a55e6a7d51217c993e45111f17e5db5a1c9d`, stripped `2f87d859d798771cde27b97656d932a4a61121f953af59d05a1c027e61a15f1a` |
 | Exports | `expected-hashes.json` | 72 `krun_*` symbols: the 62 upstream ones for this feature set plus 10 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (693 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (697 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -78,7 +78,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
 | `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, served by 0026 | `4cb81b56ee3da01eb9bc3c66d9cda529ae12ed5f77c7201bee6d5f05e13b18f5` |
 | `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, served by 0026 | `731eefe21499d499adb44ba4153bad15fd02489521c7d07aff765df41fdf328a` |
-| `0026-proposed-guarded-fs-device-shares-abi-gate.patch` | the guarded fs device of the shares (one device per share, reclaim pins, freeze, chain bounds, revocation by the device thread, exit-path join), the budget from the share count, `krun_cowork_add_share_v1` / `revoke_share_v1` / `next_share_event_v1` (with the server's notices), the gate clause for `r.fs` and gate-matrix rows with shares present | production | `bc58cb0f7512495f290e4a80570e87670c17756bf6c45d26cec98877989b22a5` |
+| `0026-proposed-guarded-fs-device-shares-abi-gate.patch` | the guarded fs device of the shares (one device per share, reclaim pins, freeze, chain bounds, revocation by the device thread, exit-path join), the budget from the share count, `krun_cowork_add_share_v1` / `revoke_share_v1` / `next_share_event_v1` (with the server's notices), the gate clause for `r.fs` and gate-matrix rows with shares present | production | `f4ed7ef2d32fdd0fad578e6fee136fc1dd38d287ee86aeb70956d69d99a5942c` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
 entry points, but later patches (0007 onward, 0016, 0020) edit the files they create, so leaving one out means rewriting the stack and
@@ -124,7 +124,9 @@ that serves the share's `ConfinedFs` the way the guarded block device serves a v
 `Access` (as `3 + i`), pins both rings for the activation and each request's descriptor ranges from pop to used entry, and touches
 guest memory only under a lease: the request is copied out, the server runs on a private bounce copy laid out descriptor for
 descriptor with no lease held, and the reply is copied back; a freeze defers either lease. A chain of more than 260 descriptors or
-1,056,768 bytes (4,096 on the high-priority queue) is refused before anything is pinned (terminal, as a malformed block chain). One
+1,056,768 bytes (4,096 on the high-priority queue) is refused before anything is pinned (terminal, as a malformed block chain), and so is a chain whose writable area cannot hold the
+16-byte FUSE out header (the stock READ, READDIR and READDIRPLUS handlers unwrap that split), except a FORGET or BATCH_FORGET with no
+writable descriptor on the high-priority queue. One
 thread per device, no shared-memory region, no `EVENT_IDX`. The budget is built from the actual share count S:
 `3 + S` devices, `48 + 4 S` pins, `8,388,608 + 1,114,136 S` bytes (15 / 96 / 21,758,240 at S = 12), and
 `krun_cowork_get_pin_counters_v1` reports it once a VM was built. Revocation sets the share's flag; a running device thread is woken

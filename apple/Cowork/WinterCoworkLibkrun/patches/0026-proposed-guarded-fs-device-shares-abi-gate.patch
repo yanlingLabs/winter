@@ -112,10 +112,10 @@ index ee89196..564021b 100644
      pub high_water_pins: u64,
 diff --git a/src/devices/src/virtio/fs/cowork.rs b/src/devices/src/virtio/fs/cowork.rs
 new file mode 100644
-index 0000000..3f73211
+index 0000000..4e9a038
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/cowork.rs
-@@ -0,0 +1,672 @@
+@@ -0,0 +1,693 @@
 +//! The guarded fs device of the Cowork shares (SH2, the device half of R6, R10, R11, R13 and R14 of the
 +//! N2 extensions design). One device serves one share: a `ConfinedFs` behind `Server::handle_confined_message`,
 +//! on libkrun's virtio-fs transport, guarded the way the guarded block device is:
@@ -129,7 +129,8 @@ index 0000000..3f73211
 +//!   resume (R14).
 +//! * A chain of more than `max_pages + 4` descriptors, or of more than 1,048,576 + 8,192 bytes (4,096 on the
 +//!   high-priority queue), is refused before anything is pinned: a terminal fault, as for a malformed block
-+//!   chain (R14).
++//!   chain (R14). So is a chain whose writable area is under the 16-byte FUSE out header, except a FORGET or
++//!   BATCH_FORGET with no writable descriptor at all on the high-priority queue (they take no reply).
 +//! * One worker thread per device handles one request at a time (R10). There is no shared-memory region (R6).
 +//! * Revocation (R11): any thread sets the flag. The device's own thread closes the share's descriptors at
 +//!   its next request boundary, or at once when it is idle (the revoker writes its request queue event),
@@ -174,6 +175,9 @@ index 0000000..3f73211
 +/// R14: one virtqueue's rings at the queue size the device offers: the descriptor table, the available
 +/// ring and the used ring (26,636 bytes at 1,024 entries).
 +pub const RING_BYTES: u64 = 16 * QUEUE_SIZE as u64 + (6 + 2 * QUEUE_SIZE as u64) + (6 + 8 * QUEUE_SIZE as u64);
++/// The FUSE out header every reply starts with. A chain whose writable area cannot hold it is refused: the
++/// stock READ, READDIR and READDIRPLUS handlers unwrap the split after it.
++pub const OUT_HEADER_BYTES: u64 = std::mem::size_of::<super::fuse::OutHeader>() as u64;
 +/// R14: pins one fs device holds at most: two ring pins, one request and one high-priority request.
 +pub const PINS_PER_SHARE: usize = 4;
 +/// R14: bytes one fs device pins at most (1,114,136).
@@ -498,6 +502,20 @@ index 0000000..3f73211
 +    Ok((readable, writable))
 +}
 +
++/// A chain's writable area holds at least the FUSE out header. The one exception is a request that takes no
++/// reply, sent as Linux sends it: a FORGET or BATCH_FORGET on the high-priority queue with no writable
++/// descriptor. The opcode is read from the private copy of the request, the one the server will see.
++fn reply_area_fits(index: usize, request: &[u8], writable: u64) -> bool {
++    if writable >= OUT_HEADER_BYTES {
++        return true;
++    }
++    if writable != 0 || index != HPQ_INDEX {
++        return false;
++    }
++    let opcode = request.get(4..8).and_then(|b| <[u8; 4]>::try_from(b).ok()).map(u32::from_le_bytes);
++    opcode == Some(super::fuse::Opcode::Forget as u32) || opcode == Some(super::fuse::Opcode::BatchForget as u32)
++}
++
 +impl FsPort {
 +    /// Pins both queues' rings (R14): the high-priority queue and the request queue, in that order.
 +    pub(crate) fn new(memory: GuestMemoryMmap, queues: Vec<Queue>, access: Access, device: Device) -> Result<Self, Fault> {
@@ -549,6 +567,9 @@ index 0000000..3f73211
 +            let len = range.len as usize;
 +            self.memory.read_slice(&mut request[done..done + len], GuestAddress(range.gpa)).map_err(|_| Fault::InvalidRange)?;
 +            done += len;
++        }
++        if !reply_area_fits(index, &request, total(&writable)) {
++            return Err(Fault::InvalidRange);
 +        }
 +        let ranges: Vec<Range> = readable.iter().chain(&writable).copied().collect();
 +        let pin = lease.pin(&ranges)?;
@@ -790,10 +811,10 @@ index 0000000..3f73211
 +mod tests;
 diff --git a/src/devices/src/virtio/fs/cowork_tests.rs b/src/devices/src/virtio/fs/cowork_tests.rs
 new file mode 100644
-index 0000000..8c33a82
+index 0000000..b93caaa
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/cowork_tests.rs
-@@ -0,0 +1,754 @@
+@@ -0,0 +1,850 @@
 +// The guarded fs device without a VM: real virtqueues of 1,024 entries in guest memory, a simulated guest
 +// driver that lays chains out as the Linux virtio-fs driver does, real FUSE requests, the reclaim `Access`,
 +// and the confined server on temporary trees under the system temp directory. No VM, no vCPU, no
@@ -922,6 +943,12 @@ index 0000000..8c33a82
 +        }
 +        self.push_raw(index, &chain, 0);
 +        out
++    }
++
++    /// A BATCH_FORGET in header at `at`: the request that fills a high-priority chain, with no reply.
++    fn batch_forget(&mut self, at: u64, len: u32) {
++        let header = InHeader { len, opcode: Opcode::BatchForget as u32, unique: 0, nodeid: 0, uid: 0, gid: 0, pid: 0, padding: 0 };
++        self.mem.write_slice(header.as_slice(), GuestAddress(at)).unwrap();
 +    }
 +
 +    fn used_idx(&self, index: usize) -> u16 {
@@ -1182,6 +1209,7 @@ index 0000000..8c33a82
 +    for (bytes, accepted) in [(4096u32, true), (4097, false)] {
 +        let mut rig = fresh();
 +        let at = rig.driver.buffer(u64::from(bytes));
++        rig.driver.batch_forget(at, bytes);
 +        rig.driver.push_raw(HPQ_INDEX, &[(at, 40, false), (at + 40, bytes - 40, false)], 0);
 +        let result = capture(&mut rig, HPQ_INDEX);
 +        if accepted {
@@ -1228,6 +1256,94 @@ index 0000000..8c33a82
 +        assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "case {case}");
 +        assert_eq!(rig.driver.used_idx(REQ_INDEX), 0, "case {case}");
 +    }
++}
++
++/// A chain whose writable area cannot hold the 16-byte out header is a terminal fault before anything is
++/// pinned, on both queues: READ, READDIR and READDIRPLUS with no writable byte and with 15 never reach the
++/// stock handlers' split of the header (which unwraps). A FORGET and a BATCH_FORGET with no writable
++/// descriptor on the high-priority queue are still served; on the request queue they fault, and so does a
++/// FORGET with 15 writable bytes on the high-priority queue.
++#[test]
++fn guarded_fs_a_reply_area_under_the_out_header_is_refused_before_pinning() {
++    let read = ReadIn { fh: 0, offset: 0, size: 4096, read_flags: 0, lock_owner: 0, flags: 0, padding: 0 };
++    for opcode in [Opcode::Read, Opcode::Readdir, Opcode::Readdirplus] {
++        for index in [REQ_INDEX, HPQ_INDEX] {
++            for writable in [0u32, 15] {
++                let mut rig = Rig::new();
++                rig.init();
++                let before = rig.driver.used_idx(index);
++                let header = InHeader { len: (40 + std::mem::size_of::<ReadIn>()) as u32, opcode: opcode as u32, unique: 9, nodeid: ROOT_ID, uid: 501, gid: 20, pid: 1, padding: 0 };
++                let mut request = header.as_slice().to_vec();
++                request.extend_from_slice(read.as_slice());
++                let at = rig.driver.buffer(request.len() as u64 + 16);
++                rig.driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++                let mut chain = vec![(at, request.len() as u32, false)];
++                if writable > 0 {
++                    chain.push((at + request.len() as u64, writable, true));
++                }
++                rig.driver.push_raw(index, &chain, 0);
++                assert_eq!(rig.step(index), Err(Fault::InvalidRange), "{opcode:?} queue {index} writable {writable}");
++                assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "nothing pinned");
++                assert_eq!(rig.driver.used_idx(index), before, "nothing published");
++            }
++        }
++    }
++    let forget = ForgetIn { nlookup: 1 };
++    for (opcode, index, writable, served) in [
++        (Opcode::Forget, HPQ_INDEX, 0u32, true),
++        (Opcode::BatchForget, HPQ_INDEX, 0, true),
++        (Opcode::Forget, HPQ_INDEX, 15, false),
++        (Opcode::Forget, REQ_INDEX, 0, false),
++        (Opcode::BatchForget, REQ_INDEX, 0, false),
++    ] {
++        let mut rig = Rig::new();
++        rig.init();
++        let before = rig.driver.used_idx(index);
++        let header = InHeader { len: 48, opcode: opcode as u32, unique: 0, nodeid: ROOT_ID, uid: 0, gid: 0, pid: 0, padding: 0 };
++        let mut request = header.as_slice().to_vec();
++        request.extend_from_slice(if matches!(opcode, Opcode::Forget) { forget.as_slice() } else { &[0u8; 8] });
++        let at = rig.driver.buffer(64);
++        rig.driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++        let mut chain = vec![(at, 48, false)];
++        if writable > 0 {
++            chain.push((at + 48, writable, true));
++        }
++        rig.driver.push_raw(index, &chain, 0);
++        if served {
++            assert_eq!(rig.step(index), Ok(Step::Completed), "{opcode:?}");
++            assert_eq!(rig.driver.used_idx(index), before.wrapping_add(1), "{opcode:?}");
++            assert_eq!(rig.driver.used(index, before).1, 0, "{opcode:?}: no reply bytes");
++        } else {
++            assert_eq!(rig.step(index), Err(Fault::InvalidRange), "{opcode:?} queue {index} writable {writable}");
++            assert_eq!(rig.driver.used_idx(index), before, "nothing published");
++        }
++        assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++    }
++}
++
++/// On the device thread, a READ with no writable byte takes the exit-77 path: the worker stops the gate
++/// and returns, and the thread never panics.
++#[test]
++fn guarded_fs_a_read_with_no_reply_area_stops_the_gate_without_a_panic() {
++    let tree = TempTree::new();
++    let share = share(&tree, "src-3", ShareEvents::new());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, kicks) = device_queues();
++    let thread = GuardedFsWorker::new(queues, mem, access.clone(), device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap().run(|| panic!("no completion"));
++    let read = ReadIn { fh: 0, offset: 0, size: 4096, read_flags: 0, lock_owner: 0, flags: 0, padding: 0 };
++    let header = InHeader { len: (40 + std::mem::size_of::<ReadIn>()) as u32, opcode: Opcode::Read as u32, unique: 9, nodeid: ROOT_ID, uid: 501, gid: 20, pid: 1, padding: 0 };
++    let mut request = header.as_slice().to_vec();
++    request.extend_from_slice(read.as_slice());
++    let at = driver.buffer(request.len() as u64);
++    driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++    driver.push_raw(REQ_INDEX, &[(at, request.len() as u32, false)], 0);
++    kicks[REQ_INDEX].write(1).unwrap();
++    thread.join().expect("the device thread does not panic");
++    assert!(access.stopped(), "the exit-77 path");
++    assert_eq!(share.idle_descriptors(), Some(1), "the server is back in its slot");
 +}
 +
 +/// A writable range outside guest memory is refused at capture, before the server touches the host: the
@@ -1278,6 +1394,7 @@ index 0000000..8c33a82
 +            let chain = max_chain(&mut driver);
 +            driver.push_raw(REQ_INDEX, &chain, 0);
 +            let at = driver.buffer(4096);
++            driver.batch_forget(at, 4096);
 +            driver.push_raw(HPQ_INDEX, &[(at, 40, false), (at + 40, 4056, false)], 0);
 +            let mut port = FsPort::new(mem, vec![queue(HPQ_BASE), queue(REQ_BASE)], access.clone(), device).unwrap();
 +            let lease = access.begin(device).unwrap();
