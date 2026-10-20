@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   SessionEvent, SYSTEM_SESSION_ID, TaskSchema, PANEL_COMMAND_ACTIONS,
-  BROWSER_COMMAND_ACTIONS, OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES,
+  BROWSER_COMMAND_ACTIONS, OFFICE_COMMAND_ACTIONS, PANEL_COMMAND_ARGS_MAX_JSON_BYTES, QUESTION_PLACEHOLDER_MAX,
 } from "../src/events";
 import {
   DAEMON_FEATURE_IMAGE_ORIGINAL_PATHS, HelloParams, HelloResult, IMAGE_FILE_EXTENSIONS, PROTOCOL_VERSION,
@@ -201,6 +201,30 @@ describe("SessionEvent discriminated union", () => {
     expect(SessionEvent.safeParse({ ...t, type: "question_asked", callId: "c", questions: [{ ...validQuestion, options: Array(5).fill({ label: "A" }) }] }).success).toBe(false); // 5 options
     expect(SessionEvent.safeParse({ ...t, type: "question_asked", callId: "c", questions: [{ ...validQuestion, header: "H".repeat(13) }] }).success).toBe(false); // 13-char header
     expect(SessionEvent.safeParse({ ...t, type: "question_asked", callId: "c", questions: [{ ...validQuestion, header: "H".repeat(12) }] }).success).toBe(true); // 12-char header ok
+  });
+
+  test("free-text questions: no options (absent or empty) and an optional placeholder ≤ 80", () => {
+    const t = { seq: 1, sessionId: "s", ts: 1, threadId: "t", type: "question_asked" as const, callId: "c" };
+    const ask = (q: Record<string, unknown>) => SessionEvent.safeParse({ ...t, questions: [{ question: "Name?", multiSelect: false, ...q }] });
+
+    // Absent options parse as an empty menu — the daemon's emit always carries the key.
+    const absent = ask({});
+    expect(absent.success).toBe(true);
+    expect(absent.success && absent.data.type === "question_asked" && absent.data.questions[0]!.options).toEqual([]);
+    expect(ask({ options: [] }).success).toBe(true);
+    // Exactly one option is still not a menu.
+    expect(ask({ options: [{ label: "A" }] }).success).toBe(false);
+    // Today's menus are unchanged.
+    expect(ask({ options: [{ label: "A" }, { label: "B" }] }).success).toBe(true);
+    expect(ask({ options: Array(4).fill({ label: "A" }) }).success).toBe(true);
+    expect(ask({ options: Array(5).fill({ label: "A" }) }).success).toBe(false);
+
+    expect(ask({ placeholder: "e.g. feature/login" }).success).toBe(true);
+    expect(ask({ placeholder: "x".repeat(QUESTION_PLACEHOLDER_MAX) }).success).toBe(true);
+    expect(ask({ placeholder: "x".repeat(QUESTION_PLACEHOLDER_MAX + 1) }).success).toBe(false);
+    expect(ask({ placeholder: "" }).success).toBe(false);
+    const withHint = { ...t, questions: [{ question: "Which?", multiSelect: true, placeholder: "Another", options: [{ label: "A" }, { label: "B" }] }] };
+    expect(SessionEvent.parse(withHint)).toEqual(withHint);
   });
 
   test("plan_presented / plan_resolved round-trip", () => {

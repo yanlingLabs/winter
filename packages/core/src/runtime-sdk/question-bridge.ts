@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { PermissionResult } from "@yanlinglabs/winter-agent-sdk";
-import type { NewSessionEvent, Question } from "@yanlinglabs/winter-protocol";
+import { QUESTION_PLACEHOLDER_MAX, type NewSessionEvent, type Question } from "@yanlinglabs/winter-protocol";
 import type { QuestionBroker } from "../agent/questions";
 import { NO_PARK_TIMEOUT_MS, type BridgeLogger } from "./bridge-common";
 
@@ -13,8 +13,16 @@ export const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
  *
  * The descriptor lives in the PRIVATE `winter-agent-runtime` package, so this shape is a repo fact
  * rather than a published type — SDK surface map §5.6 quotes it: `questions` (required, 1..4), each
- * `{ question: string; header: string (maxLength 12); options: Array<{ label; description;
- * preview? }> (2..4); multiSelect?: boolean }`, plus `answers?`, `annotations?` and `metadata?`.
+ * `{ question: string; header: string (maxLength 12); options?: Array<{ label; description;
+ * preview? }> (absent, 0, or 2..4); multiSelect?: boolean; placeholder?: string }`, plus `answers?`,
+ * `annotations?` and `metadata?`.
+ *
+ * **Free-text questions (2026-10-20).** No options (absent or `[]`) is a question the user answers
+ * by typing alone; a menu of 2–4 always gets a free-text box under it too. The typed text goes back
+ * as the answer string exactly like a chosen label — the runtime reads an answer that is no label as
+ * `otherResponse`. Exactly one option is still refused. `placeholder` is the box's hint: trimmed, a
+ * blank one dropped, a long one CLAMPED to `QUESTION_PLACEHOLDER_MAX` (a hint is never worth refusing
+ * the question over, and the wire schema refuses anything longer).
  *
  * Only `questions` is modelled: this schema's job is to VALIDATE, never to reshape. The answer is
  * returned as `{ ...input, answers }` off the ORIGINAL object, so `answers`/`annotations`/`metadata`
@@ -32,10 +40,28 @@ export const AskUserQuestionInput = z.object({
       label: z.string().min(1),
       description: z.string().optional(),
       preview: z.string().optional(),
-    })).min(2).max(4),
+    })).max(4).refine((options) => options.length !== 1, {
+      message: "options must be omitted or empty (a free-text question) or hold 2-4 entries",
+    }).optional(),
     multiSelect: z.boolean().optional(),
+    placeholder: z.string().optional(),
   })).min(1).max(4),
 });
+
+/** A question's `placeholder` as the wire carries it: trimmed, `undefined` when blank, at most
+ *  `QUESTION_PLACEHOLDER_MAX` UTF-16 units (what the wire schema's `.max` counts), cut on a code-point
+ *  boundary so a clamp never splits a surrogate pair, and ended with "…" when cut. */
+export function clampPlaceholder(raw: string | undefined): string | undefined {
+  const text = raw?.trim();
+  if (!text) return undefined;
+  if (text.length <= QUESTION_PLACEHOLDER_MAX) return text;
+  let kept = "";
+  for (const ch of text) {
+    if (kept.length + ch.length > QUESTION_PLACEHOLDER_MAX - 1) break;
+    kept += ch;
+  }
+  return `${kept.trimEnd()}…`;
+}
 
 export interface AskUserQuestionDeps {
   /** The OWNING Winter session. A Winter sub-agent's question surfaces HERE (see below). */
@@ -129,16 +155,22 @@ export function askUserQuestionBridge(deps: AskUserQuestionDeps): AskUserQuestio
 
     // Winter's `QuestionSchema` requires `multiSelect`; Winter's descriptor makes it optional. The
     // default is `false` — a single-choice question, which is what an omitted flag means.
-    const questions: Question[] = raw.questions.map((q) => ({
-      question: q.question,
-      ...(q.header ? { header: q.header } : {}),
-      options: q.options.map((o) => ({
-        label: o.label,
-        ...(o.description ? { description: o.description } : {}),
-        ...(o.preview ? { preview: o.preview } : {}),
-      })),
-      multiSelect: q.multiSelect ?? false,
-    }));
+    // `options` is ALWAYS emitted (`[]` for a free-text question): a shipped Swift client decodes it
+    // as a required array (see the protocol's `QuestionSchema`).
+    const questions: Question[] = raw.questions.map((q) => {
+      const placeholder = clampPlaceholder(q.placeholder);
+      return {
+        question: q.question,
+        ...(q.header ? { header: q.header } : {}),
+        options: (q.options ?? []).map((o) => ({
+          label: o.label,
+          ...(o.description ? { description: o.description } : {}),
+          ...(o.preview ? { preview: o.preview } : {}),
+        })),
+        multiSelect: q.multiSelect ?? false,
+        ...(placeholder ? { placeholder } : {}),
+      };
+    });
 
     // Supersede guard — the same defect the approval side guards, and the same ordering rule.
     //

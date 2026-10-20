@@ -1,0 +1,30 @@
+{
+  "type": "question_asked",
+  "sessionId": "s_1",
+  "threadId": "t_1",
+  "seq": 40,
+  "ts": 1700000000030,
+  "callId": "call_4",
+  "questions": [
+    {
+      "question": "What should the new branch be called?",
+      "header": "Branch",
+      "multiSelect": false,
+      "placeholder": "e.g. feature/login-retry"
+    },
+    {
+      "question": "Which targets?",
+      "header": "Targets",
+      "multiSelect": true,
+      "placeholder": "Another target",
+      "options": [
+        {
+          "label": "macOS"
+        },
+        {
+          "label": "iOS"
+        }
+      ]
+    }
+  ]
+}

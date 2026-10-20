@@ -207,8 +207,9 @@ func islandWaitingLine(_ card: IslandCard) -> String {
 // MARK: - The rectangle on top (approvals, questions, link requests)
 
 /// A card's content inside its liquid shell. Approvals and links: the line(s), ✕ and ✓. Questions: one question at a
-/// time, its options as rows (a single-choice question answers on the click), an "Other" field (clicking it lets the
-/// panel take the keyboard), ✓ to send once every question has an answer.
+/// time, its options as rows (a single-choice question answers on the click), the free-text box — under the options,
+/// or alone for a question with none (clicking it lets the panel take the keyboard; Return sends) —, ✓ to send once
+/// every question has an answer (a free-text question: once something is typed).
 struct IslandRectContent: View {
     let card: IslandCard
     @ObservedObject var store: IslandStore
@@ -304,9 +305,11 @@ struct IslandQuestionBody: View {
                             choose(i, in: question, at: index, draft: draft)
                         }
                     }
-                    TextField("Other…", text: Binding(
+                    // The free-text box, always: under the options, or alone when there are none (2026-10-20). Never
+                    // focused by itself — the panel is non-activating and takes the keyboard only for a click in it.
+                    TextField(questionFieldPlaceholder(question), text: Binding(
                         get: { draft.wrappedValue.otherTexts[index] ?? "" },
-                        set: { draft.wrappedValue.otherTexts[index] = $0 }))
+                        set: { draft.wrappedValue.setOtherText($0, forQuestion: index, multiSelect: question.multiSelect) }))
                         .textFieldStyle(.plain)
                         .font(Typography.composerField())
                         .foregroundStyle(Color.white)

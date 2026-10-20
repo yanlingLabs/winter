@@ -1,11 +1,11 @@
 import { test, expect, afterEach, jest } from "bun:test";
 import type { CanUseTool } from "@yanlinglabs/winter-agent-sdk";
-import { QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
+import { QUESTION_PLACEHOLDER_MAX, QuestionAskedEvent, QuestionResolvedEvent, type NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import { ApprovalBroker } from "../../src/agent/approvals";
 import { QuestionBroker } from "../../src/agent/questions";
 import { PermissionGate } from "../../src/agent/gate";
 import { canUseToolFor, NO_PARK_TIMEOUT_MS, type BridgeLogger } from "../../src/runtime-sdk/approval-bridge";
-import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL, AskUserQuestionInput } from "../../src/runtime-sdk/question-bridge";
+import { askUserQuestionBridge, ASK_USER_QUESTION_TOOL, AskUserQuestionInput, clampPlaceholder } from "../../src/runtime-sdk/question-bridge";
 
 const SESSION = "parent-session";
 const FIXED_NOW = 1_700_000_000_000;
@@ -325,4 +325,81 @@ test("the hard-coded §5.6 schema accepts the documented shape", () => {
   // 1..4 questions, 2..4 options — the descriptor's own bounds
   expect(AskUserQuestionInput.safeParse({ questions: new Array(5).fill({ question: "q", options: [{ label: "a" }, { label: "b" }] }) }).success).toBe(false);
   expect(AskUserQuestionInput.safeParse({ questions: [{ question: "q", options: new Array(5).fill({ label: "a" }) }] }).success).toBe(false);
+});
+
+// -------------------------------------------------------------------------------------------
+// FREE-TEXT QUESTIONS (2026-10-20): no options = typed answer alone; `placeholder` = the box's hint.
+// -------------------------------------------------------------------------------------------
+
+test("a question with no options is asked with `options: []` on the wire, and its typed answer allows", async () => {
+  for (const options of [undefined, []] as const) {
+    const h = bridge();
+    const { ctx } = signalOf();
+    const input = { questions: [{ question: "Branch name?", header: "Branch", ...(options ? { options } : {}) }] };
+    const pending = h.ask("tu-free", input, ctx);
+
+    expect(h.events).toHaveLength(1);
+    expect(h.events[0]).toEqual({
+      type: "question_asked", sessionId: SESSION, threadId: "main", callId: "tu-free",
+      // The key is ALWAYS present: a shipped Swift client decodes `options` as a required array.
+      questions: [{ question: "Branch name?", header: "Branch", options: [], multiSelect: false }],
+    });
+    expect(QuestionAskedEvent.parse({ ...h.events[0], seq: 1, ts: FIXED_NOW })).toBeTruthy();
+
+    h.questions.respond(SESSION, "tu-free", { "Branch name?": "feature/login-retry" }, "app");
+    await expect(pending).resolves.toEqual({
+      behavior: "allow",
+      updatedInput: { ...input, answers: { "Branch name?": "feature/login-retry" } },
+      decisionClassification: "user_temporary",
+    });
+  }
+});
+
+test("a placeholder rides the question trimmed; a blank one is dropped; a long one is clamped, never refused", async () => {
+  const h = bridge();
+  const { ctx } = signalOf();
+  const long = "e.g. ".concat("x".repeat(200));
+  const emoji = "😀".repeat(60); // 120 UTF-16 units: the clamp must count what the wire schema counts
+  const pending = h.ask("tu-hint", {
+    questions: [
+      { question: "Name?", header: "Name", placeholder: "  e.g. Winter  " },
+      { question: "Which?", header: "Which", placeholder: "   ", options: [{ label: "A" }, { label: "B" }], multiSelect: true },
+      { question: "Long?", header: "Long", placeholder: long },
+      { question: "Emoji?", header: "Emoji", placeholder: emoji },
+    ],
+  }, ctx);
+
+  expect(h.events).toHaveLength(1);
+  const asked = QuestionAskedEvent.parse({ ...h.events[0], seq: 1, ts: FIXED_NOW });
+  expect(asked.questions[0]!.placeholder).toBe("e.g. Winter");
+  expect("placeholder" in asked.questions[1]!).toBe(false);
+  expect(asked.questions[1]!.options.map((o) => o.label)).toEqual(["A", "B"]);
+  const clamped = asked.questions[2]!.placeholder!;
+  expect(clamped.length).toBeLessThanOrEqual(QUESTION_PLACEHOLDER_MAX);
+  expect(clamped.endsWith("…")).toBe(true);
+  expect(clamped.startsWith("e.g. xxx")).toBe(true);
+  const clampedEmoji = asked.questions[3]!.placeholder!;
+  expect(clampedEmoji.length).toBeLessThanOrEqual(QUESTION_PLACEHOLDER_MAX);
+  expect(clampedEmoji).toBe(`${"😀".repeat(39)}…`); // never half a surrogate pair
+
+  h.questions.respond(SESSION, "tu-hint", { "Name?": "x", "Which?": "A", "Long?": "y", "Emoji?": "z" }, "app");
+  await pending;
+});
+
+test("clampPlaceholder: short stays, blank drops, exactly-max stays whole", () => {
+  expect(clampPlaceholder(undefined)).toBeUndefined();
+  expect(clampPlaceholder("  ")).toBeUndefined();
+  expect(clampPlaceholder(" hint ")).toBe("hint");
+  expect(clampPlaceholder("x".repeat(QUESTION_PLACEHOLDER_MAX))).toBe("x".repeat(QUESTION_PLACEHOLDER_MAX));
+  expect(clampPlaceholder("x".repeat(QUESTION_PLACEHOLDER_MAX + 1))).toBe(`${"x".repeat(QUESTION_PLACEHOLDER_MAX - 1)}…`);
+});
+
+test("the schema takes 0 or 2-4 options and still refuses exactly one", () => {
+  const q = (extra: Record<string, unknown>) => AskUserQuestionInput.safeParse({ questions: [{ question: "q", ...extra }] }).success;
+  expect(q({})).toBe(true);
+  expect(q({ options: [] })).toBe(true);
+  expect(q({ options: [{ label: "a" }] })).toBe(false);
+  expect(q({ options: [{ label: "a" }, { label: "b" }] })).toBe(true);
+  expect(q({ options: new Array(5).fill({ label: "a" }) })).toBe(false);
+  expect(q({ placeholder: "hint" })).toBe(true);
 });
