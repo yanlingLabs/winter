@@ -463,7 +463,7 @@ test("pins (structural): no src module supplies the N3 cold-resume or the N4 hel
   expect(portNameWrites(["coldResume", "heldInput", "ownerPatchApplied"])).toEqual([
     "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(() => (entry.closed || sessi",
     "core/src/cowork/session-driver.ts PropertySignature readonly coldResume?: { readonly ownerPatchApplied: true };",
-    "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true };",
+    "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true; /** Design ru",
     "core/src/cowork/session-driver.ts PropertySignature readonly ownerPatchApplied: true",
     "core/src/cowork/session-ports.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
   ]);

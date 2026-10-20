@@ -199,6 +199,10 @@ export interface CoworkGuestRuntimeLink {
 /** A running incarnation, as a start resolves it. */
 export interface CoworkGuestRun {
   readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly guestBootId: string;
+  /** #92 N3: the guest's `runtime_ready` echo of the continuation it took (CR2): `resume` when its store was found and
+   *  resumed, `fresh` when it started a new one. Absent from a host that does not carry it; an `either` start without it is
+   *  refused (the driver never guesses). */
+  readonly continuation?: "fresh" | "resume";
   /** Conversation index 0 only (N2), available after `runtime_ready`. */
   runtime(conversation: 0): CoworkGuestRuntimeLink;
   stop(reason: "user" | "shutdown" | "restart" | "update"): Promise<CoworkGuestStopOutcome>;
