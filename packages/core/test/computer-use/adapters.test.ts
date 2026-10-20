@@ -861,3 +861,39 @@ describe("review fixes", () => {
     expect(info.unwrapped).toEqual([]);
   });
 });
+
+// 2026-10-20 (live): Chrome's guide sent the model to bind tabs with browsers.tab while Winter for Chrome was not installed.
+describe("a browser's guide follows whether Winter for Chrome is connected in it", () => {
+  const scopeFor = (guides: string[]) => ({
+    sessionId: "s1", callId: "c1", signal: new AbortController().signal, primitive: "bind", metric: { ts: 0, sessionId: "s1", callId: "c1", primitive: "bind", ms: 0, helperMs: 0 },
+    privatePath: true, helperVersion: () => "1.7.0", helper: async () => { throw new Error("no"); }, authorize: async () => {},
+    applescript: async () => ({ result: null }), openDocument: async () => { throw new Error("no"); },
+    builder: { text: () => {}, daemonLine: () => {}, guide: (t: string) => { guides.push(t); }, notice: () => {}, markScreenRead: () => {} },
+    clampWait: (ms: number) => ms, acted: () => {}, log: () => {},
+  });
+  const chrome = { targetId: "t1", bundleId: "com.google.Chrome", name: "Google Chrome", pid: 1, windowId: 9 };
+
+  test("not connected: the guide never points at browsers.tab and says what works instead", async () => {
+    const guides: string[] = [];
+    await new AppAdapters({ browserConnected: () => false }).onBind(scopeFor(guides), chrome);
+    expect(guides[0]).toContain("Guide chromium-noext@1:");
+    expect(guides[0]).toContain("Winter for Chrome is not connected in this browser, so its tabs can't be bound");
+    expect(guides[0]).toContain("Work in the bound window's own UI");
+    expect(guides[0]).not.toContain("bind the tab with browsers.tab");
+  });
+
+  test("connected, or not known: the guide that binds tabs", async () => {
+    for (const connected of [true, undefined]) {
+      const guides: string[] = [];
+      await new AppAdapters({ browserConnected: () => connected }).onBind(scopeFor(guides), chrome);
+      expect(guides[0]).toContain("Guide chromium@2:");
+      expect(guides[0]).toContain("bind the tab with browsers.tab");
+    }
+  });
+
+  test("both guides pass the table's rules", () => {
+    expect(adapterProblems(BUILTIN_ADAPTERS)).toEqual([]);
+    expect(adapterProblems([{ bundleIds: ["com.example.b"], guide: { id: "b@1", text: "x" }, guideWithoutExtension: { id: "b@1", text: "y" }, extras: [] }]).join())
+      .toContain("used twice");
+  });
+});

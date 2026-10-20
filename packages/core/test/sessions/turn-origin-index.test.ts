@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionStore } from "../../src/sessions/store";
 import { SessionHub } from "../../src/sessions/hub";
-import { runningTurnOrigin } from "../../src/sessions/turn-origins";
+import { AUTOMATED_TURN_ORIGINS, isHumanTurnOrigin, runningTurnOrigin } from "../../src/sessions/turn-origins";
 import { TurnOriginIndex, turnOriginIndexFor } from "../../src/sessions/turn-origin-index";
 
 function setup() {
@@ -123,5 +123,17 @@ describe("a re-seed from a CUT tail never guesses a person (review: fail-safe)",
   test("an UNCUT log (it starts at seq 1) is read exactly, as before", () => {
     const tail = [ev(1, "user_message", { text: "go", clientName: "winter-mac" }), ev(2, "turn_started")];
     expect(new TurnOriginIndex(storeOf(tail)).origin("s1")).toBe("winter-mac");
+  });
+});
+
+describe("automated turn origins", () => {
+  // A scheduled routine's prompt and a Workflow's agent() turn are the daemon's, not the user writing: no detach aborts
+  // them, and neither lifts a desktop-switch refusal or the user's work mark.
+  test("routine and workflow turns are automated, never human", () => {
+    for (const o of ["routine", "workflow", "messaging", "dispatch", "dispatch-wake"]) {
+      expect(AUTOMATED_TURN_ORIGINS.has(o)).toBe(true);
+      expect(isHumanTurnOrigin(o)).toBe(false);
+    }
+    expect(isHumanTurnOrigin("winter-mac")).toBe(true);
   });
 });

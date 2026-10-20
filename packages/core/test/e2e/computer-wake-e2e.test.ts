@@ -151,10 +151,18 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     rmSync(cwd, { recursive: true, force: true });
   });
 
+  // An app one session has bound is held from every other session until released; each test's session binds Notes, so
+  // the sessions before it are archived first (an archived session lets go of its apps).
+  const made: string[] = [];
+  const retire = async (): Promise<void> => {
+    for (const sessionId of made.splice(0)) await client.call(METHODS.sessionSetActivity, { sessionId, activity: "archived" });
+  };
   const session = async (policy = "auto"): Promise<string> => {
+    await retire();
     const { sessionId } = await client.call<{ sessionId: string }>(METHODS.sessionCreate, { scope: "e2e", mode: "code", model: "winter-test/calls", cwd, approvalPolicy: policy });
     // One client attaches to one session at a time (its sends go there); the wakes need no one attached.
     await client.call(METHODS.sessionAttach, { sessionId, fromSeq: 0 });
+    made.push(sessionId);
     return sessionId;
   };
   const log = (sid: string): SessionEvent[] => daemon!.sessions.read(sid);
@@ -290,7 +298,8 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
 
   test("Dispatch: a child's trigger armed in a followed turn — its wake turn is followed (child_update + the coordinator's wake)", async () => {
     const d = daemon!;
-    const dispatchId = (await client.call<{ sessionId: string }>(METHODS.sessionDispatch, {})).sessionId;
+    await retire();
+    const dispatchId =(await client.call<{ sessionId: string }>(METHODS.sessionDispatch, {})).sessionId;
     await d.winter.get(dispatchId)?.end();
     d.sessions.setModel(dispatchId, "winter-test/echo");
     const work = join(cwd, "dispatch-work");
@@ -301,6 +310,7 @@ run("ComputerV2 wake triggers through a real daemon (fake helper, fake wake back
     }) as { content: Array<{ text: string }>; isError: boolean };
     expect(spawn.isError).toBe(false);
     const child = /spawned session (s_[0-9a-z]+)/.exec(spawn.content[0]!.text)![1]!;
+    made.push(child);
     const updates = () => (log(dispatchId).filter((e) => e.type === "child_update" && (e as { childSessionId: string }).childSessionId === child) as Array<{ status: string }>).map((u) => u.status);
     await until(() => updates().includes("completed") || undefined, 60_000, "the child's first report");
     const armed = await until(() => log(child).find((e) => e.type === "wake_armed") as { wakeId: string } | undefined, 10_000, "the child's trigger");

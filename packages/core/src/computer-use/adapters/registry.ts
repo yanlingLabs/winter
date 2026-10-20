@@ -36,13 +36,14 @@ export function adapterProblems(adapters: readonly AppAdapter[]): string[] {
       owner.set(id, i);
     }
     for (const v of [a.versions?.min, a.versions?.max]) if (v !== undefined && !/^\d+(\.\d+)*$/.test(v)) problems.push(`${who}: version "${v}" is not dotted numbers`);
-    if (a.guide !== undefined) {
-      if (!GUIDE_ID.test(a.guide.id)) problems.push(`${who}: guide id "${a.guide.id}" is not "<key>@<rev>"`);
-      if (guides.has(a.guide.id)) problems.push(`${who}: guide id "${a.guide.id}" is used twice`);
-      guides.add(a.guide.id);
-      const bytes = Buffer.byteLength(a.guide.text);
-      if (bytes > GUIDE_MAX_BYTES) problems.push(`${who}: guide ${a.guide.id} is ${bytes} bytes (at most ${GUIDE_MAX_BYTES})`);
-      if (a.guide.text.trim().length === 0) problems.push(`${who}: guide ${a.guide.id} is empty`);
+    for (const g of [a.guide, a.guideWithoutExtension]) {
+      if (g === undefined) continue;
+      if (!GUIDE_ID.test(g.id)) problems.push(`${who}: guide id "${g.id}" is not "<key>@<rev>"`);
+      if (guides.has(g.id)) problems.push(`${who}: guide id "${g.id}" is used twice`);
+      guides.add(g.id);
+      const bytes = Buffer.byteLength(g.text);
+      if (bytes > GUIDE_MAX_BYTES) problems.push(`${who}: guide ${g.id} is ${bytes} bytes (at most ${GUIDE_MAX_BYTES})`);
+      if (g.text.trim().length === 0) problems.push(`${who}: guide ${g.id} is empty`);
     }
     const names = new Set<string>();
     for (const e of a.extras) {

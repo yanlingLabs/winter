@@ -271,6 +271,9 @@ export type TargetLostReason = "app_quit" | "window_closed" | "helper_restart" |
  * notification ends each watch. The daemon arms only on a helper at least this new (its version at `hello`).
  */
 export const HELPER_WATCH_VERSION = "1.17.0";
+/** helper 1.22.0: `work.lift {pids, reason?}` → `{lifted}` lifts the user's work mark (§4.8) — the user's go-ahead
+ *  message. Sent to any helper (a dev helper may run the code before its VERSION moves); `unsupported` is logged. */
+export const HELPER_WORK_LIFT_VERSION = "1.22.0";
 /** `watch.arm`'s `condition`: `ref` is a state() ref (a number) — the helper's own ref space for the bound window. */
 export interface WatchConditionWire {
   kind: "clicked" | "appeared" | "gone" | "changed" | "titled";

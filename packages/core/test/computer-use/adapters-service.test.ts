@@ -165,7 +165,8 @@ describe("adapters: what a bind prints", () => {
     // A reset: bindings gone, so the next bind prints the block again.
     const reset = await w.run("const f = await apps.open('Finder')", { reset: true });
     expect(unfenced(reset)).toContain("Guide finder@3:");
-    // Another session never saw it.
+    // Another session never saw it (once this one has let go of Finder: an app one session holds, no other binds).
+    await w.run("await apps.release()");
     const other = await w.run("const f = await apps.open('Finder')", { sessionId: "s2" });
     expect(unfenced(other)).toContain("Guide finder@3:");
   }, 30_000);

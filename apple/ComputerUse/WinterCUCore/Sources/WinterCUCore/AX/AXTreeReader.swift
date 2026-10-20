@@ -15,6 +15,8 @@ struct AXTreeReader {
     var maxNodes = AXTreeReader.defaultMaxNodes
     var maxDepth = 40
     var timeBudgetMs: Double = 2500
+    /// Ends the walk early (a cancelled call): what was read is kept, the rest counted as unread.
+    var shouldStop: (() -> Bool)?
 
     static let batch: [String] = [
         kAXRoleAttribute, kAXSubroleAttribute, kAXTitleAttribute, kAXDescriptionAttribute,
@@ -65,7 +67,7 @@ struct AXTreeReader {
         var truncated = false
 
         func node(_ e: AXUIElement, depth: Int) -> CUNode? {
-            guard budget > 0, now() < deadline else { truncated = true; return nil }
+            guard budget > 0, now() < deadline, shouldStop?() != true else { truncated = true; return nil }
             budget -= 1
             guard let attrs = AX.copyMultiple(e, Self.batch) else { return nil }
             let role = attrs[kAXRoleAttribute].flatMap(AX.stringValue) ?? "AXUnknown"
@@ -127,7 +129,7 @@ struct AXTreeReader {
             for (i, c) in childElements.enumerated() {
                 if let child = node(c, depth: depth + 1) {
                     n.children.append(child)
-                } else if budget <= 0 || now() >= deadline {
+                } else if budget <= 0 || now() >= deadline || shouldStop?() == true {
                     n.unreadChildren += childElements.count - i
                     break
                 }

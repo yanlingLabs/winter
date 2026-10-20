@@ -100,6 +100,7 @@ public final class CUCore: @unchecked Sendable {
             privateCaptureOverride = { _, _ in nil }  // never the window server's capture from a unit test
             pressSettleMs = 0
             webPressWatchMs = 0
+            openedWindowSettleMs = 0
             menuSettleMs = 0
             selectionHoldMs = 0
             blipReadMs = 0
@@ -107,6 +108,7 @@ public final class CUCore: @unchecked Sendable {
             blipPasteHoldMs = 0
             blipDrainMs = 0
             returnLoadWatchMs = 0
+            userInputAgesOverride = { (key: .greatestFiniteMagnitude, flags: .greatestFiniteMagnitude, click: .greatestFiniteMagnitude) }  // never the real HID state
             holdReleaseSchedule = { _, _ in }  // no real timer from a unit test: a test that wants it captures it
             keyTapInstaller = CUNoKeyTapInstaller()  // no real tap from a unit test: no blip unless a test fakes one
             restoreDeadlineMs = 0  // one activation, no waiting: a test that wants the retry sets it
@@ -243,16 +245,34 @@ public final class CUCore: @unchecked Sendable {
             let deadline = clock.nowMs() + windowWaitMs
             while clock.nowMs() < deadline {
                 let now = CUBindWait.realWindows(sys.windows(pid: app.processIdentifier))
-                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) { return fresh }
+                if let fresh = now.map(\.id).first(where: { !before.contains($0) }) {
+                    // Looked at again a moment later: Chrome makes a window for a URL, then shows the URL as a tab of an
+                    // existing window and closes it (live 2026-10-20: the bind failed "this app has no window 187200").
+                    if openedWindowSettleMs > 0 { try? await clock.sleep(ms: openedWindowSettleMs) }
+                    return confirmOpenedWindow(fresh, pid: app.processIdentifier)
+                }
                 try? await clock.sleep(ms: 60)
             }
-            // None new (the app showed the doc in an existing window, or none has appeared): the frontmost.
-            return CUBindWait.realWindows(sys.windows(pid: app.processIdentifier)).map(\.id).first
+            // None new (the app showed the doc in an existing window, or none has appeared): the main one.
+            return confirmOpenedWindow(nil, pid: app.processIdentifier)
         }()
         noteGuardianAfterglow(app.processIdentifier, raise: true)  // its window is up: it may still activate now
         let bound = CUBoundApp(name: app.localizedName ?? b.bundleIdentifier ?? appURL.lastPathComponent,
                                bundleId: app.bundleIdentifier ?? "", pid: app.processIdentifier)
         return OpenDocumentsResult(app: bound, windowID: windowID)
+    }
+
+    /// The window an open found, checked again: still there and a standard (document) window — else the app's main window
+    /// (accessibility's), else its front real window; nil when it has none.
+    func confirmOpenedWindow(_ id: UInt32?, pid: pid_t) -> UInt32? {
+        let server = sys.windows(pid: pid)
+        let real = CUBindWait.realWindows(server)
+        let axWindows = CUAXWindows.list(pid: pid, ax: ax, server: server)
+        if let id, real.contains(where: { $0.id == id }), axWindows.first(where: { $0.id == id })?.standard ?? true { return id }
+        if let id { CULog.bind.notice("open: window \(id, privacy: .public) is gone or not a document window — the app's main window instead") }
+        let realIds = Set(real.map(\.id))
+        if let main = axWindows.first(where: { $0.main && $0.standard && realIds.contains($0.id) }) { return main.id }
+        return real.map(\.id).first
     }
 
     // MARK: - binding
@@ -690,6 +710,9 @@ public final class CUCore: @unchecked Sendable {
     /// How to stop the running watcher (nil: off), and its tap's port (for re-enabling). Under `workWatcherLock`.
     var workWatcherStop: (() -> Void)?
     var workWatcherPort: CFMachPort?
+    /// When the running watcher started (`clock` seconds; nil: off). Under `workWatcherLock`. Input older than this was
+    /// seen by no tap — what `markRecentUserWork` reads the HID state for.
+    var workWatcherSince: TimeInterval?
     /// When a scroll last had the window under the pointer read for I6 (guarded by `guardianLock`).
     var lastScrollWorkCheck: TimeInterval = -.infinity
     /// When the user's last scroll GESTURE began (a began-phase event), for R18-b's scroll-as-use (under `guardianLock`).
@@ -746,6 +769,9 @@ public final class CUCore: @unchecked Sendable {
     /// Seconds since the last physical user input, injectable for tests.
     var secondsSinceUserInputOverride: (() -> TimeInterval)?
     var secondsSinceUserClickOverride: (() -> TimeInterval)?
+    /// Seconds since the user's last key-down, modifier change and mouse-down (HID state), for `markRecentUserWork`;
+    /// injectable — a test core reads none (all "long ago").
+    var userInputAgesOverride: (() -> (key: TimeInterval, flags: TimeInterval, click: TimeInterval))?
     /// The window server's key-focus pid, injectable for tests (the swallowed-click retry).
     var keyFocusPidOverride: (() -> pid_t?)?
 
@@ -826,9 +852,13 @@ public final class CUCore: @unchecked Sendable {
     var treeReadOverride: ((CUTarget) -> [CUNode])?
     /// The whole window's tree for `state()` (`observe`), replaceable by tests: the live reader walks real AX.
     var stateReadOverride: ((CUTarget) -> [CUNode])?
+    /// A whole-window read with its node budget, answering its roots and what it did not reach (nil: complete) — tests.
+    var fullReadOverride: ((CUTarget, Int) -> (roots: [CUNode], unread: Int?))?
 
     /// How long a moved window or an opened document's window may take to appear (shortened by tests).
     var windowWaitMs: Double = 3000
+    /// How long after a new window appears for an open it is looked at again (`confirmOpenedWindow`). 0 in test cores.
+    var openedWindowSettleMs: Double = 300
 
     /// The background reopen for an app running with zero windows: LaunchServices' open of the running app with
     /// activates:false sends it the reopen event, and it opens its default window — no raw Apple Event, no ⌘N.
@@ -1081,11 +1111,31 @@ public final class CUCore: @unchecked Sendable {
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             var unread: Int?
-            let roots: [CUNode]
-            if let fresh = freshRead(t) { roots = fresh } else {
+            var roots: [CUNode]
+            if let fresh = freshRead(t) {
+                roots = fresh
+                unread = t.lastFullReadUnread
+            } else {
                 let obs = try observe(t, within: nil)
                 roots = obs.roots
                 unread = obs.unread
+            }
+            var found = CUFinder.find(p.query, in: roots, formatter: formatter)
+            // A read cut short that found nothing: the whole tree once more, with a larger budget — at most once per page
+            // (or window) of the target, cancellable midway (live 2026-10-20: a find() on a long Safari page answered
+            // "read cut short" and nothing, the match past the ordinary read). The deeper read is then the one later
+            // finds answer from while it still describes the window.
+            let deepKey = pageNumber(t, pageSignature(t)).map { "page \($0)" } ?? "window \(t.windowID)"
+            if found.isEmpty, let cut = unread, cut > 0, t.deepFindKey != deepKey {
+                try token.check()
+                t.deepFindKey = deepKey
+                let deep = try observe(t, within: nil, maxNodes: Self.findDeepMaxNodes, timeBudgetMs: Self.findDeepBudgetMs,
+                                       stop: { token.isCancelled || Task.isCancelled })
+                try token.check()
+                CULog.act.notice("find in \(t.appName, privacy: .public): the read was cut short with no match — read deeper (\(cut, privacy: .public) unread before, \(deep.unread ?? 0, privacy: .public) after)")
+                roots = deep.roots
+                unread = deep.unread
+                found = CUFinder.find(p.query, in: roots, formatter: formatter)
             }
             // What the matches are of: a page other than the last state()'s, or a read cut short, is said.
             var notes: [String] = []
@@ -1102,10 +1152,13 @@ public final class CUCore: @unchecked Sendable {
             if let acted = t.afterActFromMs, clock.nowMs() - acted < Self.offDesktopLagFindMs, pageMayLagOffDesktop(t) {
                 notes.insert(Self.offDesktopLagSentence(t.appName), at: 0)
             }
-            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
-                                    note: notes.isEmpty ? nil : notes.joined(separator: "; "))
+            return TargetFindResult(elements: found, page: page, note: notes.isEmpty ? nil : notes.joined(separator: "; "))
         }
     }
+
+    /// The deeper read a `find` that matched nothing in a read cut short gets, once: nodes and wall time.
+    static let findDeepMaxNodes = 15_000
+    static let findDeepBudgetMs: Double = 6_000
 
     /// How long a full read may answer `find` again (a page's tree takes 0.5–2.5 s to walk; scripts run several
     /// finds in a row).
@@ -1113,6 +1166,12 @@ public final class CUCore: @unchecked Sendable {
 
     /// The last full read, while it still describes the window: young, and no act and no AX notification
     /// from the app since. Nil otherwise.
+    /// Keeps a full read (and what it did not reach) for `find` to answer from while it still describes the window.
+    func noteFullRead(_ t: CUTarget, _ roots: [CUNode], at: Double, unread: Int?) {
+        t.lastFullRead = (roots, at)
+        t.lastFullReadUnread = unread
+    }
+
     func freshRead(_ t: CUTarget) -> [CUNode]? {
         guard let last = t.lastFullRead, clock.nowMs() - last.atMs <= Self.findReuseMs,
               (t.lastActionMs ?? 0) <= last.atMs, (monitor.lastNotificationMs(pid: t.pid) ?? 0) <= last.atMs
@@ -1969,9 +2028,17 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
-    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes) throws -> Observation {
+    /// `timeBudgetMs`/`stop`: a longer walk (find's deeper read) that ends early once `stop` says so (its cancel).
+    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes,
+                 timeBudgetMs: Double? = nil, stop: (() -> Bool)? = nil) throws -> Observation {
         CUUserInputGuard.waitForQuiet()
         let win = try windowElement(t)
+        if within == nil, let read = fullReadOverride {
+            let (roots, unread) = read(t, maxNodes)
+            guard !roots.isEmpty else { throw CUError.busy("\(t.appName) did not answer — it may be busy; retry") }
+            if maxNodes >= AXTreeReader.defaultMaxNodes { noteFullRead(t, roots, at: clock.nowMs(), unread: unread) }
+            return Observation(roots: roots, focusedRef: nil, title: ax.string(win, kAXTitleAttribute) ?? t.windowTitle, unread: unread)
+        }
         if within == nil, let read = stateReadOverride {
             let roots = read(t)
             guard !roots.isEmpty else { throw CUError.busy("\(t.appName) did not answer — it may be busy; retry") }
@@ -1992,6 +2059,8 @@ public final class CUCore: @unchecked Sendable {
         if full { t.refs.beginGeneration() }
         var reader = AXTreeReader()
         reader.maxNodes = maxNodes
+        if let timeBudgetMs { reader.timeBudgetMs = timeBudgetMs }
+        reader.shouldStop = stop
         let readAt = clock.nowMs()
         let result = reader.read(roots: rootElements, cache: t.refs, now: clock.nowMs)
         if full, !result.truncated { t.refs.prune() }
@@ -2000,7 +2069,9 @@ public final class CUCore: @unchecked Sendable {
         }
         let hidden = Self.hiddenActions(t.refusedActions)
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
-        if full { t.lastFullRead = (roots, readAt) }
+        // What a cut-short read did not reach goes with it, so a later find() answered from it says so (`freshRead`).
+        let unread = result.truncated ? max(1, roots.reduce(0) { $0 + Self.unreadCount($1) }) : nil
+        if full { noteFullRead(t, roots, at: readAt, unread: unread) }
         // The bound window's own focus (an app answers for its key window only).
         var focusedRef: Int?
         var caret: String?
@@ -2023,9 +2094,8 @@ public final class CUCore: @unchecked Sendable {
             focusText = "focus in another of \(t.appName)'s windows — click the field first, or pass { into }"
         }
         let title = AX.string(win, kAXTitleAttribute) ?? t.windowTitle
-        let unread = result.truncated ? roots.reduce(0) { $0 + Self.unreadCount($1) } : nil
         return Observation(roots: roots, focusedRef: focusedRef, title: title, caret: caret, focusText: focusText,
-                           unread: unread.map { max(1, $0) })
+                           unread: unread)
     }
 
     /// The children a read saw but did not read, over the whole tree.

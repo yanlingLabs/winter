@@ -45,6 +45,9 @@ export interface AppAdaptersDeps {
   /** The app's `CFBundleShortVersionString` when the bind did not say (a helper older than 1.8.0) — asked only for an
    *  app whose adapter has version conditions. Default: LaunchServices' path for the bundle id, then its Info.plist. */
   appVersion?(bundleId: string): string | undefined;
+  /** Is Winter for Chrome connected in this browser (by its bundle id)? undefined: not a browser Winter links to, or not
+   *  known — the ordinary guide. */
+  browserConnected?(bundleId: string): boolean | undefined;
   log?(line: string): void;
 }
 
@@ -245,9 +248,21 @@ export class AppAdapters {
     }
     const n = b.dict?.commands.length ?? 0;
     if (n > 0) lines.push(`${name} dictionary: ${n} command${n === 1 ? "" : "s"} — .dict.<name>(…), run like applescript(); .help("dict") lists them`);
-    const guide = b.adapter?.guide;
+    const guide = this.guideOf(b);
     if (guide !== undefined) lines.push(`Guide ${guide.id}:`, guide.text.trim());
     return lines.length === 0 ? undefined : lines.join("\n");
+  }
+
+  /** The app's guide as things stand: a browser whose Winter for Chrome is not connected gets the one that does not
+   *  point at `browsers.tab` (live 2026-10-20: Chrome's guide sent the model to bind tabs with no extension installed). */
+  private guideOf(b: Bound): { id: string; text: string } | undefined {
+    const a = b.adapter;
+    if (a?.guideWithoutExtension !== undefined) {
+      let connected: boolean | undefined;
+      try { connected = this.deps.browserConnected?.(b.target.bundleId); } catch { connected = undefined; }
+      if (connected === false) return a.guideWithoutExtension;
+    }
+    return a?.guide;
   }
 
   /** `(Finder: extras, dictionary commands and guide finder@1 were shown earlier — .help() shows them again)`. */
@@ -255,7 +270,8 @@ export class AppAdapters {
     const parts: string[] = [];
     if ((b.adapter?.extras.length ?? 0) > 0) parts.push("extras");
     if ((b.dict?.commands.length ?? 0) > 0) parts.push("dictionary commands");
-    if (b.adapter?.guide !== undefined) parts.push(`guide ${b.adapter.guide.id}`);
+    const guide = this.guideOf(b);
+    if (guide !== undefined) parts.push(`guide ${guide.id}`);
     return `(${cardName(b.target.name)}: ${andList(parts)} ${parts.length === 1 && parts[0]!.startsWith("guide") ? "was" : "were"} shown earlier — .help() shows them again)`;
   }
 

@@ -13,7 +13,7 @@ import type { SessionApprovalPolicy } from "../../src/agent/gate";
 import { HelperClient } from "../../src/computer-use/helper-client";
 import { ComputerPolicy, type SessionFacts } from "../../src/computer-use/policy";
 import { RecentApps } from "../../src/computer-use/recent-apps";
-import { ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
+import { BIND_DETAIL_CAP, ComputerV2Service, SCREENSHOT_DETAIL_CAP, actLine, focusLine, heldMessage, helperDetail, pageLine, targetLostMessage, timeoutMessage, type ScriptResult } from "../../src/computer-use/service";
 import { AutomationTelemetry } from "../../src/computer-use/telemetry";
 import { sandboxAvailable } from "../../src/workflows/sandbox";
 import type { Settings } from "../../src/settings";
@@ -35,6 +35,8 @@ interface WorldOpts {
   dangerousAdded?: string[];
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
+  sessionMode?: (sessionId: string) => string | undefined;
+  coordinatorOf?: (sessionId: string) => string | undefined;
 }
 
 const services: ComputerV2Service[] = [];
@@ -77,6 +79,8 @@ function world(opts: WorldOpts = {}) {
     ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
     ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: (cwd?: string) => (cwd === "/proj" ? opts.dangerousAdded : []) } }),
     sessionCwd: () => "/proj",
+    ...(opts.sessionMode === undefined ? {} : { sessionMode: opts.sessionMode }),
+    ...(opts.coordinatorOf === undefined ? {} : { coordinatorOf: opts.coordinatorOf }),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -285,6 +289,29 @@ describe("ComputerV2: apps.open opens documents without activating the opener", 
     expect(w.fake.calls("apps.defaultOpener")[0]).toMatchObject({ urls: ["https://example.com"] });
   }, 30_000);
 
+  // Live 2026-10-20: Chrome made window 187200 for a URL, then showed the URL as a tab of 187195 — the bind of 187200
+  // failed "this app has no window 187200" though the URL had opened.
+  macOnly("an opened URL whose window is gone already binds the app's main window instead of failing", async () => {
+    const w = openWorld();
+    const chrome = { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508, running: true };
+    w.fake.apps.push(chrome);
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.google.Chrome", name: "Google Chrome", path: "/Applications/Google Chrome.app" });
+    w.fake.handlers["apps.openDocument"] = () => ({ app: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508 }, windowID: 187200 });
+    w.fake.handlers["target.bind"] = (p) => {
+      if (p.window === 187200) throw new FakeHelperError("invalid_params", "this app has no window 187200");
+      (w.fake as unknown as { targets: Map<string, unknown> }).targets.set("t9", chrome);
+      return { targetId: "t9", app: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 508 }, window: { id: 187195, title: "Inbox", frame: [0, 0, 800, 600] } };
+    };
+    const r = await w.run("const page = await apps.open('https://example.com')");
+    expect(r.isError).toBe(false);
+    expect(w.fake.calls("target.bind").map((c) => c.window)).toEqual([187200, undefined]);
+    expect(text(r)).toContain("opened example.com in Google Chrome (in the background)");
+    // Any other bind failure is still the open's failure.
+    w.fake.handlers["target.bind"] = () => { throw new FakeHelperError("invalid_params", "no app com.google.Chrome"); };
+    const r2 = await w.run("await apps.open('https://example.com')");
+    expect(r2.isError).toBe(true);
+  }, 30_000);
+
   test("isDocumentTarget: files and URLs open, an app name or .app bundle binds", () => {
     expect(isDocumentTarget("/tmp/report.pdf")).toBe(true);
     expect(isDocumentTarget("~/Downloads/a.csv")).toBe(true);
@@ -491,13 +518,198 @@ describe("ComputerV2: AppleScript, an extra door beside the UI", () => {
 });
 
 describe("ComputerV2: locks, timeouts and cancellation", () => {
-  macOnly("two sessions on one app: the second waits, then TargetBusy names the holder", async () => {
-    const w = world();
-    const holder = w.run("const notes = await apps.open('Notes')\nawait sleep(3000)", { sessionId: "s_holder" });
+  // 2026-10-20 (the user's ruling, then the review): an app a session has bound is HELD — no other agent acts in it until
+  // it is released, at the latest when the holder's turn ends — and the refusal names the holder by its mode and id only
+  // (never its title, never a pid) and how to get it released.
+  macOnly("two sessions on one app: the second is told which session holds it — mode and id, never a title — until it is released", async () => {
+    const w = world({ sessionMode: (id) => (id === "s_holder" ? "code" : undefined) });
+    const holder = w.run("const notes = await apps.open('Notes')\nawait sleep(1500)", { sessionId: "s_holder" });
     await Bun.sleep(400);
-    const r = await w.run("try { await apps.open('Notes') } catch (e) { print(e.name, e.message) }", { sessionId: "s_other", timeoutMs: 2_000 });
-    expect(text(r)).toContain("TargetBusy Notes is in use by session s_holder");
+    const bindIn = (sid: string) => w.run("try { await apps.open('Notes'); print('bound') } catch (e) { print(e.name, e.message) }", { sessionId: sid, timeoutMs: 2_000 });
+    const held = "TargetBusy That window of Notes is held by a code session (s_holder) until it releases it, at the latest when its turn ends; no other agent can act in it until then. Ask that session with SendMessage to release it (apps.release(\"Notes\")), or ask the user.";
+    expect(text(await bindIn("s_other"))).toContain(held);
     await holder;
+    // Between its scripts (its turn still going), it still holds Notes. The second bind reached the helper and was let go
+    // at once (the bound window was known only then).
+    expect(text(await bindIn("s_other"))).toContain(held);
+    expect(w.fake.calls("target.release")).toHaveLength(2);
+    // A document opened in a held app is refused the same way, before anything opens.
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Notes", name: "Notes", path: "/System/Applications/Notes.app" });
+    const opened = await w.run("try { await apps.open('/tmp/a.note') } catch (e) { print(e.name, e.message) }", { sessionId: "s_other" });
+    expect(text(opened)).toContain("TargetBusy Notes is held by a code session (s_holder)");
+    expect(w.fake.calls("apps.openDocument")).toHaveLength(0);
+    // Released: the other session binds at once. Releasing lifts NOTHING of the user's work mark.
+    const rel = await w.run("print(JSON.stringify(await apps.release(notes)))", { sessionId: "s_holder" });
+    expect(text(rel)).toContain("released Notes — other agents can use it now");
+    expect(text(rel)).toContain('{"released":["Notes"]}');
+    expect(w.fake.calls("work.lift")).toEqual([]);
+    expect(text(await bindIn("s_other"))).toContain("bound");
+    // The released handle is no longer bound, and says why.
+    const stale = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_holder" });
+    expect(text(stale)).toContain("TargetLost Notes was released (apps.release)");
+  }, 30_000);
+
+  macOnly("the holder named by mode: Dispatch (which can't be messaged) and an unknown session; the title never appears", () => {
+    expect(heldMessage("Notes", "s_d", "dispatch")).toBe("Notes is held by Dispatch (s_d) until its turn ends; no other agent can act in it until then — try again after that, or ask the user.");
+    expect(heldMessage("Notes", "s_x")).toContain("Notes is held by another session (s_x) until it releases it");
+    expect(heldMessage("Google Chrome", "s_c", "code", true)).toContain("That window of Google Chrome is held by a code session (s_c)");
+  });
+
+  macOnly("a hold is per WINDOW where the binding has one: two sessions in two windows of one app don't block each other", async () => {
+    const w = world();
+    // The helper binds the window asked for (else window 7); a bind with no window binds the app as a whole.
+    let next = 0;
+    w.fake.handlers["target.bind"] = (p) => {
+      next += 1;
+      const win = typeof p.window === "number" ? p.window : p.window === "none" ? undefined : 7;
+      return { targetId: `tw${next}`, app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, ...(win === undefined ? {} : { window: { id: win, title: `w${win}`, frame: [0, 0, 800, 600] } }) };
+    };
+    await w.run("const a = await apps.open('Notes', { emit: false })", { sessionId: "s_a" });  // window 7
+    // Another window of it: bound. The same window by number: refused before the helper is asked.
+    expect(text(await w.run("const b = await apps.open('Notes', { window: 9, emit: false }); print('bound 9')", { sessionId: "s_b" }))).toContain("bound 9");
+    const binds = w.fake.calls("target.bind").length;
+    expect(text(await w.run("try { await apps.open('Notes', { window: 7 }) } catch (e) { print(e.name, e.message) }", { sessionId: "s_c" })))
+      .toContain("TargetBusy That window of Notes is held by another session (s_a)");
+    expect(w.fake.calls("target.bind")).toHaveLength(binds);
+    // A bind with no window named lands on window 7 — held: let go at once and refused.
+    expect(text(await w.run("try { await apps.open('Notes') } catch (e) { print(e.name, e.message) }", { sessionId: "s_c" })))
+      .toContain("TargetBusy That window of Notes is held by another session");
+    expect(w.fake.calls("target.release").at(-1)).toEqual({ targetId: `tw${next}` });
+    // An app-wide binding (no window) is held by any binding of the app, and holds the whole app.
+    expect(text(await w.run("try { await apps.open('Notes', { window: 'none' }) } catch (e) { print(e.name, e.message) }", { sessionId: "s_c" })))
+      .toContain("TargetBusy Notes is held by another session");
+    // A document may open in any window: refused while any window of the app is held.
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Notes", name: "Notes", path: "/System/Applications/Notes.app" });
+    expect(text(await w.run("try { await apps.open('/tmp/a.note') } catch (e) { print(e.name, e.message) }", { sessionId: "s_c" }))).toContain("TargetBusy");
+  }, 30_000);
+
+  macOnly("useWindow() to a window another session holds: refused by id before it moves; moved there by title, let go and refused", async () => {
+    const w = world();
+    let next = 0;
+    w.fake.handlers["target.bind"] = (p) => {
+      next += 1;
+      const win = typeof p.window === "number" ? p.window : 7;
+      return { targetId: `tw${next}`, app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: win, title: `w${win}`, frame: [0, 0, 800, 600] } };
+    };
+    w.fake.handlers["target.useWindow"] = (p) => ({ window: { id: p.window === "Shopping" ? 7 : 12, title: String(p.window), frame: [0, 0, 1, 1] } });
+    await w.run("const a = await apps.open('Notes', { emit: false })", { sessionId: "s_a" });  // window 7
+    await w.run("const b = await apps.open('Notes', { window: 9, emit: false })", { sessionId: "s_b" });
+    const byId = await w.run("try { await b.useWindow(7) } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(byId)).toContain("TargetBusy That window of Notes is held by another session (s_a)");
+    expect(w.fake.calls("target.useWindow")).toHaveLength(0);
+    // Another window, free: moved.
+    expect(text(await w.run("await b.useWindow('Other'); print('moved')", { sessionId: "s_b" }))).toContain("moved");
+    // By title onto the held window: the binding is let go, and the refusal names the holder.
+    const byTitle = await w.run("try { await b.useWindow('Shopping') } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(byTitle)).toContain("TargetBusy That window of Notes is held by another session (s_a)");
+    expect(w.fake.calls("target.release").at(-1)).toEqual({ targetId: "tw2" });
+    const stale = await w.run("try { await b.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_b" });
+    expect(text(stale)).toContain("TargetLost this binding of Notes was let go: the window useWindow() moved it to is held by another session");
+  }, 30_000);
+
+  macOnly("apps.release(): by name, all, or nothing held — and nothing of the user's work mark lifts", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')\nconst te = await apps.open('TextEdit')");
+    const none = await w.run("try { await apps.release('Mail') } catch (e) { print(e.name, e.message) }");
+    expect(text(none)).toContain("this session holds no app named \"Mail\" — it holds Notes, TextEdit");
+    expect(text(await w.run("await apps.release('com.apple.TextEdit')"))).toContain("released TextEdit");
+    expect(text(await w.run("await apps.release()"))).toContain("released Notes");
+    expect(text(await w.run("await apps.release()"))).toContain("this session holds no app");
+    expect(w.fake.calls("target.release").length).toBeGreaterThanOrEqual(2);
+    expect(w.fake.calls("work.lift")).toEqual([]);
+  }, 30_000);
+
+  // The review's HIGH: release-then-bind in one script must never lift the mark — the helper's refusal stands.
+  macOnly("release then bind again in one script, while the user works in the app: still refused, and nothing is lifted", async () => {
+    const w = world();
+    let working = true;
+    w.fake.handlers["target.act"] = () => {
+      if (working) throw new FakeHelperError("refused", "the user is working in Notes right now — ask the user to switch away from Notes for a moment, or to say go ahead (their next message, or their answer to a question you ask them, lets you act)", { reason: "user_working" });
+      return { rung: 1 };
+    };
+    await w.run("const notes = await apps.open('Notes')");
+    const r = await w.run("await apps.release('Notes')\nconst again = await apps.open('Notes')\ntry { await again.click(14) } catch (e) { print(e.name, e.message) }");
+    expect(text(r)).toContain("the user is working in Notes right now");
+    expect(w.fake.calls("work.lift")).toEqual([]);
+    // Only the user's own message lifts it — for the app this session was refused in.
+    w.svc.userSaidGoAhead("s1");
+    expect(w.fake.calls("work.lift")).toEqual([{ pids: [501], reason: "message" }]);
+    working = false;
+  }, 30_000);
+
+  macOnly("every session lets go of its apps when its main turn ends — at its run's end if one is still going", async () => {
+    const w = world({ sessionMode: (id) => (id === "s_dispatch" ? "dispatch" : "code") });
+    await w.run("const chrome = await apps.open('Notes')", { sessionId: "s_dispatch" });
+    w.svc.turnEnded("s_dispatch");
+    expect(w.fake.calls("target.release").map((c) => c.targetId)).toEqual(["t1"]);
+    expect(w.fake.calls("work.lift")).toEqual([]);
+    const stale = await w.run("try { await chrome.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_dispatch" });
+    expect(text(stale)).toContain("TargetLost this session let go of Notes when its last turn ended (an app is held only during a turn)");
+    // A code session too — its turn ending while its run still goes: let go when that run ends.
+    const running = w.run("const te = await apps.open('TextEdit')\nawait sleep(800)", { sessionId: "s_code" });
+    await Bun.sleep(400);
+    w.svc.turnEnded("s_code");
+    expect(text(await w.run("try { await apps.open('TextEdit') } catch (e) { print(e.name) }", { sessionId: "s_other", timeoutMs: 2_000 }))).toContain("TargetBusy");
+    await running;
+    expect(text(await w.run("await apps.open('TextEdit'); print('ok')", { sessionId: "s_other" }))).toContain("ok");
+    expect(text(await w.run("await apps.open('Notes'); print('ok')", { sessionId: "s_other2" }))).toContain("ok");
+  }, 30_000);
+
+  macOnly("the user's message lifts the work mark only where the session (or its Dispatch children) was refused, in its last turn or since", async () => {
+    const w = world({ coordinatorOf: (id) => (id === "s_child" ? "s_dispatch" : undefined) });
+    w.fake.handlers["target.act"] = (p) => {
+      if (p.targetId === "t1") throw new FakeHelperError("refused", "the user is working in Notes right now", { reason: "user_working" });
+      return { rung: 1 };
+    };
+    await w.run("const n = await apps.open('Notes')\ntry { await n.click(14) } catch (e) { print(e.name) }", { sessionId: "s_child" });
+    await w.run("const t = await apps.open('TextEdit')\nawait t.click(14)", { sessionId: "s_unrelated" });
+    // A message to a session refused nowhere lifts nothing — not even on the apps it holds.
+    w.svc.userSaidGoAhead("s_unrelated");
+    expect(w.fake.calls("work.lift")).toEqual([]);
+    // The child's turn ends; the user's message to Dispatch speaks for its child's refusal in that turn.
+    w.svc.turnEnded("s_child");
+    w.svc.userSaidGoAhead("s_dispatch");
+    expect(w.fake.calls("work.lift")).toEqual([{ pids: [501], reason: "message" }]);
+    // Consumed: the next message lifts nothing more.
+    w.svc.userSaidGoAhead("s_dispatch");
+    expect(w.fake.calls("work.lift")).toHaveLength(1);
+  }, 30_000);
+
+  macOnly("a refusal older than the turn before the message is not lifted by it", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "the user is working in Notes right now", { reason: "user_working" }); };
+    await w.run("const n = await apps.open('Notes')\ntry { await n.click(14) } catch (e) { print(e.name) }");
+    w.svc.turnEnded("s1");
+    w.svc.turnEnded("s1");
+    w.svc.userSaidGoAhead("s1");
+    expect(w.fake.calls("work.lift")).toEqual([]);
+  }, 30_000);
+
+  macOnly("a helper that doesn't know work.lift (a stale dev helper): said in the log, once per version", async () => {
+    const w = world();
+    w.fake.handlers["target.act"] = () => { throw new FakeHelperError("refused", "", { reason: "user_working" }); };
+    const r = await w.run("const n = await apps.open('Notes')\ntry { await n.click(14) } catch (e) { print(e.name, e.message) }");
+    // (The fake helper is older than 1.22.0: the daemon's own words promise no go-ahead.)
+    expect(text(r)).toContain("ask the user to switch away from Notes for a moment; reading it");
+    w.svc.userSaidGoAhead("s1");
+    await w.run("try { await n.click(14) } catch (e) {}");
+    w.svc.userSaidGoAhead("s1");
+    await Bun.sleep(50);
+    const said = w.logs.filter((l) => l.includes("does not know work.lift"));
+    expect(said).toEqual(["computer-use: Winter Computer Use 1.7.0 does not know work.lift (it needs 1.22.0; a dev helper not rebuilt?) — the user's go-ahead did not lift their work mark"]);
+  }, 30_000);
+
+  macOnly("an archived session lets go of its apps (nobody can message it to ask) — the work mark stays", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')", { sessionId: "s_old" });
+    expect(text(await w.run("try { await apps.open('Notes') } catch (e) { print(e.name) }", { sessionId: "s_new" }))).toContain("TargetBusy");
+    w.svc.sessionArchived("s_old");
+    expect(w.fake.calls("target.release").map((c) => c.targetId).sort()).toEqual(["t1", "t2"]);
+    expect(w.fake.calls("work.lift")).toEqual([]);
+    expect(text(await w.run("await apps.open('Notes'); print('ok')", { sessionId: "s_new" }))).toContain("ok");
+    // Brought back, its old handle says why it is no longer bound.
+    const stale = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_old" });
+    expect(text(stale)).toContain("TargetLost this session let go of Notes when it was archived");
   }, 30_000);
 
   macOnly("a timeout cancels the in-flight primitive (Cancelled) and the runtime survives", async () => {
@@ -736,6 +948,36 @@ describe("ComputerV2: the helper's errors and notifications", () => {
     expect(text(r)).toContain("screenshot({ live: true, reason }) takes one where the window is (the user is asked first)");
     expect(label.length).toBeLessThan(SCREENSHOT_DETAIL_CAP);
   }, 30_000);
+
+  macOnly("a bind's off-desktop note reaches the model whole (the 300-character cap cut it mid-word)", async () => {
+    const w = world();
+    // The helper's words as the live Dispatch run got them (2026-10-20), cut at "…each screenshot says ho".
+    const note = "Notes's window is not on this desktop, so it is worked in the background: a click is sent but can't be seen landing, keys reach it through a brief focus switch, and it may not redraw (each screenshot says how fresh it is) — screenshot({ live: true, reason }) gets what is on screen now, and an action that can't land from here asks the user to let Winter take them to its desktop for a moment (and back)";
+    expect(note.length).toBeGreaterThan(300);
+    expect(note.length).toBeLessThan(BIND_DETAIL_CAP);
+    const notesApp = w.fake.apps.find((a) => a.bundleId === "com.apple.Notes")!;
+    w.fake.handlers["target.bind"] = () => {
+      (w.fake as unknown as { targets: Map<string, unknown> }).targets.set("t1", notesApp);
+      return { targetId: "t1", app: { name: "Notes", bundleId: "com.apple.Notes", pid: 501 }, window: { id: 9, title: "Notes window", frame: [0, 0, 800, 600] }, detail: note };
+    };
+    const r = await w.run("const notes = await apps.open('Notes')");
+    expect(r.content.map((c) => (c.type === "text" ? c.text : "[image]"))).toContain(`${note}\n`);
+    const quiet = await w.run("const again = await apps.open('Notes', { emit: false })");
+    expect(text(quiet)).toContain("asks the user to let Winter take them to its desktop for a moment (and back)");
+  }, 30_000);
+
+  test("helperDetail: a note past its cap is cut at a clause boundary and says so — never mid-word", () => {
+    const long = `${"word ".repeat(30).trim()}, then the second clause runs on and on ${"more ".repeat(40).trim()}`;
+    const cut = helperDetail(long, 200)!;
+    expect(cut.length).toBeLessThanOrEqual(200);
+    expect(cut).toBe(`${"word ".repeat(30).trim()}…`);
+    // No boundary in the back half: the last whole word.
+    expect(helperDetail("alpha beta gamma delta epsilon", 14)).toBe("alpha beta…");
+    // Within the cap: whitespace folded, nothing added; nothing to say → undefined.
+    expect(helperDetail("  one\n two  ", 300)).toBe("one two");
+    expect(helperDetail("   ", 300)).toBeUndefined();
+    expect(helperDetail(42, 300)).toBeUndefined();
+  });
 
   macOnly("unsupported: the helper's sentence reaches the script; data.axError only the log", async () => {
     const w = world();
