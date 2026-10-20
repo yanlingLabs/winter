@@ -178,8 +178,9 @@ export interface EmbeddedLifecycleEvent {
 export interface EmbeddedSessionHostDeps {
   /** Trusted daemon home. Optional only for standalone transport fixtures. */
   home?: string;
-  /** Trusted integration seam. Production detects the installed namespace capability. */
-  hostPathProtectionCapability?: EmbeddedProtectionCapability;
+  /** Trusted integration seam. Production detects the installed namespace capability. `null` stands for an SDK WITHOUT the capability (an older one), so the floor's
+   *  refusal stays testable now that the installed SDK has it; production never passes it. */
+  hostPathProtectionCapability?: EmbeddedProtectionCapability | null;
   /** Synthetic reviewed-contract seam. Production uses the independently accepted Core version. */
   acceptedContextCoverageVersion?: number;
   log?: (line: string) => void;
@@ -283,7 +284,7 @@ type ProtectedWorkerOptions = SpawnEmbeddedWorkerOptions & { hostCodeProtection?
 
 export function createEmbeddedSessionHost(deps: EmbeddedSessionHostDeps = {}): EmbeddedSessionHost {
   const log = deps.log ?? ((): void => {});
-  const capability = deps.hostPathProtectionCapability ?? installedEmbeddedProtectionCapability();
+  const capability = deps.hostPathProtectionCapability === null ? undefined : (deps.hostPathProtectionCapability ?? installedEmbeddedProtectionCapability());
   const fileProtection = embeddedFileProtectionSupported(capability);
   const contextProtection = embeddedContextProtectionSupported(capability, deps.acceptedContextCoverageVersion);
   let policyRevision = 0, policyKey: string | undefined;
