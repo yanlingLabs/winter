@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, sep } from "node:path";
 import * as ts from "typescript";
 
 // N2 S6 anti-wiring pin. The four modules are host-side building blocks that nothing in src/ may import yet; S7 owns
@@ -51,7 +51,8 @@ test("anti-wiring: the four modules exist and no other src file names them, impo
   const needles = ["native/free-space", "native/pressure", "native/admission-probes", "native/resource-observer", "CoworkPressureGuard", "createCoworkAdmissionProbes", "createCoworkResourceObserver", "preflightImageAdmission", "assessFreeSpace",
     "createStatfsReader", "coordinationLedgerPath", "reverifyStickyExclusion", "WriterHaltPort", "createProductionHostAdapters", "COWORK_FREE_SPACE_RESERVE_BYTES", "COWORK_PRESSURE_", "RESOURCE_OBSERVATION_VALIDITY_MS", "parseIoPlatformUuid"];
   const banned: string[] = [];
-  for (const file of sources.filter(candidate => !modules.includes(candidate))) {
+  // N2 S7B part 1: the production environment builder (src/cowork/host-env/) is the one place that assembles these four modules (and it is itself built only through the activation seam).
+  for (const file of sources.filter(candidate => !modules.includes(candidate) && !candidate.includes(`${sep}cowork${sep}host-env${sep}`))) {
     const text = readFileSync(file, "utf8");
     for (const needle of needles) if (text.includes(needle)) banned.push(`${file.slice(packages.length)}:${needle}`);
     // Siblings in cowork/native/ (another slice's files) must not reach these by a relative specifier of any spelling: static,

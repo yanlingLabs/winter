@@ -461,6 +461,338 @@
         "index": 1,
         "reason": "out_of_order"
       }
+    },
+    {
+      "name": "full-sequence-with-shares",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "up",
+          "t": "shares_mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "up",
+          "t": "runtime_ready"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "shares-without-conversations",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "up",
+          "t": "shares_mounted"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
+    },
+    {
+      "name": "conversations-before-shares-mounted",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 6,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "shares-after-conversations",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "conversations"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 6,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "shares-before-mounted",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 4,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "shares-mounted-without-shares",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "up",
+          "t": "shares_mounted"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 5,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "shares-twice",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 6,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "shares-mounted-travelling-down",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "down",
+          "t": "shares_mounted"
+        }
+      ],
+      "result": {
+        "ok": false,
+        "index": 6,
+        "reason": "out_of_order"
+      }
+    },
+    {
+      "name": "fault-answering-shares",
+      "events": [
+        {
+          "dir": "up",
+          "t": "hello"
+        },
+        {
+          "dir": "down",
+          "t": "plan"
+        },
+        {
+          "dir": "up",
+          "t": "receipt"
+        },
+        {
+          "dir": "down",
+          "t": "ready"
+        },
+        {
+          "dir": "up",
+          "t": "mounted"
+        },
+        {
+          "dir": "down",
+          "t": "shares"
+        },
+        {
+          "dir": "up",
+          "t": "fault"
+        }
+      ],
+      "result": {
+        "ok": true
+      }
     }
   ]
 }

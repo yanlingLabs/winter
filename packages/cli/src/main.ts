@@ -1543,6 +1543,24 @@ if (import.meta.main) {
   // through a real daemon on a temp WINTER_HOME with a FileSecretStore, the session in a Bun Worker
   // built from the second compile entrypoint. Same argv[2] shape and the same WINTER_HOME rule as
   // `__runtime-state-probe` (it refuses without one; it never touches a real home or the Keychain).
+  if (process.argv[2] === "__fd-receiver-probe") {
+    const { runChannelReceiverProbe } = await import("./fd-receiver-probe");
+    const result = await runChannelReceiverProbe();
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
+  if (process.argv[2] === "__host-code-adapter-probe") {
+    const { runHostCodeAdapterProbe } = await import("./fd-receiver-probe");
+    const result = await runHostCodeAdapterProbe();
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
+  if (process.argv[2] === "__host-env-lazy-probe") {
+    const { runHostEnvLazyProbe } = await import("./fd-receiver-probe");
+    const result = await runHostEnvLazyProbe();
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    process.exit(result.ok ? 0 : 1);
+  }
   if (process.argv[2] === "__embedded-probe") {
     const result = await runEmbeddedProbe({ home: process.env.WINTER_HOME });
     process.stdout.write(`${JSON.stringify(result)}\n`);

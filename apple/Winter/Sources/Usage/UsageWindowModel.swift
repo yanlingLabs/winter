@@ -12,9 +12,16 @@ final class UsageWindowModel: ObservableObject {
     @Published var metric: UsageMetric = .cost
     @Published private(set) var series: UsageSeries?
     @Published private(set) var summary: UsageSummary?
+    /// The last summary the app already had (the island's), shown for the PLANS only until this window's own answer
+    /// lands (user 2026-10-19: the cached limits until the fresh read arrives) — plans do not depend on the range.
+    var seed: UsageSummary?
+    /// What the plan lines read: this window's own answer, else the seed.
+    var plansSummary: UsageSummary? { summary ?? seed }
     @Published private(set) var subscriptions: [UsageSubscription] = []
     @Published private(set) var failed = false
     @Published private(set) var subscriptionError: String?
+    /// The plan alarms (their ticks); nil before an answer or from a daemon with none (the lines then take no clicks).
+    @Published private(set) var alarms: [UsageAlarm]?
 
     var fetchSeries: (UsageRange, Set<UsageSource>) async throws -> UsageSeries = { r, _ in UsageSeries(range: r.rawValue) }
     var fetchSummary: (UsageRange, Set<UsageSource>) async throws -> UsageSummary = { r, _ in UsageSummary(range: r.rawValue) }
@@ -22,7 +29,12 @@ final class UsageWindowModel: ObservableObject {
     var saveSubscription: (UsageSubscription) async throws -> [UsageSubscription] = { _ in [] }
     var deleteSubscription: (String) async throws -> [UsageSubscription] = { _ in [] }
     var setTracking: (_ codex: Bool?, _ claudeCode: Bool?, _ antigravity: Bool?, _ opencode: Bool?) async throws -> Void = { _, _, _, _ in }
+    /// `usage.alarms.set` / `.remove`, each answering the whole list.
+    var setAlarm: (_ provider: String, _ windowKey: String, _ thresholdPercent: Int) async throws -> [UsageAlarm] = { _, _, _ in [] }
+    var removeAlarm: (_ id: String) async throws -> [UsageAlarm] = { _ in [] }
     var now: () -> Date = { Date() }
+    /// Bumped by every alarm edit: a summary asked for before one does not overwrite its answer.
+    private var alarmEdits = 0
 
     static let refreshInterval: TimeInterval = 15
     private var ticker: Task<Void, Never>?
@@ -47,6 +59,7 @@ final class UsageWindowModel: ObservableObject {
         let range = range, sources = sources
         // Never a source the daemon has not said it knows (`UsagePresentation.requestSources`).
         let asked = UsagePresentation.requestSources(sources, summary: summary)
+        let edits = alarmEdits
         do {
             async let s = fetchSeries(range, asked)
             async let m = fetchSummary(range, asked)
@@ -55,6 +68,7 @@ final class UsageWindowModel: ObservableObject {
             guard range == self.range, sources == self.sources else { return }
             self.series = series
             self.summary = summary
+            if edits == alarmEdits { alarms = summary.alarms }
             failed = false
         } catch {
             failed = series == nil
@@ -80,6 +94,23 @@ final class UsageWindowModel: ObservableObject {
 
     func remove(id: String) async {
         do { subscriptions = try await deleteSubscription(id) } catch { subscriptionError = "Couldn’t remove the plan." }
+    }
+
+    /// What a click on a plan line does (`UsageAlarmRules`) — nil while the daemon has no alarms.
+    var alarmActions: UsageAlarmActions? {
+        guard alarms != nil else { return nil }
+        return UsageAlarmActions(
+            set: { [weak self] provider, key, pct in self?.editAlarms { try await $0.setAlarm(provider, key, pct) } },
+            remove: { [weak self] id in self?.editAlarms { try await $0.removeAlarm(id) } })
+    }
+
+    private func editAlarms(_ edit: @escaping (UsageWindowModel) async throws -> [UsageAlarm]) {
+        alarmEdits += 1
+        Task { [weak self] in
+            guard let self, let list = try? await edit(self) else { return }
+            self.alarmEdits += 1
+            self.alarms = list
+        }
     }
 
     func setTrack(codex: Bool? = nil, claudeCode: Bool? = nil, antigravity: Bool? = nil, opencode: Bool? = nil) async {
@@ -110,5 +141,6 @@ final class UsageWindowModel: ObservableObject {
         self.series = series
         self.summary = summary
         self.subscriptions = subscriptions
+        self.alarms = summary?.alarms
     }
 }

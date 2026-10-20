@@ -309,7 +309,7 @@ func composerAttachments(from pasteboard: NSPasteboard) -> [ComposerAttachmentKi
 /// What a composer surface hands `ComposerTextView` so its paste/drop (and the "+" picker) can attach, and its
 /// chips can draw.
 struct ComposerAttachmentIntake {
-    /// Read at paste/drop time: `false` (not a code session) leaves AppKit's own behaviour untouched.
+    /// Read at paste/drop time: `false` (not a code or dispatch session) leaves AppKit's own behaviour untouched.
     let isEnabled: () -> Bool
     /// Attach one: its id, for the text view to put its chip in the text — or `nil` when refused (the surface
     /// has already shown why, in its composer notice line).

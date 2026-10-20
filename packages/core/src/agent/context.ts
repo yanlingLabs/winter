@@ -43,16 +43,24 @@ export const ULTRA_DELEGATION_INSTRUCTION = [
   "This is a posture, not a quota. Work that is genuinely sequential, or small enough that splitting it would cost more than it saves, stays right here. Ultra is a licence to delegate, never an obligation to.",
 ].join("\n\n");
 
-/** Code-mode image paths (2026-10-10, "raw image paths"): the ONE standing line that tells a code
- *  session's model what an image path in the user's message is. A STAGED copy (clipboard data the daemon
- *  wrote) always has the fixed shape `<temp>/winter-session-<id>/images/image_<k>.<ext>` (`stage-image.ts`),
- *  and the session's own temp folder is where the model may keep or move things; any other image path is the
- *  user's own file, which must stay where it is. The line names that SHAPE rather than "this session's temp
- *  folder", which the prompt never states and the model cannot tell from `$TMPDIR` — and it stays STATIC: no
- *  session id, no path, no per-message state, so it never moves the cached prefix. Added by `assemble()` to
- *  every prompt that keeps the base slot (code, dispatch children), never to chat's or a dispatch coordinator's. */
+/** Code-mode image paths (2026-10-10, "raw image paths"): the ONE standing line that tells a code session's model
+ *  what an image path in the user's message is. A STAGED copy (clipboard data the daemon wrote) always has the fixed
+ *  shape `<temp>/winter-session-<id>/images/image_<k>.<ext>` (`stage-image.ts`), and the session's own temp folder is
+ *  where the model may keep or move things; any other image path is the user's own file, which must stay where it
+ *  is. The line names that SHAPE rather than "this session's temp folder", which the prompt never states and the
+ *  model cannot tell from `$TMPDIR` — and it stays STATIC: no session id, no path, no per-message state, so it never
+ *  moves the cached prefix. Added by `assemble()` to every prompt that keeps the base slot (code, dispatch children);
+ *  never to chat's (no attachments) or the dispatch coordinator's, which gets `DISPATCH_IMAGE_PATH_GUIDANCE`. */
 export const IMAGE_PATH_GUIDANCE =
   "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy you may move to keep; any other image path is the user's own file — read or copy it, never move, rename or edit it unless the user asks.";
+
+/** Dispatch's own image-path line (2026-10-19, image and file attachments in Dispatch): the same two shapes as
+ *  `IMAGE_PATH_GUIDANCE`, WITHOUT its licence to move or copy — the coordinator has no write tools, its prompt routes
+ *  anything that changes files to SpawnSession and keeps Bash to inspection (`dispatch-prompt.ts`), and it has no
+ *  $OUTDIR to keep a copy in. It also says a staged copy is kept about two weeks (`STAGED_IMAGE_RETENTION_MS`, which
+ *  prunes Dispatch only). STATIC like the code line — no session id, no path — in the same place in the prompt. */
+export const DISPATCH_IMAGE_PATH_GUIDANCE =
+  "An image path in the user's message that sits inside a `winter-session-…/images/` folder is a staged copy of a pasted image, kept for about two weeks; any other image or file path is the user's own file. Read either (Read, or Bash for inspection) — anything that changes, moves or copies files routes to SpawnSession, with the path in the child's prompt.";
 
 const TRUNC = "\n[…truncated]";
 
@@ -357,6 +365,12 @@ export class ContextAssembler {
     // the date and the `_assistant` memory injection for chat and dispatch, exactly as today (their
     // runtime auto-memory is off, r3). Absent/false (router 0.0.11, every existing caller): byte-identical.
     runHomeApplied?: boolean;
+    // Image attachments (2026-10-19): WHICH image-path line this prompt carries. Absent: `IMAGE_PATH_GUIDANCE`
+    // exactly when the base slot is kept (`basePromptOverride` unset — code, dispatch children), as before.
+    // "dispatch": `DISPATCH_IMAGE_PATH_GUIDANCE`, under the coordinator's override (it takes attachments and swaps
+    // the base slot whole) — `winterSystemPromptFor` sets it for dispatch only, so chat never gets a line. "code"
+    // forces the code line; `false` leaves the line out.
+    imagePathGuidance?: "code" | "dispatch" | false;
   }): string {
     const cwd = input.cwd;
     const runHome = input.runHomeApplied === true;
@@ -405,11 +419,14 @@ export class ContextAssembler {
         extraDirs: input.extraDirs ?? [],
       }));
     }
-    // Code-mode image input: how to treat an image path in the user's message. Gated on
+    // Image attachments: how to treat an image path in the user's message. By default gated on
     // `basePromptOverride === undefined` ALONE — like the workspace block it is about the code
     // session's job, not its persona, so a style that replaces the base keeps it, and a run-home
     // incarnation keeps it too — and NOT on `outDir`, which a workdir-less test composes without.
-    if (input.basePromptOverride === undefined) sections.push(IMAGE_PATH_GUIDANCE);
+    // `imagePathGuidance` overrides that default (the dispatch coordinator takes attachments too, under its own line).
+    const imageLine = input.imagePathGuidance ?? (input.basePromptOverride === undefined ? "code" : false);
+    if (imageLine === "code") sections.push(IMAGE_PATH_GUIDANCE);
+    else if (imageLine === "dispatch") sections.push(DISPATCH_IMAGE_PATH_GUIDANCE);
     // provider-correctness T5: ADDITIVE, and deliberately NOT part of the base-slot resolution
     // above. A style — even one that REPLACES the base (`keepCodingInstructions:false`) — is about
     // which persona is speaking; the tier is about how hard the user asked it to work. The two are
