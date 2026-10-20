@@ -398,6 +398,9 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
       for (const computerOffered of ["ComputerV2", "Computer", false] as const) {
         const text = dispatchSystemPrompt({ exaKeyPresent, computerOffered });
         expect(text).toContain("# Act first; ask with the tool");
+        // 2026-10-20: the reply shows in the pill's small card — very brief, straight to the point.
+        expect(text).toContain("# Answer briefly");
+        expect(text).toContain("Answer very briefly and straight to the point: lead with the answer or the result");
         expect(text).toContain("When a request can be acted on, act on it — a sensible default beats a question.");
         expect(text).toContain("\"Find me X\", \"look around\" or \"show me\" means LOOK");
         expect(text).toContain("use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn");
@@ -433,7 +436,10 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
     const w = world();
     const code = winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd });
     const chat = winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd });
-    for (const text of [code, chat]) expect(text).not.toContain("# Act first; ask with the tool");
+    for (const text of [code, chat]) {
+      expect(text).not.toContain("# Act first; ask with the tool");
+      expect(text).not.toContain("# Answer briefly");
+    }
     expect(BASE_PROMPT).toContain("ALWAYS ask via the AskUserQuestion tool with structured options");
     expect(BASE_PROMPT).not.toContain("ask_user");
   });
