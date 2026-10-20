@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "f5612e4671b16a5fa2cb771e78a2dd6a6b0b4789",
+  "sdkCommit": "7511bbaedd734c7379bdafdc68c13027f60fe398",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -81,9 +81,10 @@
     "previousCommit": "39ba77ec333293cfcaabcf7eb29b4d7a58f24990",
     "intermediateCommits": [
       "093fb3ead915d967e8a01b358abdbcc39a76f447",
-      "7e71929d0231be2d77645bfa47ee2b550f3add22"
+      "7e71929d0231be2d77645bfa47ee2b550f3add22",
+      "f5612e4671b16a5fa2cb771e78a2dd6a6b0b4789"
     ],
-    "mainAt": "f5612e4671b16a5fa2cb771e78a2dd6a6b0b4789",
+    "mainAt": "7511bbaedd734c7379bdafdc68c13027f60fe398",
     "mergedPullRequests": [
       27,
       28,
@@ -95,7 +96,7 @@
     ],
     "contains": [
       "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])",
-      "the guest-side work of the Cowork guest arc: #43 messaging, #44 cold resume, #42 browse (supervisor and session-owner library change; the launcher source is unchanged)"
+      "the guest-side work of the Cowork guest arc: #43 messaging, #44 cold resume, #42 browse (supervisor and session-owner library change; the launcher source is unchanged); 7511bbae is the v0.0.54 release commit on top (version strings only, no guest source change)"
     ],
     "supervisorSha256": "00274717197787a109b171061a4397eb16582a2d369cf719ee4431e815f5ea09",
     "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) were source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests."
