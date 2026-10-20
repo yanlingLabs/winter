@@ -1,4 +1,7 @@
-import { describe, expect, test } from "bun:test";
+import { setDefaultTimeout, describe, expect, test } from "bun:test";
+
+// Whole-repo source scans (AST/regex over every package): a loaded CI runner can pass bun's 5 s default, so these files get 30 s.
+setDefaultTimeout(30_000);
 import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
