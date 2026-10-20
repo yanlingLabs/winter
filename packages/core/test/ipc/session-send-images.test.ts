@@ -523,11 +523,14 @@ describe("session.send / session.steer — images (code-mode image input)", () =
     c.close();
   });
 
-  test("a non-code session refuses image_session_not_code; nothing appended", async () => {
+  test("a chat session refuses image_session_not_code (send and steer); nothing appended", async () => {
     const { store, c, sid } = await staged("chat");
     const before = store.read(sid).length;
-    const res = await c.request(METHODS.sessionSend, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: "/tmp/x/images/image_1.png" }] });
-    expect(res.error.data.code).toBe(IMAGE_SESSION_NOT_CODE);
+    for (const method of [METHODS.sessionSend, METHODS.sessionSteer]) {
+      const res = await c.request(method, { sessionId: sid, text: "[Image #1]", images: [{ n: 1, path: "/tmp/x/images/image_1.png" }] });
+      expect(res.error.data.code).toBe(IMAGE_SESSION_NOT_CODE);
+      expect(res.error.message).toBe("images can only be added to code and dispatch sessions");
+    }
     expect(store.read(sid).length).toBe(before);
     c.close();
   });

@@ -63,8 +63,9 @@ const vCur = readCanonical();
 // silently computing a malformed vNext.
 const vNext = nextVersion(vCur, "--patch");
 sh(`xcodegen generate`, join(ROOT, "apple", "Winter"));
+// COWORK_NATIVE=omit: this is a local update-feed rig, never released; it ships no Cowork native pair (the Embed phase then strips any and writes no pins file).
 sh(
-  `xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' -configuration Release -derivedDataPath "${OUT}/dd" build`,
+  `COWORK_NATIVE=omit xcodebuild -project Winter.xcodeproj -scheme Winter -destination 'platform=macOS' -configuration Release -derivedDataPath "${OUT}/dd" build`,
   join(ROOT, "apple", "Winter"),
 );
 const builtApp = join(OUT, "dd", "Build", "Products", "Release", "Winter.app");

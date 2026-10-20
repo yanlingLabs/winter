@@ -1,6 +1,6 @@
 # Cowork native worker: wire contract and host adapter
 
-Status: contract, N2 slice S1, 2026-10-16 (round 3, 2026-10-17: conversation-set delivery, runtime streams, guest faults, `halting`, the layered stop timeline; **text version 2, 2026-10-18: the retained-receipt MAC**, section 7.1). SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
+Status: contract, N2 slice S1, 2026-10-16 (round 3, 2026-10-17: conversation-set delivery, runtime streams, guest faults, `halting`, the layered stop timeline; **text version 2, 2026-10-18: the retained-receipt MAC**, section 7.1; **contract revision 3, 2026-10-19: host-backed shares, cold resume and the guest file channel**, section 12). SOURCE ONLY. Nothing in this document or in `packages/core/src/cowork/native/`
 is wired into the daemon, no VM was started to produce it, and every live gate (G0 to G6) still needs a review of the exact
 commit and the owner's approval. The executable twin of this document is
 [`protocol.ts`](../packages/core/src/cowork/native/protocol.ts); the golden vectors in
@@ -45,7 +45,8 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
 ## 3. Common wire rules
 
 * JSON texts are UTF-8, exactly one line, last byte `\n`, no whitespace, integers only, `null` only where a table says so. Control and bootstrap payloads (the mux classes, section 6) are printable ASCII only: a character outside 0x20 to 0x7e makes the payload malformed, and the guest's helper refuses it too.
-* **Text version.** Every L1 line and every stop receipt carries `"v":2` (it was 1 before the receipt MAC). The binary headers (the L2 envelope `WEV1`, the L3/L4 mux `WMX1`, both `version = 1`) and the bootstrap/runtime JSON inside mux frames (`"v":1`) are unchanged: nothing in them changed. A launcher or daemon that sees `"v":1` on an L1 line refuses it (`version`; vector `begin-version-one`).
+* **Text version.** Every L1 line and every stop receipt carries `"v":2` (it was 1 before the receipt MAC). The binary headers (the L2 envelope `WEV1`, the L3/L4 mux `WMX1`, both `version = 1`) are unchanged. A launcher or daemon that sees `"v":1` on an L1 line refuses it (`version`; vector `begin-version-one`).
+* **Payload versions (contract revision 3).** Control-class JSON stays `"v":1`. **Bootstrap-class JSON is `"v":2`**: the conversation set and `runtime_ready` gained required keys, and `shares` and `shares_mounted` are new (section 12). A payload with any other `v` is refused as `version` before its schema is read (vectors `bootstrap-version-one`, `bootstrap-version-three`). L1 lines and receipts did not change shape (revision 3 adds new L1 types, which a revision-2 peer refuses as `unknown_type`, and one refusal code), so they stay at text version 2; see section 12 for that choice.
 * Keys appear in EXACTLY the order of the tables below (`v`, then `t`, then the table order). A parser builds the typed value and
   re-serializes it; the result must equal the input byte for byte. That one comparison refuses duplicate keys, reordered keys,
   alternate escapes, alternate number spellings, and trailing data. Every positive vector exercises the order; the negative
@@ -58,7 +59,7 @@ Control-class frames terminate at the worker. They never cross L3 or L1: the dae
   tokens additionally allow `.` and `:`. A digest is 64 lowercase hex characters, a stop nonce 32 lowercase hex characters
   (16 random bytes).
 * `device` and `inode` are decimal strings, because they are `u64` and JSON numbers are not. Capacities are JSON integers.
-* Limits: control line 16 KiB; mux carrier line 1,572,864 bytes; mux payload control 4 KiB, bootstrap 256 KiB (the `conversations` message at most 20 KiB), runtime 1 MiB (the 4 byte stream prefix included)
+* Limits (revision 3 adds the file channel's: request line 16 KiB, response line 384 KiB, 4 requests outstanding; section 6.2): control line 16 KiB; mux carrier line 1,572,864 bytes; mux payload control 4 KiB, bootstrap 256 KiB (the `conversations` message at most 20 KiB), runtime 1 MiB (the 4 byte stream prefix included)
   (the existing guest runtime transport frame); one stop receipt 8 KiB; nesting depth 4 on L1.
 
 ## 4. L1: daemon and launcher (NDJSON)
@@ -73,13 +74,15 @@ launcher-bound side is refused as `bad_direction`.
 | `hello` | `launcherInstanceId`, `hostBootId`, `parentVerified` (literal `true`) | first line. The launcher states that it verified its parent; the daemon treats it as a gate, never as proof. |
 | `begun` | `id`, `workerInstanceId`, `workerPid`, `workerStartToken` | worker spawned suspended, executed image validated, SCOPE delivered, sandbox installed. PID and token are diagnostics only. |
 | `volumes_accepted` | `id` | the worker received two descriptors after its sandbox and validated them against the SCOPE |
-| `refused` | `id`, `code` | one of `bad_request busy not_begun worker_spawn_failed code_identity_mismatch sandbox_failed volumes_rejected internal` |
+| `refused` | `id`, `code` | one of `bad_request busy not_begun worker_spawn_failed code_identity_mismatch sandbox_failed volumes_rejected internal shares_rejected` (`shares_rejected`, revision 3: a `shares` line whose descriptors do not match its records) |
 | `worker_state` | `state` | informational: `sandboxed volumes_accepted vm_running guest_hello draining drain_acked exited halting guest_fault`. `halting` and `guest_fault` mirror the L2 statuses of section 5 (the guest said it is halting; the guest said it is failing). Never evidence of a release; a daemon that has seen `guest_fault` refuses an orderly receipt for that run (section 7). |
 | `mux_up` | `frame` | one bootstrap or runtime mux frame, base64 of the whole frame |
 | `stopped` | `id` (or `null`), `receipt` | a Class A receipt (section 7). `id` is the `stop` request it answers, `null` for an owner-loss drain. |
 | `uncertain` | `receipt` | a Class B receipt (section 7) |
 | `pong` | `id` | answer to `ping` |
 | `fault` | `code` | the channel is no longer trustworthy: `parent_unverified protocol_violation worker_channel_lost internal` |
+| `share_revoked` | `tag` | revision 3: the worker's device thread for that share has closed every descriptor it held; the cutoff is complete (section 12.1). Sent once per tag. |
+| `share_notice` | `tag`, `kind` | revision 3: `envrc vscode_tasks vscode_settings code_workspace idea_project` (an allowed write to a watched auto-run name) or `git_protected` (a refused git write); at most one per tag and kind per incarnation |
 
 ### 4.2 Daemon to launcher
 
@@ -91,11 +94,13 @@ launcher-bound side is refused as `bad_direction`.
 | `stop` | `id`, `stopNonce`, `reason`, `budgetMs` | `reason` one of `user shutdown restart update failed-start`; `budgetMs` at most 120000 (the documented budget is 30000) |
 | `receipt_retire` | `confirmationId` | the daemon finished with that receipt; the launcher may delete its durable copy |
 | `ping` | `id` | liveness probe |
+| `shares` (**one descriptor per record**) | `id`, `shares` | revision 3, at most once, after `hello` and before `begin`: 1 to 12 records `tag, kind, mode, device, inode, path, guestPath` in descriptor order (section 12.1) |
+| `share_revoke` | `id`, `tag` | revision 3: cut one share off now (section 12.1); a repeat for the same tag is ignored |
 
 ### 4.3 Descriptors on L1
 
-`SCM_RIGHTS` is allowed on `volumes` and nowhere else. The sender attaches exactly two descriptors (data, environment) to a
-SINGLE `sendmsg` that carries the whole line. The receiver reads every chunk with `recvmsg` and a control buffer, and applies
+`SCM_RIGHTS` is allowed on `volumes` and `shares` and nowhere else. The sender attaches exactly two descriptors (data, environment) to a
+SINGLE `sendmsg` that carries the whole `volumes` line, and exactly one directory descriptor per record to the single `sendmsg` of a `shares` line. The receiver reads every chunk with `recvmsg` and a control buffer, and applies
 this rule: descriptors arriving with any other data are a protocol violation; the wrong count is `bad_rights`; a truncated
 control buffer (`MSG_CTRUNC`) is fatal because the kernel may already have installed descriptors nobody will see. In every
 refusal the receiver closes everything it was handed. **The launcher never sends descriptors to the daemon.**
@@ -130,6 +135,9 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
 | 3 | `drain` | launcher to worker | 28 bytes | none |
 | 4 | `status` | worker to launcher | 40 bytes | none |
 | 5 | `fault` | worker to launcher | 8 bytes | none |
+| 6 | `shares` | launcher to worker | 3,704 bytes | exactly one per share (1 to 12) |
+| 7 | `share_revoke` | launcher to worker | 32 bytes | none |
+| 8 | `share_event` | worker to launcher | 40 bytes | none |
 
 * `scope` payload: five 64-byte NUL-padded ASCII fields `workspaceId, incarnationId, controllerInstanceId, workerInstanceId,
   admissionId` (offsets 0, 64, 128, 192, 256); `runtimeImageDigest` as 32 raw bytes at 320; `u64 leaseEpoch` at 352;
@@ -147,10 +155,20 @@ Daemon-side mechanics, measured with Bun 1.3.14 on macOS 26 (arm64) and pinned b
 * `fault` payload: `u32 code` (1 `bad_scope`, 2 `bad_volumes`, 3 `sandbox_failed`, 4 `vm_failed`, 5 `mux_violation`,
   6 `truncated_rights`, 7 `internal`, 8 `second_drain`), `u32 reserved`. A second DRAIN envelope is answered with FAULT `second_drain` and
   otherwise ignored: the first DRAIN's nonce and budget stand, and a later one can neither replace nor extend them.
+* `shares` payload (revision 3): `u32 recordVersion = 1`, `u32 count` (1 to 12), then twelve 308 byte slots; the first `count` hold
+  `tag[32]` (NUL-padded, `[a-z0-9-]{1,32}`), `u64 device`, `u64 inode`, `u32 flags`, `guestPath[256]` (NUL-padded), and every other slot is zero.
+  `flags` are the ABI's: bit 0 read-only, bit 1 Winter share, bit 2 folder rules; exactly one of bits 1 and 2, nothing else. A Winter share's guest path
+  and mode are fixed by its kind, a folder's guest path is `/workspace/folders/<name>` (section 12.1). Sent after the worker's `sandboxed` status; the
+  worker compares each descriptor with its argv parameter by `F_GETPATH` and `fstat`.
+* `share_revoke` payload: `tag[32]`. `share_event` payload: `tag[32]`, `u32 event` (1 `share_revoked`, 2 `share_notice`), `u32 notice` (0 for
+  `share_revoked`; for `share_notice` 1 `envrc`, 2 `vscode_tasks`, 3 `vscode_settings`, 4 `code_workspace`, 5 `idea_project`, 6 `git_protected`).
 
 ### The worker process (final for N2)
 
-* argv is exactly `[path]`; the environment is the launcher's two variables (`LC_ALL=C`, `LANG=C`).
+* argv is exactly `[path]`, or with host-backed shares (revision 3) `[path, "--shares-v1", "<N>", ("ro"|"rw", "<path>") x N]` with N a canonical decimal
+  from 1 to 12 and the paths canonical, distinct and never nested; the worker turns each pair into the sandbox parameter `SHARE_RO_<n>` or `SHARE_RW_<n>` and
+  exits `2` on any deviation. It is the one input read before the sandbox, and it comes from the signed launcher that spawned the worker suspended. The
+  environment is the launcher's two variables (`LC_ALL=C`, `LANG=C`).
 * Descriptor **3** is the L2 end (an unnamed `AF_UNIX SOCK_DGRAM` socketpair), descriptor **4** is the L3 end (an unnamed
   `AF_UNIX SOCK_STREAM` socketpair). Descriptors 0 to 2 are the launcher's business; every other descriptor is closed at start.
 * The guest boot artifacts are `<directory of the worker executable>/cowork-guest/kernel` and `.../cowork-guest/initramfs.cpio`.
@@ -206,11 +224,13 @@ Control and bootstrap payloads are the JSON object WITHOUT a trailing newline, k
 | bootstrap, up | `hello` | `guestBootId`, `dataSerial` (`winter-data`), `environmentSerial` (`winter-environment`) |
 | bootstrap, down | `plan` | `operationId`, `nonce`, `plan` (a protocol 3 `VolumeFilesystemPlan`, sorted keys) |
 | bootstrap, up | `receipt` | `operationId`, `nonce`, `receipt` (a `VolumeFilesystemReceipt`, sorted keys) |
-| bootstrap, up | `fault` | `operationId`, `nonce`, `code` (`bad_plan probe_failed format_failed replay_failed mount_failed internal bad_conversations supervisor_failed second_conversations`) |
+| bootstrap, up | `fault` | `operationId`, `nonce`, `code` (`bad_plan probe_failed format_failed replay_failed mount_failed internal bad_conversations supervisor_failed second_conversations share_inventory share_mount_failed resume_store_missing fresh_store_not_empty`) |
 | bootstrap, down | `ready` | `operationId`, `nonce` |
 | bootstrap, up | `mounted` | `operationId`, `nonce` |
-| bootstrap, down | `conversations` | `operationId`, `nonce`, `incarnationId`, `profile`, `conversations` (section 6.1) |
-| bootstrap, up | `runtime_ready` | `operationId`, `nonce`, `conversations` (how many the supervisor now serves, 1 to 16) |
+| bootstrap, down | `shares` | `operationId`, `nonce`, `shares` (revision 3: 1 to 12 of `tag, guestPath, readOnly, kind`; section 12.1) |
+| bootstrap, up | `shares_mounted` | `operationId`, `nonce` |
+| bootstrap, down | `conversations` | `operationId`, `nonce`, `incarnationId`, `profile`, `browseUid` (revision 3), `conversations` (section 6.1) |
+| bootstrap, up | `runtime_ready` | `operationId`, `nonce`, `conversations` (how many the supervisor now serves, 1 to 16), `continuations` (revision 3: for each host-query conversation, `fresh` or `resume`, as the supervisor ran it) |
 
 On L1 a mux frame travels as `{"v":2,"t":"mux_down","frame":"<base64>"}` or `mux_up`: the base64 is canonical (re-encoding must
 reproduce it) and the frame inside must itself be exact. A carrier holds a bootstrap or runtime frame only.
@@ -264,7 +284,7 @@ so the conversation set is the only message with a cap of its own.
 | `runtimeUid`, `toolUid`, `workspaceGid` | 1000 to **65533** (65534 is `nobody` and 65535 the invalid id; nothing requires them); every `runtimeUid` and `toolUid` of the set distinct, and no `workspaceGid` equal to any `runtimeUid` (the supervisor's own rule) **or any `toolUid`** (a group id equal to a uid is that user's private group). `workspaceGid` need NOT equal a uid: PID 1 gives each runtime and tool process the primary gid equal to its own uid (the supervisor does not check that, so the contract does not carry it), and `workspaceGid` is the one extra, shared group. |
 | `policy` | `auto plan ask accept-edits dont-ask bypass` |
 | `roots` | 1 to 16 of `id, guestPath, source, readOnly`; ids and views distinct, no view inside another; `guestPath` is one of `/workspace/folders/<name>[/...]`, `/workspace/repos/<name>[/...]`, `/workspace/.winter/memory`, `/workspace/.winter/scratch/<logicalSessionId>`, `/workspace/outputs/<logicalSessionId>`; `source` is a canonical absolute path under `/workspace/` (no `.`, `..` or empty component, at most 1024 bytes) |
-| `runtime` | `null`, or `model` (1 to 256 characters), `timeoutMs` (1 to 600000), `toolClasses` (a subset of `read write execute`, in that order), `provider`, `guided` (`null`, or `bindingId` a version 4 UUID and `generation` 1 or more) |
+| `runtime` | `null`, or `model` (1 to 256 characters), `timeoutMs` (1 to 86400000 for the host-query profiles; revision 3, see section 12.2; the fixture `fresh` profile is never carried and keeps its 600 s ceiling), `toolClasses` (a subset of `read write execute`, in that order), `provider`, `guided` (`null`, or `bindingId` a version 4 UUID and `generation` 1 or more), `continuation` (revision 3: `fresh`, `resume` or `either`), `endedGuestBoots` (revision 3: 0 to 4 distinct lowercase guest boot UUIDs, never the live boot, empty for `fresh`) |
 
 `provider` is public metadata only: `{scope, selection}` with recursively sorted keys, at most 4 KiB. `scope` has exactly `accountRevision backendSessionId bootId grantRevision homeId
 incarnationId leaseEpoch modelRevision sessionId taskId workspaceId`; `selection` has `capabilities family modelKey protocol providerId providerModelId` and optionally
@@ -288,15 +308,17 @@ frames without reading them, change nothing.
 | Offset | Size | Field |
 | --- | --- | --- |
 | 0 | 1 | `conversation`: index into the delivered `conversations` list, 0 to 15 |
-| 1 | 1 | `stream`: 1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host); 0 and 4 or more are refused |
+| 1 | 1 | `stream`: 1 = IN (host to guest), 2 = OUT (guest to host), 3 = ERR (guest to host), 4 = FILE_IN (host to guest), 5 = FILE_OUT (guest to host); 0 and 6 or more are refused, and 4 and 5 only on conversation 0 (revision 3) |
 | 2 | 1 | flags: bit 0 = this is the end of that stream after these bytes; every other bit zero |
 | 3 | 1 | reserved, zero |
 
-A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr (ERR is carried, not dropped). IN travels only down; OUT and ERR only up (anything else is `bad_direction`). An empty data section
+A conversation's three streams are the supervisor's `RuntimeDuplexPorts` input, stdout and stderr (ERR is carried, not dropped). IN and FILE_IN travel only down; OUT, ERR and FILE_OUT only up (anything else is `bad_direction`; `runtime-stream-four` travelling up is therefore `bad_direction` since revision 3). An empty data section
 is valid only with the end flag. After a stream's end nothing more may arrive on it, and a conversation index outside the delivered set is refused (`CoworkNativeRuntimeStreams` is that state). Data is
 limited by the payload bound, 1 MiB minus 4 bytes; a sender uses chunks of at most 256 KiB (the host's own chunk limit). Frames of this class are delivered only after `runtime_ready`.
 
 **Runtime IN flow control (normative, host side).** The guest relay's IN ring is 4 MiB and an overflow stops the whole guest, so the contract bounds the host: the runtime IN payload bytes sent with no OUT or ERR byte received since stay **at or below 1 MiB** (`COWORK_NATIVE_LIMITS.runtimeInFlightBytes`, 1,048,576, a quarter of the ring). Any OUT or ERR frame that carries payload BYTES proves the guest is reading and clears the count; an empty OUT or ERR frame (the end flag alone) clears nothing. Host-query is request/response, so this needs no credit frame: one request (at most 1 MiB, in chunks of at most 256 KiB) is in flight and its first output byte acknowledges it; a longer request is not possible in N2. `CoworkNativeRuntimeStreams` applies the same rule to both ends (the sender must not send a frame that would exceed it, the receiver refuses it as `oversize`), and `runtime-flow.json` pins the cases. A credit or window frame stays a later option if streaming requests larger than 1 MiB are ever needed.
+
+**The guest file channel (revision 3, normative).** FILE_IN and FILE_OUT (`file_in`, `file_out` in `protocol.ts`) carry the guest file channel's request and response lines (`packages/core/src/cowork/guest-file-channel.ts`) on conversation 0 only; a request names its own `sessionId`, so the index is transport, not authority. The host opens them only for an image that declares the runtime capability `file-channel-v1`: a revision-2 guest relay refuses stream 4 and would end its stream. Their end flags follow the other streams' rules; FILE_IN's end means the host closed its port for the incarnation, FILE_OUT's end that the guest file service exited (a drain or a fault), and neither is ever "this reply is done". **FILE_IN has its own bound and never joins the runtime IN count:** at most 4 request lines outstanding (`COWORK_NATIVE_LIMITS.fileInFlightRequests`), each at most 16 KiB with its newline (`fileRequestBytes`), a request answered when a FILE_OUT response line's newline arrives, each response line at most 384 KiB (`fileResponseBytes`); a response byte with no request outstanding cannot be attributed and is `bad_field`. FILE_IN bytes never add to the runtime IN count and FILE_OUT bytes never clear it, so a busy file service can never "prove" that a stalled runtime is reading. `CoworkNativeRuntimeStreams` applies the rule, all or nothing per frame, and `runtime-flow.json` (`fileCases`) pins it. The guest relay keeps a separate 256 KiB FILE_IN ring (four times the most the host may have outstanding).
 
 ## 7. Stop evidence
 
@@ -439,8 +461,8 @@ drain completed it writes a Class A with `origin = owner-loss-drain`. Either way
 
 ## 10. What is deliberately not decided here
 
-* D4 (who owns the agent-SDK relay), D7 (where the libkrun patches live), D10 (host-backed shares and the provider bridge) are open.
-  Nothing in this contract needs one particular answer; the provider class is reserved and empty.
+* D4 (who owns the agent-SDK relay) is open. D7 is decided (owner 2026-10-19: the libkrun patches stay in the winter repo's queue), and D10 is lifted for
+  host-backed shares and cold resume (owner 2026-10-19; section 12). The provider bridge stays HELD: the provider class is reserved and empty.
 * The `allocate` action of `CoworkVolumeAuthority` is refused by the native authority: provisioning is not on the launch path.
 * Authentication of a retained receipt that is read back from the launcher's durable store is the launcher slice's design (S2). The
   adapter accepts such a receipt only through a port that must attest it; file presence alone is never proof.
@@ -484,3 +506,44 @@ retained receipt, a MAC with a Keychain key, or a launcher-served read) stays wi
 Boot reconcile runs `CoworkAdmissionLedger.reconcile()` first, then settles every workspace that is not `stopped`. A replay debt (an interrupted
 journal replay) names a previous writer; the next incarnation proves THAT writer stopped from memory, from the boot id inside its owner tuple, or
 from the launcher's retained receipt, which is therefore kept until the debt is settled.
+
+## 12. Contract revision 3: host-backed shares, cold resume, the guest file channel (2026-10-19)
+
+The design is `docs/research/2026-10-18-n2-extensions-design.md` (PR #92). Revision 3 is ADDITIVE on every link: a new L1 type is refused by a revision-2 peer as `unknown_type`, a new envelope kind as `unknown_type`, a new bootstrap message or key by the bootstrap `v` (now 2) as `version`, and the new runtime streams are offered only to an image that declares `file-channel-v1`. Nothing here is wired: `session.create {mode: "cowork"}` still answers `unsupported_topology`.
+
+**Why L1 stays at text version 2.** The text version guards the shape of existing L1 lines and receipts, as the 1 to 2 bump did when `begin` and the Class A receipt changed shape. Revision 3 changes neither: it adds L1 types and one refusal code, and a revision-2 launcher refuses the new types. Bumping it would re-key every receipt MAC vector and every launcher copy for no added refusal. A bump is a mechanical follow-up if the contract owner prefers one (`COWORK_NATIVE_TEXT_VERSION`).
+
+### 12.1 Host-backed shares
+
+A share is a host directory served to the guest by a Winter-owned virtio-fs server in libkrun (design section 2.3). Kinds: `folder` (a granted user folder, at `/workspace/folders/<name>`, read-only or read-write by its grant; at most 9), `guidance` (`/run/winter/shared-instructions`, always read-only), `memory` (`/workspace/.winter/memory`, read-write) and `outputs` (`/workspace/outputs`, read-write), at most one of each Winter kind, at most 12 in all, tags `[a-z0-9-]{1,32}` distinct.
+
+1. **L1 `shares`** (daemon to launcher, at most once, after `hello`, before `begin`): one record per share, `tag, kind, mode (ro|rw), device, inode, path, guestPath`, with one directory descriptor per record on the line's single `sendmsg`. `path` is canonical (absolute, no `.`, `..` or empty component, not `/`, well-formed UTF-8 of at most 1024 bytes, no control character); paths are pairwise neither equal nor nested and (device, inode) pairs distinct. The line stays inside the 16 KiB control-line bound; a sender refuses a set that does not fit. The launcher refuses with `shares_rejected` when a descriptor's `fstat` differs from its record, is not a directory, or its `F_GETPATH` differs from `path`.
+2. **Worker argv** `[path, "--shares-v1", "<N>", ("ro"|"rw", "<path>") x N]` (section 5): one sandbox parameter per share, installed before anything is read.
+3. **L2 `shares`** (kind 6, section 5) after the worker's `sandboxed` status, carrying the descriptors; the worker checks each against its argv by `F_GETPATH` and `fstat` and attaches each with the proposed ABI (below).
+4. **Bootstrap `shares`** (host to guest, after `mounted`, before `conversations`, echoing the plan's operation and nonce): `tag, guestPath, readOnly, kind` per share. The guest checks the virtio-fs tag inventory against it (`share_inventory` on any difference), mounts each tag `nosuid,nodev` (`noexec` on the Winter shares, `ro` where read-only, `dax=never`), and answers `shares_mounted` or `share_mount_failed`. The set waits for `shares_mounted` (`coworkNativeBootstrapOrder`).
+5. **Revocation.** L1 `share_revoke` → L2 `share_revoke` (kind 7): the server refuses every request that starts after it. Only the device's own thread closes the device's descriptors, then the worker sends L2 `share_event` `share_revoked` and the launcher the L1 line of the same name. A daemon that has not seen `share_revoked` within 2 s of its line stops the workspace (fail closed). "Revocation complete" is reported only after the following restart.
+6. **Notices.** The server reports writes to watched auto-run names and refused git writes as L2 `share_event` `share_notice`, relayed as the L1 line, at most one per tag and kind per incarnation.
+
+Proposed libkrun ABI (SH2; not in `COWORK_LIBKRUN_PRODUCTION_ABI` until the patch lands): `int32_t krun_cowork_add_share_v1(uint32_t ctx_id, const char *tag, int32_t root_fd, uint32_t flags, const char *guest_path)`, `flags` as in the L2 record. `krun_add_virtiofs*` and `krun_set_root` stay forbidden.
+
+### 12.2 Cold resume
+
+Each host-query conversation's `runtime` gains `continuation` and `endedGuestBoots`:
+
+| Host `store_state` | `continuation` | Supervisor test |
+| --- | --- | --- |
+| `none` (never sent) | `fresh` | store and run home empty, else `runtime_fresh_store_required`; `endedGuestBoots` must be empty |
+| `started` (a set was sent, no completed turn yet) | `either` | run home empty; an empty store runs fresh, a non-empty one resumes |
+| `created` (a completed turn) | `resume` | store non-empty and owned by `runtimeUid`, mode 0700, else `resume_store_missing` |
+
+`runtime_ready.continuations` says, per host-query conversation, which one the supervisor ran, and the host passes `resume` to the SDK only on `resume`. `endedGuestBoots` lists guest boot ids the HOST recorded at that boot's `hello` and later released by real proof (section 7); it is the only previous-boot evidence the owner library may mint, and never contains the live boot. New bootstrap faults: `resume_store_missing`, `fresh_store_not_empty`. `timeoutMs` admits up to 86,400,000 (the 24 h guest backstop, owner O7) for the host-query profiles only; the fixture `fresh` profile is not carried by the conversation set and its ceiling stays 600,000 (600 s). An agent SDK supervisor before its CR2 release still refuses more than 600,000, which fails the start closed; the host sends 600,000 until the image pins CR2.
+
+`continuation: "either"` is never used once `store_state = created`: from the first completed turn on, the host sends `resume` only, so a store that has gone missing is a `resume_store_missing` fault, never a silent fresh start. `either` exists only for `started`, where the host cannot know whether the guest store was written.
+
+### 12.3 The guest file channel
+
+Streams FILE_IN (4) and FILE_OUT (5), section 6.2. The conversation set gains `browseUid`: `null`, or the workspace's browse uid (1000 to 65533), never any member's runtime or tool uid and never a group id. The guest file service runs each request as that uid in the workspace group with no capability, in a read-only view of the conversation's admitted roots (design section 4b.3).
+
+### 12.4 Vector copies
+
+The canonical vectors here moved (bootstrap `v`, the new keys, the new types). The worker's and the launcher's copies of `mux-frames.json` and `runtime-flow.json` are re-pinned with this revision, because both relay runtime and bootstrap frames blind. Their copies of `launcher-lines.json` and `envelopes.json`, and the guest's copies, stay at revision 2 until the slices that implement the new types land (launcher SH4, worker SH3, guest SH6 and FC3); each copy is pinned by its own hash, so a stale copy is visible, never silent.
