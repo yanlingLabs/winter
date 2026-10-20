@@ -573,7 +573,10 @@ extension CUCore {
 
     // MARK: click
 
-    func click(_ a: CUClickAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+    /// `pointFallback`: the model's own point, when a point click was routed to the element under it (`webElementUnder`) —
+    /// any click that follows the press goes THERE, never to the element's centre.
+    func click(_ a: CUClickAction, _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+               pointFallback: CGPoint? = nil) throws -> ActOutcome {
         let button = a.button ?? .left
         let count = a.count ?? 1
         guard (1...3).contains(count) else { throw CUError.invalidParams("count must be 1, 2 or 3") }
@@ -646,7 +649,7 @@ extension CUCore {
                 try token.check()
                 CULog.act.notice("click in \(t.appName, privacy: .public): its web content ignores accessibility presses — a window-targeted click")
                 return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: false,
-                                           why: "\(t.appName)'s web page ignores accessibility presses")
+                                           why: "\(t.appName)'s web page ignores accessibility presses", at: pointFallback)
             }
             if count == 1, flags.isEmpty {
                 let axAction: String? = button == .left && info.actions.contains(kAXPressAction) ? kAXPressAction
@@ -680,7 +683,8 @@ extension CUCore {
                     // refused) is never taken for the element refusing the press — that fell through to a second click.
                     if pressed {
                         if let webBefore {
-                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token)
+                            return try verifyWebPress(e, info, ref: ref, before: webBefore, crop: crop, shotBefore: shotBefore, p, t, token,
+                                                      at: pointFallback)
                         }
                         return ActOutcome(rung: .accessibility)
                     }
@@ -689,7 +693,7 @@ extension CUCore {
             guard info.center != nil else {
                 throw CUError.unsupported("[\(ref)] has no position on screen — try action() or a screenshot point")
             }
-            guard let center = clickablePoint(e, info, t) else {
+            guard let center = pointFallback ?? clickablePoint(e, info, t) else {
                 // An editable web element that stays outside the window even after `AXScrollToVisible` is a page's
                 // parked stand-in for its document (review of round 13, LOW — the hidden-input rule no longer counts
                 // one merely above or below the window): said so, with what works.
@@ -723,59 +727,95 @@ extension CUCore {
         // Safari page worked, two point clicks on the same page went out as pid events and WebKit dropped both).
         if count == 1, let (ref, label) = webElementUnder(pt, t) {
             CULog.act.notice("click in \(t.appName, privacy: .public): the point is on [\(ref, privacy: .public)] of its web page — clicked as that element")
-            return try click(CUClickAction(ref: ref), p, t, token)
+            return try click(CUClickAction(ref: ref), p, t, token, pointFallback: pt)
                 .noting("the point is on \(label) of the page, so that element was clicked (as click(\(ref)) would)")
         }
-        return try pointClickVerified(t, at: pt) {
+        return try pointClickVerified(t, p, at: pt) {
             try pointerClick(p, t, at: pt, button: button, count: count, flags: flags, token)
         }
     }
 
-    /// The pressable web element under a point of a BROWSER window on this desktop, with its ref and label: the deepest
-    /// element there that lists the accessibility press (the point's own, or up to three of its ancestors — a link's
-    /// text climbs to the link), inside the page and holding the point. Never the page itself, a text field (a point
-    /// there places the caret, which a press can't) or a disabled control. Nil otherwise: the point is clicked as a point.
+    /// The pressable web element under a point of a BROWSER window on this desktop, with its ref and label. Strict, since
+    /// WebKit's press acts at the element's CENTRE: an element larger than a control, pressed for a point inside it, would
+    /// press whatever sits at its centre instead.
+    /// - The window drawn on top at the point is the bound one (never a popover, panel or prompt over it).
+    /// - The element is the APP's hit test at the point (`AXUIElementCopyElementAtPosition`: what is drawn on top — a
+    ///   sticky header over the content — never the tree's child order).
+    /// - It is a control-sized element of the page that lists the press — never the page itself, an image or canvas, a
+    ///   text field (a point there places the caret), a disabled control, or anything larger than a control.
+    /// - Or, at most ONE step up, a link or button of a control's size that holds the point (a link's own text).
+    /// Nil otherwise: the point is clicked as a point.
     func webElementUnder(_ pt: CGPoint, _ t: CUTarget) -> (ref: Int, label: String)? {
         guard t.accessible, offScreenSubject(t) == nil, isWebBrowser(t),
-              let chain = Self.pointChain(at: pt, in: freshRoots(t)) else { return nil }
-        for node in chain.reversed().prefix(4) {
-            guard node.role != "AXWebArea", let e = t.refs.key(for: node.ref)?.element else { return nil }
+              CUHitTest.topWindow(at: pt, stack: sys.windowStack(), ownPid: getpid())?.id == t.windowID,
+              let hit = ax.elementAt(pid: t.pid, pt), isWebContent(hit) else { return nil }
+        func pressable(_ e: AXUIElement, roles: Set<String>?) -> ElementInfo? {
             let info = ElementInfo(e, ax)
-            if editableElement(e) || info.enabled == false { return nil }
-            guard info.actions.contains(kAXPressAction) else { continue }
-            guard info.frame?.contains(pt) == true, isWebContent(e) else { return nil }
-            return (node.ref, Self.elementLabel(node.ref, info))
+            let role = info.role ?? ""
+            guard !Self.neverPressedForAPoint.contains(role), roles.map({ $0.contains(role) }) ?? true,
+                  !role.localizedCaseInsensitiveContains("canvas"), !(info.subrole ?? "").localizedCaseInsensitiveContains("canvas"),
+                  info.enabled != false, info.actions.contains(kAXPressAction), !editableElement(e),
+                  let f = info.frame, f.contains(pt), Self.controlSized(f) else { return nil }
+            return info
         }
-        return nil
+        let info = ElementInfo(hit, ax)
+        if Self.neverPressedForAPoint.contains(info.role ?? "") || editableElement(hit) || info.enabled == false { return nil }
+        var chosen: (AXUIElement, ElementInfo)?
+        if let ok = pressable(hit, roles: nil) {
+            chosen = (hit, ok)
+        } else if !info.actions.contains(kAXPressAction), let parent = ax.element(hit, kAXParentAttribute),
+                  let ok = pressable(parent, roles: ["AXLink", "AXButton"]) {
+            chosen = (parent, ok)
+        }
+        guard let (e, chosenInfo) = chosen else { return nil }
+        let ref = t.refs.ref(for: AXIdentity(element: e))
+        return (ref, Self.elementLabel(ref, chosenInfo))
     }
+
+    /// Never pressed for a point inside them: the page, an image (a map, a chart), a scroll area or a whole document.
+    static let neverPressedForAPoint: Set<String> = ["AXWebArea", "AXImage", "AXScrollArea", "AXScrollView", "AXDocument",
+                                                    "AXApplication", "AXWindow", "AXSplitGroup", "AXLayoutArea"]
+
+    /// A control's size, at most — larger and its centre is likely another thing than the point (a card, a banner). Pure.
+    static func controlSized(_ f: CGRect) -> Bool { f.width <= 480 && f.height <= 96 }
 
     /// A click at a point of a window on this desktop, checked by its pixels around the point and the app's windows (a
     /// menu or popover opening): a click that changed neither says so — never a silent no-op. Nothing is said when
-    /// there is no picture to compare (no Screen Recording, a blank capture), or for a click the app took in front. An
-    /// area that was already changing before the click (an animation, a video) proves nothing by changing after it: then
-    /// only a window opening counts, and otherwise the result says it could not be told.
-    func pointClickVerified(_ t: CUTarget, at pt: CGPoint, _ click: () throws -> ActOutcome) throws -> ActOutcome {
-        guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame else { return try click() }
+    /// there is no picture to compare (no Screen Recording, a blank capture), or for a click the app took in front (that
+    /// route is not judged by pixels, and none are taken for it).
+    /// No wait before the click: the watch after it tells an effect from an area that is changing anyway (an animation,
+    /// a video) — a change counts once it HOLDS (two pictures in a row the same, a blinking caret's 1–2 px column
+    /// ignored); one still changing when the watch ends can't be told from the picture, and the result says so.
+    func pointClickVerified(_ t: CUTarget, _ p: TargetActParams, at pt: CGPoint, _ click: () throws -> ActOutcome) throws -> ActOutcome {
+        guard offScreenSubject(t) == nil, let window = sys.window(id: t.windowID)?.frame,
+              (try? CUInputLadder.decideEvents(context(p, t, pointer: true)))?.rung != .foreground else { return try click() }
         let crop = CGRect(x: pt.x - 120, y: pt.y - 80, width: 240, height: 160).intersection(window)
-        guard !crop.isNull, !crop.isEmpty, let first = pressShot(crop, t) else { return try click() }
-        let gap = pointClickSteadyGapMs
-        if gap > 0 { clock.pause(ms: gap) }
-        let second = pressShot(crop, t)
-        let animating = second.map { CUImageTools.differs(first, $0) } ?? false
-        let before = second ?? first
+        guard !crop.isNull, !crop.isEmpty, let before = pressShot(crop, t) else { return try click() }
         let windowsBefore = appWindowsOnScreen(t)
         let o = try click()
         guard o.rung != .foreground else { return o }
         let deadline = clock.nowMs() + webPressWatchMs
+        var last: CGImage?
+        var samples = 0
+        var changed = false
         repeat {
             if appWindowsOnScreen(t) != windowsBefore { return o }
-            if !animating, let after = pressShot(crop, t), CUImageTools.differs(before, after) { return o }
+            if let after = pressShot(crop, t) {
+                samples += 1
+                if CUImageTools.differs(before, after) {
+                    changed = true
+                    if let last, !CUImageTools.moving(last, after) { return o }  // changed, and it holds
+                }
+                last = after
+            }
             if clock.nowMs() >= deadline { break }
             clock.pause(ms: 150)
         } while true
-        if animating {
-            CULog.act.notice("click in \(t.appName, privacy: .public): the area at the point was already changing — its effect can't be told from pixels")
-            return o.noting("the area around that point was already changing before the click (an animation or video), so whether the click took effect can't be told from the picture, and no window opened — check with state() or a screenshot before clicking again")
+        // One look only (no time to watch it hold): a change is taken as the effect, as before.
+        if changed, samples < 2 { return o }
+        if changed {
+            CULog.act.notice("click in \(t.appName, privacy: .public): the area at the point kept changing — its effect can't be told from pixels")
+            return o.noting("the area around that point kept changing after the click (an animation or video), so whether the click took effect can't be told from the picture, and no window opened — check with state() or a screenshot before clicking again")
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): no visible effect at the point")
         return o.noting("the click at that point had no visible effect (nothing changed there, and no window opened) — check with state() or a screenshot before clicking again")
@@ -805,7 +845,8 @@ extension CUCore {
         let event = announced ? nil : CursorEvent(kind: "press", point: pt, count: count, button: button.rawValue)
         // Pid events in the background: the window made its app's key window first, so the click is not taken
         // as the one that makes it key.
-        var watchFirstClick = false
+        // The user's key focus before the click (private path only: read through it), with their front app.
+        var usersKeys: (keys: pid_t, front: pid_t?)?
         if d.rung == .processEvents {
             switch keyForClick(t, privatePath: p.privatePath, clickWindow: windowFor(pt)) {
             case .appInFront: throw clickRefusal(t)
@@ -814,11 +855,11 @@ extension CUCore {
             case .notApplied:
                 // No make-key step: the "believe active" step alone, as every other background click route posts it
                 // (`eventsElsewhere`, `windowClick`, the focus click) — live 2026-10-20, two point clicks into a
-                // background Safari went out as bare pid events and WebKit dropped both. And, as `eventsElsewhere`
-                // does, a plain click the window took only as its activation is sent once more (below).
+                // background Safari went out as bare pid events and WebKit dropped both. NEVER a second click: "not key
+                // before, key after" does not say the first was swallowed (the key focus is system-wide, and Chromium and
+                // Electron take the first click AND become key) — a Place order or a toggle would go twice.
                 if !activated { postSyntheticActivation(t, privatePath: p.privatePath) }
-                watchFirstClick = Self.mayResendFirstClick(privatePath: p.privatePath, button: button, count: count, flags: flags,
-                                                           wasKey: p.privatePath ? keyFocusPidForTarget(t) == t.pid : true)
+                if p.privatePath, let keys = keyFocusPidForTarget(t), keys != t.pid { usersKeys = (keys, sys.frontmostPid()) }
             }
         }
         let sendClick: (CURoute, CUEventSynth.PointerCheck) throws -> CURoute = { route, check in
@@ -826,21 +867,21 @@ extension CUCore {
                             route: route, check: check)
         }
         let o = try runEvents(p, t, d, focus: true, token, cursor: event, sendClick)
-        // A first click on an inactive window can be swallowed as "activate the window" and never reach the page: the
-        // window was not key before and is key now — the click only made it key. Sent once more.
-        guard watchFirstClick, o.rung == .processEvents, keyFocusPidForTarget(t) == t.pid else { return o }
-        try token.check()
-        try refuseIfUserWorkMarked(t)
-        CULog.act.notice("click in \(t.appName, privacy: .public): the window was not key — it likely took the first click as activation; resending once")
-        _ = try sendClick(.publicPid) { [self] _, _ in try token.check(); try refuseIfUserWorkMarked(t) }
-        return o.noting("resent once — the first click only made the window key")
+        return handKeysBackAfterClick(t, o, usersKeys)
     }
 
-    /// Whether a background click with no make-key step is watched for a swallowed first click: a plain single left
-    /// click only (a double, right or modified click sent again would be a different act), with the private path on
-    /// (the key focus is read through it), into a window that was not key. Pure.
-    static func mayResendFirstClick(privatePath: Bool, button: CUMouseButton, count: Int, flags: CGEventFlags, wasKey: Bool) -> Bool {
-        privatePath && button == .left && count == 1 && flags.isEmpty && !wasKey
+    /// The click took the user's key focus (theirs before, the target's after) while their app stayed in front: handed
+    /// back (ComputerV2 never moves the user's key focus), and said — the click is never sent again. A change of the
+    /// FRONT app is the guardian's to judge, not this.
+    func handKeysBackAfterClick(_ t: CUTarget, _ o: ActOutcome, _ before: (keys: pid_t, front: pid_t?)?) -> ActOutcome {
+        guard let before, o.rung == .processEvents, let front = before.front, front != t.pid, sys.frontmostPid() == front,
+              keyFocusPidForTarget(t) == t.pid else { return o }
+        let place = guardianPlace() ?? CUGuardedView(app: front, space: sys.activeSpace())
+        guardianRestore(thief: t.pid, fallback: place, force: true, cause: "a background click left the key focus with the target", silent: true)
+        let back = keyFocusPidForTarget(t) != t.pid
+        CULog.act.notice("click in \(t.appName, privacy: .public): the click took the user's key focus — handed back: \(back ? "yes" : "no", privacy: .public)")
+        return o.noting(back ? "the click took the keyboard focus into \(t.appName); it was handed back to the user's app (the click was sent once)"
+                             : "the click took the keyboard focus into \(t.appName), and it could not be handed back to the user's app (the click was sent once)")
     }
 
     /// The bound window is not on screen: "X's window is on another desktop" (another Space, full screen) or
@@ -3742,7 +3783,8 @@ extension CUCore {
     /// changed (the press did something: said so, not repeated).
     private func verifyWebPress(_ e: AXUIElement, _ info: ElementInfo, ref: Int, before: WebPressEvidence,
                                 crop: CGRect?, shotBefore: CGImage?,
-                                _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token) throws -> ActOutcome {
+                                _ p: TargetActParams, _ t: CUTarget, _ token: CUCancellation.Token,
+                                at point: CGPoint? = nil) throws -> ActOutcome {
         if webPressChanged(e, t, since: before) { return ActOutcome(rung: .accessibility) }
         let label = Self.elementLabel(ref, info)
         if Self.mayActUnseen(info.labels) {
@@ -3773,7 +3815,7 @@ extension CUCore {
             return ActOutcome(rung: .accessibility, detail: "pressed \(label) (the effect is visible but not to accessibility)")
         }
         CULog.act.notice("click in \(t.appName, privacy: .public): the accessibility press on web content changed nothing, not even pixels — a window-targeted click instead")
-        return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing")
+        return try clickWebElement(e, info, ref: ref, p, t, token, pressIgnored: true, why: "the accessibility press did nothing", at: point)
     }
 
     /// How long an unconfirmed press keeps its element from being pressed again.
@@ -3871,9 +3913,11 @@ extension CUCore {
 
     /// A window-targeted left click at the element's centre, after the synthetic activation (an inactive window
     /// may take a first click as activation only; no focus blip — a click needs no key focus), verified.
+    /// `at`: where to click instead of the centre — the model's own point, for a point click routed to this element.
     private func clickWebElement(_ e: AXUIElement, _ info: ElementInfo, ref: Int, _ p: TargetActParams, _ t: CUTarget,
-                                 _ token: CUCancellation.Token, pressIgnored: Bool, why: String) throws -> ActOutcome {
-        guard let center = clickablePoint(e, info, t) else {
+                                 _ token: CUCancellation.Token, pressIgnored: Bool, why: String,
+                                 at point: CGPoint? = nil) throws -> ActOutcome {
+        guard let center = point ?? clickablePoint(e, info, t) else {
             throw CUError.unsupported("[\(ref)] is outside the window and could not be scrolled into view — scroll to it first")
         }
         return try webClickVerified(e, t, pressIgnored: pressIgnored, why: why, label: Self.elementLabel(ref, info)) {

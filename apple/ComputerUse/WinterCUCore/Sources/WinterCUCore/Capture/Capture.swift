@@ -269,6 +269,47 @@ public enum CUImageTools {
     /// the long side), a pixel counts as changed when a channel moved by more than `channelTolerance`, and the
     /// images differ when more than `fraction` of the pixels (and at least `minPixels`) changed. A caret's blink
     /// in a large crop stays under it; a button that redraws does not.
+    /// Whether `b` still moves against `a` beyond a blinking caret: `differs`, and the change spans at least 3 × 3 of the
+    /// compared (≤ 128 px) grid — a caret's 1–2 px column never does. For telling an effect that holds from an area
+    /// that keeps changing.
+    public static func moving(_ a: CGImage, _ b: CGImage) -> Bool {
+        guard differs(a, b), let box = changedBox(a, b) else { return false }
+        return box.width >= 3 && box.height >= 3
+    }
+
+    /// The bounding box of the pixels that differ (on the same ≤ 128 px grid `differs` uses); nil when none do or the
+    /// images can't be compared.
+    static func changedBox(_ a: CGImage, _ b: CGImage, channelTolerance: Int = 24) -> CGRect? {
+        let longSide = Double(max(a.width, a.height, 1))
+        let scale = min(1, 128 / longSide)
+        let w = max(1, Int((Double(a.width) * scale).rounded())), h = max(1, Int((Double(a.height) * scale).rounded()))
+        func pixels(_ image: CGImage) -> [UInt8]? {
+            var out = [UInt8](repeating: 0, count: w * h * 4)
+            let ok = out.withUnsafeMutableBytes { raw -> Bool in
+                guard let ctx = CGContext(data: raw.baseAddress, width: w, height: h, bitsPerComponent: 8, bytesPerRow: w * 4,
+                                          space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)
+                else { return false }
+                ctx.interpolationQuality = .none
+                ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+                return true
+            }
+            return ok ? out : nil
+        }
+        guard let pa = pixels(a), let pb = pixels(b) else { return nil }
+        var minX = w, minY = h, maxX = -1, maxY = -1
+        for y in 0..<h {
+            for x in 0..<w {
+                let i = (y * w + x) * 4
+                if abs(Int(pa[i]) - Int(pb[i])) > channelTolerance || abs(Int(pa[i + 1]) - Int(pb[i + 1])) > channelTolerance
+                    || abs(Int(pa[i + 2]) - Int(pb[i + 2])) > channelTolerance {
+                    minX = min(minX, x); maxX = max(maxX, x); minY = min(minY, y); maxY = max(maxY, y)
+                }
+            }
+        }
+        guard maxX >= 0 else { return nil }
+        return CGRect(x: minX, y: minY, width: maxX - minX + 1, height: maxY - minY + 1)
+    }
+
     public static func differs(_ a: CGImage, _ b: CGImage, channelTolerance: Int = 24, fraction: Double = 0.004,
                                minPixels: Int = 6) -> Bool {
         let longSide = Double(max(a.width, a.height, 1))

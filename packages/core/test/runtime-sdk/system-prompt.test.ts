@@ -401,6 +401,11 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
         // 2026-10-20: the reply shows in the pill's small card — very brief, straight to the point.
         expect(text).toContain("# Answer briefly");
         expect(text).toContain("Answer very briefly and straight to the point: lead with the answer or the result");
+        // Brevity never drops what the other sections ask for: outcomes, openable paths, a stopped session's place, and
+        // act-first's candidates as a short list.
+        expect(text).toContain("but always the outcomes and the file paths the user can open, and where a stopped session got to");
+        expect(text).toContain("Use a short list for several things: what the user asked for, or the candidates you found for them to pick from");
+        expect(text).not.toContain("Use a short list only when");
         expect(text).toContain("When a request can be acted on, act on it — a sensible default beats a question.");
         expect(text).toContain("\"Find me X\", \"look around\" or \"show me\" means LOOK");
         expect(text).toContain("use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn");
