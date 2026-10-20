@@ -44,6 +44,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { RUNTIME_STATE_SCHEMA_VERSION } from "../packages/core/src/runtime-state/db";
+import { USAGE_INERT_ENV } from "../packages/core/src/usage/wiring";
 import { keychainFfiProbeOk } from "./release-lib";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
@@ -241,7 +242,9 @@ async function main(): Promise<void> {
       // this script already `rm -rf`s in its `finally`.
       // `WINTER_LOGIN_SHELL_PATH: "off"` (A1): the probe boots a real `startDaemon`, which would
       // otherwise run the developer's own login shell (their rc files) to resolve PATH.
-      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_CLAUDE_RESUME_SCAN_ROOT: join(tmpHome, "claude-resume-scan"), WINTER_LOGIN_SHELL_PATH: "off" },
+      // `USAGE_INERT_ENV`: the probe's daemon never reads or spawns the developer's own Codex / Claude Code / Antigravity /
+      // OpenCode, nor runs the background plan beat (it also injects `USAGE_INERT` itself).
+      env: { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? homedir(), WINTER_HOME: tmpHome, WINTER_PROFILE: "dev", WINTER_CLAUDE_RESUME_SCAN_ROOT: join(tmpHome, "claude-resume-scan"), WINTER_LOGIN_SHELL_PATH: "off", ...USAGE_INERT_ENV },
     });
     let stdout = "";
     let stderr = "";

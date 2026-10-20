@@ -383,12 +383,17 @@ export class CoworkWorkspaceService {
         COWORK_RPC[method].params.parse(raw);
         if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
         // Truthful, never a constant: each answer is the port that exists (production supplies neither, so both stay false).
-        return { folderPreparation: !!this.host.selections, repositoryPreparation: false, provisioning: this.host.provisioning?.available() === true, execution: this.host.execution?.() === true };
+        // A folder can be prepared only where a workspace could then be created: the same provisioning gate as `workspace.create`.
+        let provisioningAvailable = true;
+        try { this.host.requireProvisioning(principal); } catch { provisioningAvailable = false; }
+        return { folderPreparation: !!this.host.selections && provisioningAvailable, repositoryPreparation: false, provisioning: this.host.provisioning?.available() === true, execution: this.host.execution?.() === true };
       }
       case "workspace.selection.prepareFolder": {
         const p = COWORK_RPC[method].params.parse(raw);
         if (principal.kind !== "local-user" || connection.role === "remote") throw new CoworkError("authority_denied");
         if (!this.host.selections) throw new CoworkError("unsupported_topology");
+        // Same availability as create: where a workspace cannot be created, no folder is opened (no fd held, no sweep timer armed).
+        this.host.requireProvisioning(principal);
         return this.host.selections.prepare(principal, connection.connectionId, p.bookmarkBase64, p.label, p.access, p.requestId);
       }
       case "workspace.selection.revoke": {

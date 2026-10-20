@@ -27,7 +27,9 @@ test("anti-wiring: nothing that ships references the guest boot sources or the a
     join(root, ".github", "workflows", "ci.yml"),
   ].filter(file => existsSync(file));
   for (const file of shipping) {
-    const text = readFileSync(file, "utf8");
+    // S7B part 2: the Embed phase records the hash of the guest artifact's PINS FILE in the bundle's pin manifest (so the release gate can refuse a bundle built against other
+    // image pins). That one path, in that one script, is the only reference; nothing of the guest sources, the artifact build or the image itself is reachable from it.
+    const text = basename(file) === "embed-cowork-native.sh" ? readFileSync(file, "utf8").split("${REPO}/scripts/cowork-guest-artifact/pins.json").join("") : readFileSync(file, "utf8");
     for (const needle of NEEDLES) expect(`${file.slice(root.length)}:${needle}:${text.includes(needle)}`).toBe(`${file.slice(root.length)}:${needle}:false`);
   }
 });
