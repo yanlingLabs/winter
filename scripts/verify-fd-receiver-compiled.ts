@@ -10,6 +10,7 @@
  *   3. `<copy> __fd-receiver-probe` from that directory, with a narrow environment and a temp WINTER_HOME: socketpair, one line through the receiver hub, expect the line back.
  *   3b. `<copy> __host-code-adapter-probe`: the host-code broker's SDK modules resolve INSIDE the built binary (`installedHostCodeAdapter()` does not throw "Cannot find module").
  *       Same safety: no home, Keychain, daemon or launcher.
+ *   3c. `<copy> __host-env-lazy-probe`: the activation seam's lazy `require("./host-env/environment")` resolves INSIDE the built binary (the seam stays off; the module loads, nothing is built).
  *   4. The negative control: the same probe against a copy of the binary whose Worker entry cannot be found must NOT print ok. (Checked without rebuilding: the probe is run with the
  *      entry string patched in the copy to a name that does not exist.)
  *
@@ -85,6 +86,11 @@ async function main(): Promise<void> {
     const adapterResult = parseProbe(adapter.stdout);
     if (adapter.code !== 0 || adapterResult?.ok !== true) throw new Error(`the host-code broker's modules do not resolve inside the compiled daemon (exit ${adapter.code}): ${JSON.stringify(adapterResult)}\n${adapter.stderr.trim()}`);
     console.log(`ok: installedHostCodeAdapter() ran in the compiled daemon (${JSON.stringify(adapterResult)})`);
+
+    const lazy = await runChild(good, ["__host-env-lazy-probe"], env, scratch);
+    const lazyResult = parseProbe(lazy.stdout);
+    if (lazy.code !== 0 || lazyResult?.ok !== true) throw new Error(`the lazy host-env require does not resolve inside the compiled daemon (exit ${lazy.code}): ${JSON.stringify(lazyResult)}\n${lazy.stderr.trim()}`);
+    console.log(`ok: the activation seam's lazy host-env require resolved in the compiled daemon (${JSON.stringify(lazyResult)})`);
 
     const broken = withBrokenEntry(readFileSync(DIST_BINARY));
     if (broken === null) throw new Error(`the binary does not contain the entry string ${ENTRY_NAME}: fd-channel.ts does not use the compiled entry`);

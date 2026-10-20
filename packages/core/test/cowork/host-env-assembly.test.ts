@@ -137,7 +137,7 @@ describe("the launcher's identity", () => {
     expect(coworkRequirement(coworkNativeIdentifier("launcher", "dev"))).toBe(coworkLauncherRequirement(undefined, COWORK_LAUNCHER_DEV_IDENTIFIER));
     expect(coworkRequirement(coworkNativeIdentifier("launcher"))).toBe(coworkLauncherRequirement());
     // and the seam picks the dev identifier from the profile
-    expect(readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "native-activation.ts"), "utf8")).toContain('env.WINTER_PROFILE === "dev" ? { launcherIdentifier: COWORK_LAUNCHER_DEV_IDENTIFIER }');
+    expect(readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "native-activation.ts"), "utf8")).toContain('env.WINTER_PROFILE === "dev" ? { launcherIdentifier: hostEnv.COWORK_LAUNCHER_DEV_IDENTIFIER }');
   });
   test("the identifier and team the daemon expects are the ones the launcher package compiles in (read from the Swift source)", () => {
     const swift = readFileSync(join(import.meta.dir, "..", "..", "..", "..", "apple", "Cowork", "WinterCoworkLauncher", "Sources", "LauncherCore", "Identity", "CodeIdentity.swift"), "utf8");

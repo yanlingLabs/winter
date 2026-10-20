@@ -30,3 +30,15 @@ export async function runHostCodeAdapterProbe(): Promise<{ ok: boolean; adapter?
     return { ok: false, error: (error as Error).message };
   }
 }
+
+/** `winter-core __host-env-lazy-probe`: the compiled-binary proof that the activation seam's lazy `require("./host-env/environment")` resolves inside the built binary (the seam itself stays off;
+ * this loads the module and checks its builder is a function, and builds no environment). It touches no home, Keychain, daemon or launcher. */
+export async function runHostEnvLazyProbe(): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const { loadCoworkHostEnvironmentModule } = await import("../../core/src/cowork/native-activation");
+    const hostEnv = loadCoworkHostEnvironmentModule();
+    return typeof hostEnv.createCoworkNativeProductionEnvironment === "function" ? { ok: true } : { ok: false, error: "the host-env module has no environment builder" };
+  } catch (error) {
+    return { ok: false, error: (error as Error).message };
+  }
+}
