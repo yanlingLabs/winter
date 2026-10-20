@@ -201,6 +201,10 @@ struct DispatchPillComposerBar: View {
     @ObservedObject var adapter: FieldStateAdapter
     /// Command mode: the draft in purple, its ghost completion, Delete's opt-out, the send circle's run look.
     @ObservedObject var commandMode: DispatchPillCommandMode
+    /// The plume is up: it starts once the working look is wanted AND the shape has stopped moving
+    /// (`DispatchPillController.shapeSharp`), then stays for as long as the look is wanted — a later spring (a steer's
+    /// typing pill, a card) never tears it down and up again. Down the moment the look goes.
+    @State private var plumeUp = false
 
     var body: some View {
         let expanded = controller.presentation == .expanded
@@ -218,8 +222,10 @@ struct DispatchPillComposerBar: View {
         let covered = preview != nil || picker || card != nil
         let showsAccessories = expanded && !covered
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
+        let plumeGate = DispatchPillPlumeGate(wanted: working && !picker, shapeSharp: controller.shapeSharp)
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
+                        showsPlume: working && !picker && (plumeUp || plumeGate.startsPlume),
                         placeholder: look.placeholder,
                         hidesComposer: working || covered || controller.contentFadingOut,
                         showsAccessories: showsAccessories)
@@ -269,9 +275,17 @@ struct DispatchPillComposerBar: View {
                     .allowsHitTesting(!controller.contentFadingOut)
             }
         }
+        .onChange(of: plumeGate, initial: true) { _, gate in
+            if !gate.wanted {
+                plumeUp = false
+            } else if gate.startsPlume {
+                plumeUp = true
+            }
+        }
     }
 
-    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool, placeholder: String?,
+    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool, showsPlume: Bool,
+                             placeholder: String?,
                              hidesComposer: Bool, showsAccessories: Bool) -> some View {
         VStack(spacing: 0) {
             HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
@@ -295,10 +309,12 @@ struct DispatchPillComposerBar: View {
             .padding(.trailing, DispatchPillMetrics.trailingPadding)
             .frame(maxHeight: .infinity)
             // Under the row, so the stop button sits on the plume's nozzle.
-            .background(alignment: .bottom) {
-                if working {
+            // Laid out at the shape's TARGET width, its trailing end (the nozzle) on the stop button: a spring that runs
+            // under a plume already up never lays it out again frame by frame.
+            .background(alignment: .bottomTrailing) {
+                if showsPlume {
                     CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
-                        .frame(height: DispatchPillMetrics.pillHeight)
+                        .frame(width: controller.plumeLayoutWidth, height: DispatchPillMetrics.pillHeight)
                         .contentShape(Rectangle())
                         .onTapGesture { controller.openComposer() }
                         .transition(.opacity.animation(.easeOut(duration: 0.25)))
@@ -382,6 +398,14 @@ struct DispatchPillComposerBar: View {
                 }
             }
     }
+}
+
+/// When the working plume may start: the look wants it and the shape is no longer moving (`shapeSharp`). Once
+/// started it stays while `wanted` holds (`DispatchPillComposerBar.plumeUp`).
+struct DispatchPillPlumeGate: Equatable {
+    let wanted: Bool
+    let shapeSharp: Bool
+    var startsPlume: Bool { wanted && shapeSharp }
 }
 
 /// What the pill's bar shows, as one value: the working look (the plume, the composer hidden), the trailing circle's
