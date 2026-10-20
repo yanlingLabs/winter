@@ -417,7 +417,10 @@ def main():
     if subprocess.check_output([str(zig),'version'],text=True).strip()!=pins['zig']['version']: raise ValueError('Zig version')
     if sha(args.bun_base.read_bytes())!=pins['bun']['executableSha256']: raise ValueError('Bun base')
     tree=Tree();lock_bytes=(out.parent/'packages.lock.json').read_bytes()
-    if sha(lock_bytes)!=pins['packageLockSha256']:raise ValueError('unpinned package lock')
+    lock_sha=sha(lock_bytes)
+    # A package lock that is not the pinned one does not stop the build: the build finishes, publishes the lock and its digest, and exits 3 UNPINNED below, so ONE run reports every stale pin.
+    # Every package is still checked against its own SHA-256 from the lock, and an unpinned result is never accepted (verify.py needs --allow-unpinned, the workflow's assert step stays red).
+    lock_problems=[] if lock_sha==pins['packageLockSha256'] else ['packageLockSha256 is '+lock_sha+', not the pinned '+str(pins['packageLockSha256'])]
     lock=json.loads(lock_bytes)
     hardlinks=sum(add_deb(tree,entry,out.parent/'downloads'/(entry['SHA256']+'.deb')) for entry in lock['packages'])
     # The reviewed supervisor treats its environment root as protected. Using '/' would reject
@@ -481,15 +484,16 @@ def main():
     tree.materialize(out/'root');tree.cpio(out/'immutable-root.cpio')
     manifest=tree.manifest();(out/'root.manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n');(out/'elf-dependencies.json').write_text(json.dumps(records,sort_keys=True,indent=2)+'\n')
     receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
-    problems=check_expected(receipt,pins['expectedArtifact'])
-    if pins['expectedArtifact'] is not None and problems:raise ValueError('; '.join(problems))
+    problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems
+    receipt['packageLockSha256']=lock_sha
+    (out/'packages.lock.json').write_bytes(lock_bytes)
     receipt['reproducibilityPinned']=not problems
     (out/'receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')
     from metrics import finish
     finish(out)
     print((out/'receipt.json').read_text(),flush=True)
     if problems:
-        # The re-pin changed the SDK source, so the old digests no longer apply. Every output is written; the build still ends
-        # non-zero until a reviewer copies the receipt values into pins.json, so an unpinned artifact is never mistaken for a pinned one.
+        # A pin is stale (a re-pin changed the SDK source, or the package lock or a digest differs). Every output is written, stale or reproducibility-mismatched digests included; the build still ends
+        # non-zero (3) until a reviewer copies the receipt values into pins.json, so an unpinned artifact is never mistaken for a pinned one.
         print('UNPINNED: '+'; '.join(problems),file=sys.stderr);raise SystemExit(3)
 if __name__=='__main__':main()

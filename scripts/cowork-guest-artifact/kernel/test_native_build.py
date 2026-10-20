@@ -89,9 +89,9 @@ class CiBuildPinTests(unittest.TestCase):
         self.assertGreaterEqual(ci["jobs"], 1)
         self.assertEqual(ci["installedKernel"]["buildOutput"], "arch/arm64/boot/Image")
 
-    def test_the_recipe_stays_unbuilt_and_unverified_until_a_reviewed_run_fills_it(self):
-        self.assertEqual(PINS["status"], "pinned-unbuilt")
-        self.assertEqual(nb.CI["status"], "unrun")
+    def test_the_recipe_is_built_and_reproduced_once_and_still_unbooted(self):
+        self.assertEqual(PINS["status"], "built-reproduced-unbooted")
+        self.assertEqual(nb.CI["status"], "run-once-reproduced")
         self.assertFalse(PINS["bootVerified"])
 
     def test_the_host_packages_are_build_tools_only(self):
