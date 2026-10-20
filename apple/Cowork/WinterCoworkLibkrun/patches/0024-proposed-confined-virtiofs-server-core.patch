@@ -1,9 +1,9 @@
 diff --git a/src/devices/src/virtio/fs/macos/confined/mod.rs b/src/devices/src/virtio/fs/macos/confined/mod.rs
 new file mode 100644
-index 0000000..721cb4e
+index 0000000..5e0a0e6
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/macos/confined/mod.rs
-@@ -0,0 +1,1162 @@
+@@ -0,0 +1,1252 @@
 +// The confined virtio-fs server for Cowork shares (SH2, requirements R0-R13 of the N2 extensions design).
 +//
 +// One `ConfinedFs` serves one share root, borrowed by the worker and duplicated by the caller. Every host
@@ -34,7 +34,7 @@ index 0000000..721cb4e
 +use std::fs::File;
 +use std::io;
 +use std::num::NonZeroUsize;
-+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
++use std::os::fd::{AsFd, AsRawFd, BorrowedFd, IntoRawFd, OwnedFd, RawFd};
 +use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 +use std::sync::{Arc, Mutex, MutexGuard};
 +use std::time::Duration;
@@ -53,6 +53,9 @@ index 0000000..721cb4e
 +
 +/// R10: open handles per device (files and directories); beyond that the answer is `ENFILE`.
 +pub const MAX_HANDLES: usize = 4096;
++/// R10: nodes the table holds per device (every node the guest has looked up and not forgotten); a new
++/// node beyond that is refused with `ENFILE`.
++pub const MAX_NODES: usize = 262_144;
 +/// R2: directory descriptors held per device (an LRU; the root is held apart).
 +pub const DIR_LRU: usize = 1024;
 +/// R12: entry and attribute timeouts.
@@ -196,17 +199,126 @@ index 0000000..721cb4e
 +    children: u64,
 +}
 +
-+struct CachedDirEntry {
++#[derive(Clone)]
++struct DirItem {
 +    ino: u64,
-+    name: Box<[u8]>,
++    name: Vec<u8>,
 +    type_: u8,
++}
++
++/// A directory handle's own stream (R10): no listing is cached. The handle holds its `DIR` (one buffer)
++/// and at most one entry it read but could not hand out yet; entry `n` has the FUSE offset `n + 1`. A
++/// request at the stream's position continues it; any other offset rewinds and skips forward.
++struct DirStream {
++    dir: std::ptr::NonNull<libc::DIR>,
++    /// Index of the entry the stream hands out next.
++    next: u64,
++    /// Entry `next`, already read from the stream.
++    pending: Option<DirItem>,
++    /// Rewinds so far: paging forward through a directory never rewinds.
++    rewinds: u64,
++}
++
++// SAFETY: the stream is only used under the state mutex, by one thread at a time.
++unsafe impl Send for DirStream {}
++
++impl DirStream {
++    fn new(fd: OwnedFd) -> io::Result<Self> {
++        let raw = fd.into_raw_fd();
++        // SAFETY: fdopendir takes the descriptor on success; on failure it is closed here.
++        let dir = unsafe { libc::fdopendir(raw) };
++        match std::ptr::NonNull::new(dir) {
++            Some(dir) => Ok(DirStream { dir, next: 0, pending: None, rewinds: 0 }),
++            None => {
++                let e = sys::host_err();
++                unsafe { libc::close(raw) };
++                Err(e)
++            }
++        }
++    }
++
++    fn fd(&self) -> RawFd {
++        unsafe { libc::dirfd(self.dir.as_ptr()) }
++    }
++
++    fn read_raw(&mut self) -> io::Result<Option<DirItem>> {
++        loop {
++            nix::errno::Errno::clear();
++            // SAFETY: the stream is open; the entry is copied before the next call.
++            let dentry = unsafe { libc::readdir(self.dir.as_ptr()) };
++            if dentry.is_null() {
++                return match nix::errno::Errno::last_raw() {
++                    0 => Ok(None),
++                    _ => Err(sys::host_err()),
++                };
++            }
++            let item = unsafe {
++                let len = usize::from((*dentry).d_namlen);
++                let name = std::slice::from_raw_parts((*dentry).d_name.as_ptr().cast::<u8>(), len);
++                DirItem { ino: (*dentry).d_ino, name: name.to_vec(), type_: (*dentry).d_type }
++            };
++            if item.name != b"." && item.name != b".." {
++                return Ok(Some(item));
++            }
++        }
++    }
++
++    /// Positions the stream at entry `offset`.
++    fn seek(&mut self, offset: u64) -> io::Result<()> {
++        if offset < self.next {
++            unsafe { libc::rewinddir(self.dir.as_ptr()) };
++            self.next = 0;
++            self.pending = None;
++            self.rewinds += 1;
++        }
++        while self.next < offset {
++            if self.pending.take().is_none() && self.read_raw()?.is_none() {
++                break;
++            }
++            self.next += 1;
++        }
++        Ok(())
++    }
++
++    /// Entry `next` (None at the end), without handing it out.
++    fn peek(&mut self) -> io::Result<Option<DirItem>> {
++        if self.pending.is_none() {
++            self.pending = self.read_raw()?;
++        }
++        Ok(self.pending.clone())
++    }
++
++    /// Entry `next` was handed out.
++    fn advance(&mut self) {
++        self.pending = None;
++        self.next += 1;
++    }
++}
++
++impl Drop for DirStream {
++    fn drop(&mut self) {
++        unsafe { libc::closedir(self.dir.as_ptr()) };
++    }
++}
++
++enum Body {
++    File(File),
++    Dir(DirStream),
 +}
 +
 +struct Handle {
 +    node: u64,
-+    file: File,
++    body: Body,
 +    writable: bool,
-+    dir: Option<(Vec<CachedDirEntry>, bool)>,
++}
++
++impl Handle {
++    fn fd(&self) -> RawFd {
++        match &self.body {
++            Body::File(file) => file.as_raw_fd(),
++            Body::Dir(dir) => dir.fd(),
++        }
++    }
 +}
 +
 +struct State {
@@ -217,6 +329,8 @@ index 0000000..721cb4e
 +    dirs: LruCache<u64, Arc<OwnedFd>>,
 +    handles: HashMap<u64, Handle>,
 +    next_handle: u64,
++    /// R10: the node-table cap (`MAX_NODES`; smaller only in tests).
++    node_cap: usize,
 +}
 +
 +/// The confined filesystem of one share.
@@ -261,6 +375,7 @@ index 0000000..721cb4e
 +                dirs: LruCache::new(NonZeroUsize::new(DIR_LRU).unwrap()),
 +                handles: HashMap::new(),
 +                next_handle: 1,
++                node_cap: MAX_NODES,
 +            }),
 +            host: Host { unique: cfg.flags.winter_share },
 +            flags: cfg.flags,
@@ -456,7 +571,7 @@ index 0000000..721cb4e
 +    }
 +
 +    /// Records a looked-up or created node and counts one lookup.
-+    fn insert(&self, st: &mut State, parent: u64, name: &CStr, s: &libc::stat) -> u64 {
++    fn insert(&self, st: &mut State, parent: u64, name: &CStr, s: &libc::stat) -> io::Result<u64> {
 +        let key = dev_ino(s);
 +        if let Some(&id) = st.ids.get(&key) {
 +            if id != ROOT_ID {
@@ -474,7 +589,11 @@ index 0000000..721cb4e
 +                node.name = name.to_owned();
 +            }
 +            st.nodes.get_mut(&id).unwrap().nlookup += 1;
-+            return id;
++            return Ok(id);
++        }
++        // R10: the table is bounded; a full table refuses a new node and never evicts a known one.
++        if st.nodes.len() >= st.node_cap {
++            return Err(err(lx::ENFILE));
 +        }
 +        let id = st.next_node;
 +        st.next_node += 1;
@@ -486,7 +605,14 @@ index 0000000..721cb4e
 +        if let Some(p) = st.nodes.get_mut(&parent) {
 +            p.children += 1;
 +        }
-+        id
++        Ok(id)
++    }
++
++    fn reserve_node(&self, st: &State) -> io::Result<()> {
++        if st.nodes.len() >= st.node_cap {
++            return Err(err(lx::ENFILE));
++        }
++        Ok(())
 +    }
 +
 +    /// Moves a node's (parent, name) after a rename.
@@ -544,18 +670,25 @@ index 0000000..721cb4e
 +        Ok(())
 +    }
 +
-+    fn add_handle(&self, st: &mut State, node: u64, fd: OwnedFd, writable: bool, dir: bool) -> u64 {
++    fn add_handle(&self, st: &mut State, node: u64, fd: OwnedFd, writable: bool, dir: bool) -> io::Result<u64> {
++        let body = if dir { Body::Dir(DirStream::new(fd)?) } else { Body::File(File::from(fd)) };
 +        let h = st.next_handle;
 +        st.next_handle += 1;
-+        let file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
-+        st.handles.insert(h, Handle { node, file, writable, dir: dir.then(|| (Vec::new(), false)) });
-+        h
++        st.handles.insert(h, Handle { node, body, writable });
++        Ok(h)
 +    }
 +
 +    fn handle<'s>(st: &'s mut State, node: u64, handle: u64) -> io::Result<&'s mut Handle> {
 +        match st.handles.get_mut(&handle) {
 +            Some(h) if h.node == node => Ok(h),
 +            _ => Err(err(lx::EBADF)),
++        }
++    }
++
++    fn dir_stream<'s>(st: &'s mut State, node: u64, handle: u64) -> io::Result<&'s mut DirStream> {
++        match &mut Self::handle(st, node, handle)?.body {
++            Body::Dir(stream) => Ok(stream),
++            Body::File(_) => Err(err(lx::ENOTDIR)),
 +        }
 +    }
 +
@@ -586,66 +719,13 @@ index 0000000..721cb4e
 +        self.same_device(&s)?;
 +        let id = if kind_of(s.st_mode) == Kind::Dir {
 +            let fd = self.open_dir_at(pfd.as_raw_fd(), name, s.st_dev as u64, s.st_ino)?;
-+            let id = self.insert(st, parent, name, &s);
++            let id = self.insert(st, parent, name, &s)?;
 +            st.dirs.put(id, Arc::new(fd));
 +            id
 +        } else {
-+            self.insert(st, parent, name, &s)
++            self.insert(st, parent, name, &s)?
 +        };
 +        Ok(self.entry(ctx, id, s))
-+    }
-+
-+    fn fill_dir(file: &File, entries: &mut Vec<CachedDirEntry>) -> io::Result<()> {
-+        // fdopendir() takes the descriptor, so it gets a duplicate.
-+        let dup = unsafe { libc::dup(file.as_raw_fd()) };
-+        if dup < 0 {
-+            return Err(sys::host_err());
-+        }
-+        let dir = unsafe { libc::fdopendir(dup) };
-+        if dir.is_null() {
-+            let e = sys::host_err();
-+            unsafe { libc::close(dup) };
-+            return Err(e);
-+        }
-+        unsafe { libc::rewinddir(dir) };
-+        loop {
-+            let dentry = unsafe { libc::readdir(dir) };
-+            if dentry.is_null() {
-+                break;
-+            }
-+            // SAFETY: readdir returned a valid entry; the name is copied at once.
-+            let (name, ino, type_) = unsafe {
-+                let len = usize::from((*dentry).d_namlen);
-+                let name = std::slice::from_raw_parts((*dentry).d_name.as_ptr().cast::<u8>(), len);
-+                (Box::<[u8]>::from(name), (*dentry).d_ino, (*dentry).d_type)
-+            };
-+            if &*name == b"." || &*name == b".." {
-+                continue;
-+            }
-+            entries.push(CachedDirEntry { ino, name, type_ });
-+        }
-+        unsafe { libc::closedir(dir) };
-+        Ok(())
-+    }
-+
-+    /// The directory entries from `offset` on, at most as many as `size` bytes can hold.
-+    fn dir_window(&self, st: &mut State, inode: u64, handle: u64, size: u32, offset: u64) -> io::Result<Vec<(u64, Vec<u8>, u8, u64)>> {
-+        let h = Self::handle(st, inode, handle)?;
-+        let file = &h.file;
-+        let (entries, ready) = h.dir.as_mut().ok_or_else(|| err(lx::ENOTDIR))?;
-+        if offset == 0 || !*ready {
-+            entries.clear();
-+            Self::fill_dir(file, entries)?;
-+            *ready = true;
-+        }
-+        let most = size as usize / std::mem::size_of::<fuse::Dirent>() + 1;
-+        Ok(entries
-+            .iter()
-+            .enumerate()
-+            .skip(offset as usize)
-+            .take(most)
-+            .map(|(i, e)| (e.ino, e.name.to_vec(), e.type_, i as u64 + 1))
-+            .collect())
 +    }
 +}
 +
@@ -700,7 +780,7 @@ index 0000000..721cb4e
 +    fn getattr(&self, ctx: Context, inode: u64, handle: Option<u64>) -> io::Result<(bindings::stat64, Duration)> {
 +        let mut st = self.lock();
 +        let s = match handle {
-+            Some(h) => sys::fstat_raw(Self::handle(&mut st, inode, h)?.file.as_raw_fd())?,
++            Some(h) => sys::fstat_raw(Self::handle(&mut st, inode, h)?.fd())?,
 +            None => self.stat_node(&mut st, inode)?,
 +        };
 +        Ok((self.simplified(&ctx, s), TIMEOUT))
@@ -734,7 +814,7 @@ index 0000000..721cb4e
 +                if let Some(h) = handle {
 +                    let held = Self::handle(&mut st, inode, h)?;
 +                    if !size || held.writable {
-+                        let fd = held.file.as_raw_fd();
++                        let fd = held.fd();
 +                        return self.apply_setattr(&ctx, fd, &attr, valid);
 +                    }
 +                }
@@ -767,10 +847,11 @@ index 0000000..721cb4e
 +        }
 +        self.admit(&Mutation::Symlink { parent, name, target: linkname })?;
 +        let mut st = self.lock();
++        self.reserve_node(&st)?;
 +        let pfd = self.dir_fd(&mut st, parent)?;
 +        self.host.symlinkat(linkname, pfd.as_raw_fd(), name)?;
 +        let s = self.host.fstatat(pfd.as_raw_fd(), name)?;
-+        let id = self.insert(&mut st, parent, name, &s);
++        let id = self.insert(&mut st, parent, name, &s)?;
 +        Ok(self.entry(&ctx, id, s))
 +    }
 +
@@ -785,6 +866,7 @@ index 0000000..721cb4e
 +        check_name(name.to_bytes())?;
 +        self.admit(&Mutation::Mkdir { parent, name })?;
 +        let mut st = self.lock();
++        self.reserve_node(&st)?;
 +        let pfd = self.dir_fd(&mut st, parent)?;
 +        let mode = mode & MODE_MASK;
 +        self.host.mkdirat(pfd.as_raw_fd(), name, mode as libc::mode_t)?;
@@ -794,7 +876,7 @@ index 0000000..721cb4e
 +        self.finish_create(pfd.as_raw_fd(), name, fd.as_fd(), CreatedKind::Directory)?;
 +        let s = sys::fstat(&fd)?;
 +        self.same_device(&s)?;
-+        let id = self.insert(&mut st, parent, name, &s);
++        let id = self.insert(&mut st, parent, name, &s)?;
 +        st.dirs.put(id, Arc::new(fd));
 +        Ok(self.entry(&ctx, id, s))
 +    }
@@ -873,7 +955,7 @@ index 0000000..721cb4e
 +        Self::confirm(&s, &st.nodes[&inode])?;
 +        self.host.linkat(spfd.as_raw_fd(), &name, npfd.as_raw_fd(), newname)?;
 +        let s = self.host.fstatat(npfd.as_raw_fd(), newname)?;
-+        let id = self.insert(&mut st, newparent, newname, &s);
++        let id = self.insert(&mut st, newparent, newname, &s)?;
 +        Ok(self.entry(&ctx, id, s))
 +    }
 +
@@ -910,7 +992,7 @@ index 0000000..721cb4e
 +            // R2: a truncating open is an open, the (dev, ino) check, then ftruncate on that descriptor.
 +            sys::ftruncate(fd.as_raw_fd(), 0)?;
 +        }
-+        let h = self.add_handle(&mut st, inode, fd, write, dir);
++        let h = self.add_handle(&mut st, inode, fd, write, dir)?;
 +        // R12: CachePolicy::Auto (no direct I/O, no keep-cache).
 +        Ok((Some(h), OpenOptions::empty()))
 +    }
@@ -934,6 +1016,7 @@ index 0000000..721cb4e
 +        self.admit(&Mutation::Create { parent, name })?;
 +        let mut st = self.lock();
 +        self.reserve_handle(&st)?;
++        self.reserve_node(&st)?;
 +        let pfd = self.dir_fd(&mut st, parent)?;
 +        let mut host = access as i32 | libc::O_CREAT | libc::O_EXCL;
 +        if flags & LINUX_O_APPEND != 0 {
@@ -949,8 +1032,8 @@ index 0000000..721cb4e
 +        }
 +        self.finish_create(pfd.as_raw_fd(), name, fd.as_fd(), CreatedKind::File)?;
 +        let s = sys::fstat(&fd)?;
-+        let id = self.insert(&mut st, parent, name, &s);
-+        let h = self.add_handle(&mut st, id, fd, access != 0, false);
++        let id = self.insert(&mut st, parent, name, &s)?;
++        let h = self.add_handle(&mut st, id, fd, access != 0, false)?;
 +        Ok((self.entry(&ctx, id, s), Some(h), OpenOptions::empty()))
 +    }
 +
@@ -967,10 +1050,8 @@ index 0000000..721cb4e
 +    ) -> io::Result<usize> {
 +        let mut st = self.lock();
 +        let h = Self::handle(&mut st, inode, handle)?;
-+        if h.dir.is_some() {
-+            return Err(err(lx::EISDIR));
-+        }
-+        w.write_from(&h.file, size as usize, offset).map_err(crate::virtio::linux_errno::linux_error)
++        let Body::File(file) = &h.body else { return Err(err(lx::EISDIR)) };
++        w.write_from(file, size as usize, offset).map_err(crate::virtio::linux_errno::linux_error)
 +    }
 +
 +    fn write<R: io::Read + ZeroCopyReader>(
@@ -992,7 +1073,8 @@ index 0000000..721cb4e
 +        if !h.writable {
 +            return Err(err(lx::EBADF));
 +        }
-+        r.read_to(&h.file, size as usize, offset).map_err(crate::virtio::linux_errno::linux_error)
++        let Body::File(file) = &h.body else { return Err(err(lx::EBADF)) };
++        r.read_to(file, size as usize, offset).map_err(crate::virtio::linux_errno::linux_error)
 +    }
 +
 +    fn flush(&self, _ctx: Context, inode: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
@@ -1002,7 +1084,7 @@ index 0000000..721cb4e
 +
 +    fn fsync(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
 +        let mut st = self.lock();
-+        let fd = Self::handle(&mut st, inode, handle)?.file.as_raw_fd();
++        let fd = Self::handle(&mut st, inode, handle)?.fd();
 +        self.sync(fd)
 +    }
 +
@@ -1018,7 +1100,7 @@ index 0000000..721cb4e
 +            return Err(err(lx::EBADF));
 +        }
 +        let end = offset.checked_add(length).filter(|e| *e <= i64::MAX as u64).ok_or_else(|| err(lx::EINVAL))?;
-+        let fd = h.file.as_raw_fd();
++        let fd = h.fd();
 +        if end > sys::fstat_raw(fd)?.st_size as u64 {
 +            sys::ftruncate(fd, end as i64)?;
 +        }
@@ -1046,7 +1128,7 @@ index 0000000..721cb4e
 +            return Err(err(lx::ENOTDIR));
 +        }
 +        let fd = self.open_dir_fresh(&mut st, inode)?;
-+        let h = self.add_handle(&mut st, inode, fd, false, true);
++        let h = self.add_handle(&mut st, inode, fd, false, true)?;
 +        Ok((Some(h), OpenOptions::empty()))
 +    }
 +
@@ -1058,11 +1140,14 @@ index 0000000..721cb4e
 +            return Ok(());
 +        }
 +        let mut st = self.lock();
-+        for (ino, name, type_, next) in self.dir_window(&mut st, inode, handle, size, offset)? {
-+            let entry = DirEntry { ino, offset: next, type_: u32::from(type_), name: &name };
++        let stream = Self::dir_stream(&mut st, inode, handle)?;
++        stream.seek(offset)?;
++        while let Some(item) = stream.peek()? {
++            let entry = DirEntry { ino: item.ino, offset: stream.next + 1, type_: u32::from(item.type_), name: &item.name };
 +            if add_entry(entry)? == 0 {
 +                break;
 +            }
++            stream.advance();
 +        }
 +        Ok(())
 +    }
@@ -1075,10 +1160,14 @@ index 0000000..721cb4e
 +            return Ok(());
 +        }
 +        let mut st = self.lock();
-+        for (ino, name, type_, next) in self.dir_window(&mut st, inode, handle, size, offset)? {
-+            let cname = CString::new(name.clone()).map_err(|_| err(lx::EIO))?;
-+            // An entry the server will not serve (another device, a refused name) goes out without
-+            // attributes; the guest's own lookup of it is then refused.
++        Self::dir_stream(&mut st, inode, handle)?.seek(offset)?;
++        loop {
++            let stream = Self::dir_stream(&mut st, inode, handle)?;
++            let Some(item) = stream.peek()? else { break };
++            let next = stream.next + 1;
++            let cname = CString::new(item.name.clone()).map_err(|_| err(lx::EIO))?;
++            // An entry the server will not serve (another device, a refused name, a full table) goes out
++            // without attributes; the guest's own lookup of it is then refused.
 +            let entry = self.lookup_locked(&mut st, &ctx, inode, &cname).ok();
 +            let looked_up = entry.as_ref().map(|e| e.inode);
 +            let entry = entry.unwrap_or(Entry {
@@ -1089,7 +1178,7 @@ index 0000000..721cb4e
 +                attr_timeout: Duration::ZERO,
 +                entry_timeout: Duration::ZERO,
 +            });
-+            let dir_entry = DirEntry { ino, offset: next, type_: u32::from(type_), name: &name };
++            let dir_entry = DirEntry { ino: item.ino, offset: next, type_: u32::from(item.type_), name: &item.name };
 +            let written = add_entry(dir_entry, entry);
 +            if !matches!(written, Ok(n) if n > 0) {
 +                if let Some(id) = looked_up {
@@ -1098,13 +1187,14 @@ index 0000000..721cb4e
 +                written?;
 +                break;
 +            }
++            Self::dir_stream(&mut st, inode, handle)?.advance();
 +        }
 +        Ok(())
 +    }
 +
 +    fn fsyncdir(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
 +        let mut st = self.lock();
-+        let fd = Self::handle(&mut st, inode, handle)?.file.as_raw_fd();
++        let fd = Self::handle(&mut st, inode, handle)?.fd();
 +        self.sync(fd)
 +    }
 +
@@ -1131,7 +1221,7 @@ index 0000000..721cb4e
 +            _ => return Err(err(lx::EINVAL)),
 +        };
 +        let mut st = self.lock();
-+        let fd = Self::handle(&mut st, inode, handle)?.file.as_raw_fd();
++        let fd = Self::handle(&mut st, inode, handle)?.fd();
 +        sys::lseek(fd, offset as i64, whence)
 +    }
 +}
@@ -1433,10 +1523,10 @@ index 0000000..266b812
 +}
 diff --git a/src/devices/src/virtio/fs/macos/confined/tests.rs b/src/devices/src/virtio/fs/macos/confined/tests.rs
 new file mode 100644
-index 0000000..2f32e44
+index 0000000..79d4ad1
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/macos/confined/tests.rs
-@@ -0,0 +1,1291 @@
+@@ -0,0 +1,1515 @@
 +// In-process FUSE-message harness for the confined server: real request bytes in guest memory, a real
 +// descriptor chain, `Server::handle_confined_message`, and temporary trees under the system temp
 +// directory. No VM, no worker, no device thread.
@@ -1504,6 +1594,8 @@ index 0000000..2f32e44
 +struct Reply {
 +    error: i32,
 +    body: Vec<u8>,
++    /// The 64 bytes of the reply area right after the reply.
++    after: Vec<u8>,
 +}
 +
 +impl Reply {
@@ -1520,6 +1612,8 @@ index 0000000..2f32e44
 +    server: Server<ConfinedFs>,
 +    mem: GuestMemoryMmap,
 +    unique: u64,
++    /// The byte the reply area is filled with before each request.
++    fill: u8,
 +}
 +
 +impl Share {
@@ -1542,7 +1636,7 @@ index 0000000..2f32e44
 +
 +    fn with_fs(tree: TempTree, root: PathBuf, outside: PathBuf, fs: ConfinedFs) -> Self {
 +        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
-+        let mut share = Share { _tree: tree, root, outside, server: Server::new(fs), mem, unique: 0 };
++        let mut share = Share { _tree: tree, root, outside, server: Server::new(fs), mem, unique: 0, fill: 0 };
 +        let init = share.init(u32::MAX, u32::MAX);
 +        assert_eq!(init.error, 0);
 +        share
@@ -1560,7 +1654,7 @@ index 0000000..2f32e44
 +        request.extend_from_slice(body);
 +        self.mem.write_slice(&request, GuestAddress(REQ)).unwrap();
 +        let reply_at = GuestAddress(REQ + request.len() as u64);
-+        self.mem.write_slice(&vec![0u8; REPLY_CAP as usize], reply_at).unwrap();
++        self.mem.write_slice(&vec![self.fill; REPLY_CAP as usize], reply_at).unwrap();
 +        let chain = create_descriptor_chain(
 +            &self.mem,
 +            GuestAddress(0),
@@ -1582,10 +1676,12 @@ index 0000000..2f32e44
 +        }
 +        let mut out = vec![0u8; written];
 +        self.mem.read_slice(&mut out, reply_at).unwrap();
++        let mut after = vec![0u8; 64];
++        self.mem.read_slice(&mut after, GuestAddress(reply_at.0 + written as u64)).unwrap();
 +        let header = *OutHeader::from_slice(&out[..std::mem::size_of::<OutHeader>()]).unwrap();
 +        assert_eq!(header.unique, self.unique);
 +        assert_eq!(header.len as usize, written);
-+        Some(Reply { error: -header.error, body: out[std::mem::size_of::<OutHeader>()..].to_vec() })
++        Some(Reply { error: -header.error, body: out[std::mem::size_of::<OutHeader>()..].to_vec(), after })
 +    }
 +
 +    fn call(&mut self, opcode: Opcode, nodeid: u64, body: &[u8]) -> Reply {
@@ -1728,8 +1824,32 @@ index 0000000..2f32e44
 +        names
 +    }
 +
++    /// One READDIR or READDIRPLUS page: (name, next offset, node id, padding bytes).
++    fn readdir_page(&mut self, node: u64, fh: u64, offset: u64, size: u32, plus: bool) -> Vec<(String, u64, u64, Vec<u8>)> {
++        let opcode = if plus { Opcode::Readdirplus } else { Opcode::Readdir };
++        let reply = self.call(opcode, node, ReadIn { fh, offset, size, ..Default::default() }.as_slice());
++        assert_eq!(reply.error, 0);
++        let mut out = Vec::new();
++        let mut at = 0;
++        while at < reply.body.len() {
++            let mut nodeid = 0;
++            if plus {
++                nodeid = EntryOut::from_slice(&reply.body[at..at + std::mem::size_of::<EntryOut>()]).unwrap().nodeid;
++                at += std::mem::size_of::<EntryOut>();
++            }
++            let dirent = *Dirent::from_slice(&reply.body[at..at + std::mem::size_of::<Dirent>()]).unwrap();
++            at += std::mem::size_of::<Dirent>();
++            let len = dirent.namelen as usize;
++            let name = String::from_utf8(reply.body[at..at + len].to_vec()).unwrap();
++            let padded = (len + 7) & !7;
++            out.push((name, dirent.off, nodeid, reply.body[at + len..at + padded].to_vec()));
++            at += padded;
++        }
++        out
++    }
++
 +    fn handle_fd(&self, fh: u64) -> i32 {
-+        self.fs().lock().handles[&fh].file.as_raw_fd()
++        self.fs().lock().handles[&fh].fd()
 +    }
 +}
 +
@@ -2727,6 +2847,200 @@ index 0000000..2f32e44
 +    assert!(handle.join().unwrap() > 0);
 +    assert!(reads > 0, "the race never let a read through");
 +    drop(share);
++}
++
++// ---- review follow-ups: bounded directory streams, the node table, handle ownership, reply bytes ------
++
++fn resident_bytes() -> u64 {
++    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
++    let size = std::mem::size_of::<libc::proc_taskinfo>() as i32;
++    let n = unsafe { libc::proc_pidinfo(std::process::id() as i32, libc::PROC_PIDTASKINFO, 0, (&mut info as *mut libc::proc_taskinfo).cast(), size) };
++    assert_eq!(n, size);
++    info.pti_resident_size
++}
++
++#[test]
++fn r10_many_directory_handles_on_a_large_directory_cache_no_listing() {
++    raise_nofile(8192);
++    let mut share = Share::build(flags(false, false), |root| {
++        fs::create_dir(root.join("big")).unwrap();
++        for i in 0..20_000 {
++            fs::File::create(root.join(format!("big/entry-with-a-longish-name-{i:06}"))).unwrap();
++        }
++    });
++    let big = share.node(1, b"big");
++    let before = resident_bytes();
++    let mut handles = Vec::new();
++    for _ in 0..512 {
++        let fh = share.opendir(big).obj::<OpenOut>().fh;
++        // Every handle reads a page from the start and one from the middle of the directory.
++        assert!(!share.readdir_page(big, fh, 0, 4096, false).is_empty());
++        assert!(!share.readdir_page(big, fh, 10_000, 4096, false).is_empty());
++        handles.push(fh);
++    }
++    // No handle holds a listing: one stream and at most one entry read ahead, of at most NAME_MAX bytes.
++    for fh in &handles {
++        let st = share.fs().lock();
++        let Body::Dir(stream) = &st.handles[fh].body else { panic!("not a directory handle") };
++        assert!(stream.pending.as_ref().map_or(0, |p| p.name.len()) <= NAME_MAX);
++    }
++    let grown = resident_bytes().saturating_sub(before);
++    // The stated bound: 512 open streams (one libc DIR buffer each) stay far below 64 MiB, where a cached
++    // listing of 20,000 entries per handle needed hundreds of MiB.
++    assert!(grown < 64 << 20, "resident memory grew by {grown} bytes");
++    for fh in handles {
++        assert_eq!(share.call(Opcode::Releasedir, big, ReleaseIn { fh, ..Default::default() }.as_slice()).error, 0);
++    }
++}
++
++fn rewinds(share: &Share, fh: u64) -> u64 {
++    match &share.fs().lock().handles[&fh].body {
++        Body::Dir(stream) => stream.rewinds,
++        Body::File(_) => panic!("not a directory handle"),
++    }
++}
++
++#[test]
++fn readdir_resumes_at_offsets_across_calls() {
++    let mut share = Share::build(flags(false, false), |root| {
++        fs::create_dir(root.join("d")).unwrap();
++        for i in 0..300 {
++            fs::write(root.join(format!("d/name-{i:03}-{}", "x".repeat(i % 13))), b"").unwrap();
++        }
++    });
++    let d = share.node(1, b"d");
++    for plus in [false, true] {
++        let fh = share.opendir(d).obj::<OpenOut>().fh;
++        // Small pages, each resumed at the last offset handed out.
++        let mut all = Vec::new();
++        let mut offset = 0;
++        loop {
++            let page = share.readdir_page(d, fh, offset, 512, plus);
++            if page.is_empty() {
++                break;
++            }
++            for (i, (_, off, _, _)) in page.iter().enumerate() {
++                assert_eq!(*off, offset + i as u64 + 1);
++            }
++            offset = page.last().unwrap().1;
++            all.extend(page.into_iter().map(|(name, off, _, _)| (name, off)));
++        }
++        // Paging forward kept the entry that did not fit and never rewound the stream.
++        assert_eq!(rewinds(&share, fh), 0);
++        let mut names: Vec<String> = all.iter().map(|(n, _)| n.clone()).collect();
++        assert_eq!(names.len(), 300);
++        names.sort();
++        names.dedup();
++        assert_eq!(names.len(), 300);
++        // An earlier offset (the stream rewinds) and a later one (it skips forward) give the same entries.
++        let again = share.readdir_page(d, fh, all[49].1, 512, plus);
++        assert_eq!(again[0].0, all[50].0);
++        assert_eq!(rewinds(&share, fh), 1);
++        let ahead = share.readdir_page(d, fh, all[249].1, 512, plus);
++        assert_eq!(ahead[0].0, all[250].0);
++        let fresh = share.opendir(d).obj::<OpenOut>().fh;
++        let middle = share.readdir_page(d, fresh, all[149].1, 512, plus);
++        assert_eq!(middle[0].0, all[150].0);
++        assert!(share.readdir_page(d, fresh, 300, 512, plus).is_empty());
++    }
++}
++
++#[test]
++fn r10_a_full_node_table_refuses_new_nodes() {
++    assert_eq!(MAX_NODES, 262_144);
++    let mut share = Share::build(flags(false, false), |root| {
++        for name in ["a", "b", "c", "d"] {
++            fs::write(root.join(name), b"x").unwrap();
++        }
++    });
++    let known = share.fs().lock().nodes.len();
++    assert_eq!(share.fs().lock().node_cap, MAX_NODES);
++    share.fs().lock().node_cap = known + 2;
++    let a = share.node(1, b"a");
++    share.node(1, b"b");
++    let before = snapshot(&share.root);
++    assert_eq!(share.lookup(1, b"c").error, lx::ENFILE);
++    assert_eq!(share.create(1, b"new", 0o644, WRONLY).error, lx::ENFILE);
++    assert_eq!(share.mkdir(1, b"dir", 0o755).error, lx::ENFILE);
++    assert_eq!(share.symlink(1, b"link", b"a").error, lx::ENFILE);
++    assert_eq!(snapshot(&share.root), before);
++    // A known node is still served, and a forgotten one frees its slot.
++    assert_eq!(share.node(1, b"a"), a);
++    share.forget(a, 2);
++    share.node(1, b"c");
++    assert_eq!(share.fs().lock().nodes.len(), known + 2);
++}
++
++#[test]
++fn a_handle_serves_only_its_own_node() {
++    let mut share = Share::build(flags(false, false), |root| {
++        fs::write(root.join("a"), b"aaaa").unwrap();
++        fs::write(root.join("b"), b"bbbb").unwrap();
++        fs::create_dir(root.join("d")).unwrap();
++        fs::create_dir(root.join("e")).unwrap();
++    });
++    let a = share.node(1, b"a");
++    let b = share.node(1, b"b");
++    let d = share.node(1, b"d");
++    let e = share.node(1, b"e");
++    let fh = share.open_ok(a, RDWR);
++    let dh = share.opendir(d).obj::<OpenOut>().fh;
++    let replies = [
++        share.read(b, fh, 0, 4),
++        share.write(b, fh, 0, b"XXXX"),
++        share.call(Opcode::Getattr, b, GetattrIn { flags: GETATTR_FH, dummy: 0, fh }.as_slice()),
++        share.call(Opcode::Setattr, b, SetattrIn { valid: 8 | FATTR_FH, fh, size: 0, ..Default::default() }.as_slice()),
++        share.call(Opcode::Fsync, b, FsyncIn { fh, ..Default::default() }.as_slice()),
++        share.call(Opcode::Flush, b, FlushIn { fh, ..Default::default() }.as_slice()),
++        share.call(Opcode::Lseek, b, LseekIn { fh, offset: 0, whence: 3, padding: 0 }.as_slice()),
++        share.call(Opcode::Fallocate, b, FallocateIn { fh, offset: 0, length: 64, mode: 0, padding: 0 }.as_slice()),
++        share.release(b, fh),
++        share.call(Opcode::Readdir, e, ReadIn { fh: dh, size: 4096, ..Default::default() }.as_slice()),
++        share.call(Opcode::Fsyncdir, e, FsyncIn { fh: dh, ..Default::default() }.as_slice()),
++        share.call(Opcode::Releasedir, e, ReleaseIn { fh: dh, ..Default::default() }.as_slice()),
++    ];
++    for (i, reply) in replies.iter().enumerate() {
++        assert_eq!(reply.error, lx::EBADF, "request {i}");
++    }
++    assert_eq!(fs::read(share.root.join("b")).unwrap(), b"bbbb");
++    assert_eq!(share.read(a, fh, 0, 4).body, b"aaaa");
++    assert_eq!(share.release(a, fh).error, 0);
++}
++
++#[test]
++fn replies_carry_no_stale_bytes() {
++    let mut share = Share::build(flags(false, false), |root| {
++        for name in ["a", "bb", "ccc", "ddddddddd"] {
++            fs::write(root.join(name), b"x").unwrap();
++        }
++    });
++    share.fill = 0xAA;
++    // An entry reply is exactly its header and EntryOut, and nothing after it is touched.
++    let reply = share.lookup(1, b"a");
++    assert_eq!(reply.body.len(), std::mem::size_of::<EntryOut>());
++    assert!(reply.after.iter().all(|b| *b == 0xAA));
++    // An error reply is the bare header.
++    let reply = share.lookup(1, b"missing");
++    assert_eq!((reply.error, reply.body.len()), (lx::ENOENT, 0));
++    assert!(reply.after.iter().all(|b| *b == 0xAA));
++    // Directory pages pad every name with zeros and end exactly at their length.
++    for plus in [false, true] {
++        let fh = share.opendir(1).obj::<OpenOut>().fh;
++        let page = share.readdir_page(1, fh, 0, 4096, plus);
++        assert_eq!(page.len(), 4);
++        for (name, _, _, padding) in &page {
++            assert_eq!(padding.len(), ((name.len() + 7) & !7) - name.len());
++            assert!(padding.iter().all(|b| *b == 0), "{name}");
++        }
++        let reply = share.call(Opcode::Readdir, 1, ReadIn { fh, offset: 4, size: 4096, ..Default::default() }.as_slice());
++        assert!(reply.body.is_empty() && reply.after.iter().all(|b| *b == 0xAA));
++    }
++    // A READ returns exactly the file's bytes.
++    let a = share.node(1, b"a");
++    let fh = share.open_ok(a, RDONLY);
++    let reply = share.read(a, fh, 0, 4096);
++    assert_eq!(reply.body, b"x");
++    assert!(reply.after.iter().all(|b| *b == 0xAA));
 +}
 diff --git a/src/devices/src/virtio/fs/macos/mod.rs b/src/devices/src/virtio/fs/macos/mod.rs
 index b8edbc7..63ca834 100644

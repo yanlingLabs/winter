@@ -15,8 +15,8 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
 | Patch queue | `patch-queue.json` | 23 patches, 0004-0026, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `b27f1ad7286f5dfe654f2270741c6063a359c46903177690c640910a90ce8c3d` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `2e2eb8534bf243af9725faf36691a55e6a7d51217c993e45111f17e5db5a1c9d`, stripped `2f87d859d798771cde27b97656d932a4a61121f953af59d05a1c027e61a15f1a` |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `c8e7c5b49cc7099debaa4dcc6c1d1f8107dc3b869803a5c084e5f14eb6de987f` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `6f088d7871f79ed023b4334b210d0a3641473ec98dec799197981d63b4c3b833`, stripped `18a77e6d04f0799789d7da2ad0545bfd1499da738b216812beec4c138b6236f5` |
 | Exports | `expected-hashes.json` | 72 `krun_*` symbols: the 62 upstream ones for this feature set plus 10 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (697 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (702 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -76,8 +76,8 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0021-proposed-production-flush-and-pin-counters.patch` | flush counters per disk, pin high-water counters | production | `f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a` |
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
-| `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, served by 0026 | `4cb81b56ee3da01eb9bc3c66d9cda529ae12ed5f77c7201bee6d5f05e13b18f5` |
-| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, served by 0026 | `731eefe21499d499adb44ba4153bad15fd02489521c7d07aff765df41fdf328a` |
+| `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, served by 0026 | `c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85` |
+| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, served by 0026 | `70e52f454938ab011f796f6645aee9013f35434a41ba9e3e423a7d2fb070507e` |
 | `0026-proposed-guarded-fs-device-shares-abi-gate.patch` | the guarded fs device of the shares (one device per share, reclaim pins, freeze, chain bounds, revocation by the device thread, exit-path join), the budget from the share count, `krun_cowork_add_share_v1` / `revoke_share_v1` / `next_share_event_v1` (with the server's notices), the gate clause for `r.fs` and gate-matrix rows with shares present | production | `f4ed7ef2d32fdd0fad578e6fee136fc1dd38d287ee86aeb70956d69d99a5942c` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
@@ -93,8 +93,9 @@ fixture symbol and carries no trace-row string (both checked on every build). Th
 (`server.rs`) dispatches a closed opcode list to it; every other opcode answers `ENOSYS`, INIT negotiates only
 `ASYNC_READ | BIG_WRITES | AUTO_INVAL_DATA | MAX_PAGES` with `max_pages` 256, and a revoke flag answers `EACCES` before anything
 else. Host calls are `*at` on held directory descriptors with `O_NOFOLLOW_ANY | O_RESOLVE_BENEATH` (or the `AT_`/`RENAME_`
-equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shares. Limits: 4,096 handles (`ENFILE`), a directory
-LRU of 1,024, 1 s timeouts, modes masked to `0o755`. The constants the pinned `libc` crate lacks are defined with their SDK header
+equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shares. Limits: 4,096 handles (`ENFILE`), 262,144 nodes
+(`ENFILE`), a directory LRU of 1,024, 1 s timeouts, modes masked to `0o755`. A directory handle reads its own directory stream
+(one `DIR` and at most one entry read ahead); no handle caches a listing. The constants the pinned `libc` crate lacks are defined with their SDK header
 lines. It adds no device, export or gate change itself; 0026 serves it.
 
 ## Git rules and quarantine (0025)

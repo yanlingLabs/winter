@@ -2861,7 +2861,7 @@ index 0000000..dd78b76
 +    })
 +}
 diff --git a/src/devices/src/virtio/fs/macos/confined/mod.rs b/src/devices/src/virtio/fs/macos/confined/mod.rs
-index 721cb4e..ebe9ae1 100644
+index 5e0a0e6..1ef5a51 100644
 --- a/src/devices/src/virtio/fs/macos/confined/mod.rs
 +++ b/src/devices/src/virtio/fs/macos/confined/mod.rs
 @@ -11,16 +11,25 @@
@@ -2893,7 +2893,7 @@ index 721cb4e..ebe9ae1 100644
  pub use sys::lx;
  
  use std::collections::HashMap;
-@@ -69,7 +78,8 @@ const LINUX_SEEK_HOLE: u32 = 4;
+@@ -72,7 +81,8 @@ const LINUX_SEEK_HOLE: u32 = 4;
  const LINUX_W_OK: u32 = 2;
  
  /// The three share flags of the ABI (`krun_cowork_add_share_v1`): bit 0 read-only, bit 1 Winter share
@@ -2903,25 +2903,25 @@ index 721cb4e..ebe9ae1 100644
  #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
  pub struct ShareFlags {
      pub read_only: bool,
-@@ -201,6 +211,8 @@ struct Handle {
-     file: File,
+@@ -304,6 +314,8 @@ struct Handle {
+     node: u64,
+     body: Body,
      writable: bool,
-     dir: Option<(Vec<CachedDirEntry>, bool)>,
 +    /// R15: a pointer file's content, held until FLUSH or RELEASE checks it.
 +    pointer: Option<git::Pointer>,
  }
  
- struct State {
-@@ -211,6 +223,8 @@ struct State {
-     dirs: LruCache<u64, Arc<OwnedFd>>,
-     handles: HashMap<u64, Handle>,
+ impl Handle {
+@@ -325,6 +337,8 @@ struct State {
      next_handle: u64,
+     /// R10: the node-table cap (`MAX_NODES`; smaller only in tests).
+     node_cap: usize,
 +    /// R15 on a read-write folder source; `None` elsewhere.
 +    git: Option<git::GitState>,
  }
  
  /// The confined filesystem of one share.
-@@ -225,6 +239,10 @@ pub struct ConfinedFs {
+@@ -339,6 +353,10 @@ pub struct ConfinedFs {
      hooks: Box<dyn ConfinedHooks>,
      full_syncs: AtomicU64,
      plain_syncs: AtomicU64,
@@ -2932,7 +2932,7 @@ index 721cb4e..ebe9ae1 100644
  }
  
  fn dev_ino(st: &libc::stat) -> (u64, u64) {
-@@ -246,7 +264,9 @@ impl ConfinedFs {
+@@ -360,7 +378,9 @@ impl ConfinedFs {
          );
          let mut ids = HashMap::new();
          ids.insert((dev, ino), ROOT_ID);
@@ -2943,15 +2943,15 @@ index 721cb4e..ebe9ae1 100644
              state: Mutex::new(State {
                  root: Some(Arc::new(cfg.root)),
                  nodes,
-@@ -255,6 +275,7 @@ impl ConfinedFs {
-                 dirs: LruCache::new(NonZeroUsize::new(DIR_LRU).unwrap()),
+@@ -370,6 +390,7 @@ impl ConfinedFs {
                  handles: HashMap::new(),
                  next_handle: 1,
+                 node_cap: MAX_NODES,
 +                git,
              }),
              host: Host { unique: cfg.flags.winter_share },
              flags: cfg.flags,
-@@ -265,7 +286,15 @@ impl ConfinedFs {
+@@ -380,7 +401,15 @@ impl ConfinedFs {
              hooks: Box::new(NoHooks),
              full_syncs: AtomicU64::new(0),
              plain_syncs: AtomicU64::new(0),
@@ -2968,7 +2968,7 @@ index 721cb4e..ebe9ae1 100644
      }
  
      pub fn with_hooks(mut self, hooks: Box<dyn ConfinedHooks>) -> Self {
-@@ -285,6 +314,11 @@ impl ConfinedFs {
+@@ -400,6 +429,11 @@ impl ConfinedFs {
          (self.root_dev, self.root_ino)
      }
  
@@ -2980,7 +2980,7 @@ index 721cb4e..ebe9ae1 100644
      /// A handle on this device's revoke flag, for the thread that receives the revocation.
      pub fn revoke_switch(&self) -> RevokeSwitch {
          self.revoke.clone()
-@@ -324,9 +358,11 @@ impl ConfinedFs {
+@@ -439,9 +473,11 @@ impl ConfinedFs {
          Ok(())
      }
  
@@ -2993,16 +2993,16 @@ index 721cb4e..ebe9ae1 100644
          self.hooks.admit(op)
      }
  
-@@ -542,7 +578,7 @@ impl ConfinedFs {
+@@ -668,7 +704,7 @@ impl ConfinedFs {
+         let body = if dir { Body::Dir(DirStream::new(fd)?) } else { Body::File(File::from(fd)) };
          let h = st.next_handle;
          st.next_handle += 1;
-         let file = unsafe { File::from_raw_fd(fd.into_raw_fd()) };
--        st.handles.insert(h, Handle { node, file, writable, dir: dir.then(|| (Vec::new(), false)) });
-+        st.handles.insert(h, Handle { node, file, writable, dir: dir.then(|| (Vec::new(), false)), pointer: None });
-         h
+-        st.handles.insert(h, Handle { node, body, writable });
++        st.handles.insert(h, Handle { node, body, writable, pointer: None });
+         Ok(h)
      }
  
-@@ -564,9 +600,11 @@ impl ConfinedFs {
+@@ -697,9 +733,11 @@ impl ConfinedFs {
          }
      }
  
@@ -3016,17 +3016,17 @@ index 721cb4e..ebe9ae1 100644
              let _ = self.host.unlinkat(pfd, name, kind == CreatedKind::Directory);
              return Err(err(lx::EIO));
          }
-@@ -578,6 +616,7 @@ impl ConfinedFs {
+@@ -711,6 +749,7 @@ impl ConfinedFs {
          let pfd = self.dir_fd(st, parent)?;
          let s = self.host.fstatat(pfd.as_raw_fd(), name)?;
          self.same_device(&s)?;
 +        let first = !st.ids.contains_key(&dev_ino(&s));
          let id = if kind_of(s.st_mode) == Kind::Dir {
              let fd = self.open_dir_at(pfd.as_raw_fd(), name, s.st_dev as u64, s.st_ino)?;
-             let id = self.insert(st, parent, name, &s);
-@@ -586,6 +625,15 @@ impl ConfinedFs {
+             let id = self.insert(st, parent, name, &s)?;
+@@ -719,6 +758,15 @@ impl ConfinedFs {
          } else {
-             self.insert(st, parent, name, &s)
+             self.insert(st, parent, name, &s)?
          };
 +        if st.git.is_some() {
 +            // R15: a directory's repository is read the first time it is resolved, before the answer; a
@@ -3039,8 +3039,8 @@ index 721cb4e..ebe9ae1 100644
 +        }
          Ok(self.entry(ctx, id, s))
      }
- 
-@@ -712,6 +760,13 @@ impl FileSystem for ConfinedFs {
+ }
+@@ -792,6 +840,13 @@ impl FileSystem for ConfinedFs {
          if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
              return Err(err(lx::EPERM));
          }
@@ -3054,10 +3054,10 @@ index 721cb4e..ebe9ae1 100644
          self.admit(&Mutation::Setattr { node: inode, valid, mode: attr.st_mode as u32 })?;
          let mut st = self.lock();
          let kind = st.nodes.get(&inode).ok_or_else(|| err(lx::ESTALE))?.kind;
-@@ -729,11 +784,13 @@ impl FileSystem for ConfinedFs {
+@@ -809,11 +864,13 @@ impl FileSystem for ConfinedFs {
                      let held = Self::handle(&mut st, inode, h)?;
                      if !size || held.writable {
-                         let fd = held.file.as_raw_fd();
+                         let fd = held.fd();
 +                        self.tag_setattr(fd, &attr, valid)?;
                          return self.apply_setattr(&ctx, fd, &attr, valid);
                      }
@@ -3068,7 +3068,7 @@ index 721cb4e..ebe9ae1 100644
                  self.apply_setattr(&ctx, fd.as_raw_fd(), &attr, valid)
              }
              _ => Err(err(lx::EPERM)),
-@@ -798,7 +855,10 @@ impl FileSystem for ConfinedFs {
+@@ -880,7 +937,10 @@ impl FileSystem for ConfinedFs {
          self.admit(&Mutation::Unlink { parent, name })?;
          let mut st = self.lock();
          let pfd = self.dir_fd(&mut st, parent)?;
@@ -3080,7 +3080,7 @@ index 721cb4e..ebe9ae1 100644
      }
  
      fn rmdir(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
-@@ -806,7 +866,10 @@ impl FileSystem for ConfinedFs {
+@@ -888,7 +948,10 @@ impl FileSystem for ConfinedFs {
          self.admit(&Mutation::Rmdir { parent, name })?;
          let mut st = self.lock();
          let pfd = self.dir_fd(&mut st, parent)?;
@@ -3092,7 +3092,7 @@ index 721cb4e..ebe9ae1 100644
      }
  
      fn rename(&self, _ctx: Context, olddir: u64, oldname: &CStr, newdir: u64, newname: &CStr, flags: u32) -> io::Result<()> {
-@@ -836,11 +899,18 @@ impl FileSystem for ConfinedFs {
+@@ -918,11 +981,18 @@ impl FileSystem for ConfinedFs {
          } else {
              None
          };
@@ -3111,7 +3111,7 @@ index 721cb4e..ebe9ae1 100644
          Ok(())
      }
  
-@@ -895,16 +965,36 @@ impl FileSystem for ConfinedFs {
+@@ -977,16 +1047,36 @@ impl FileSystem for ConfinedFs {
                  if flags & LINUX_O_APPEND != 0 {
                      host |= libc::O_APPEND;
                  }
@@ -3146,14 +3146,14 @@ index 721cb4e..ebe9ae1 100644
 +                None
 +            }
 +        };
-         let h = self.add_handle(&mut st, inode, fd, write, dir);
+         let h = self.add_handle(&mut st, inode, fd, write, dir)?;
 +        if let Some(held) = st.handles.get_mut(&h) {
 +            held.pointer = pointer;
 +        }
          // R12: CachePolicy::Auto (no direct I/O, no keep-cache).
          Ok((Some(h), OpenOptions::empty()))
      }
-@@ -934,6 +1024,7 @@ impl FileSystem for ConfinedFs {
+@@ -1017,6 +1107,7 @@ impl FileSystem for ConfinedFs {
              host |= libc::O_APPEND;
          }
          // R2: O_CREAT | O_EXCL on the parent descriptor, so a create never lands on an existing node.
@@ -3161,10 +3161,10 @@ index 721cb4e..ebe9ae1 100644
          let fd = self.host.openat(pfd.as_raw_fd(), name, host, 0o600)?;
          let mode = mode & MODE_MASK;
          // R7: the exact masked mode, whatever the process umask removed.
-@@ -945,6 +1036,10 @@ impl FileSystem for ConfinedFs {
+@@ -1028,6 +1119,10 @@ impl FileSystem for ConfinedFs {
          let s = sys::fstat(&fd)?;
-         let id = self.insert(&mut st, parent, name, &s);
-         let h = self.add_handle(&mut st, id, fd, access != 0, false);
+         let id = self.insert(&mut st, parent, name, &s)?;
+         let h = self.add_handle(&mut st, id, fd, access != 0, false)?;
 +        // R15: a new pointer file stays empty on the host until its content is checked.
 +        if let (Some(kind), Some(held)) = (pointer, st.handles.get_mut(&h)) {
 +            held.pointer = Some(git::Pointer { kind, buf: Vec::new(), dirty: false });
@@ -3172,7 +3172,7 @@ index 721cb4e..ebe9ae1 100644
          Ok((self.entry(&ctx, id, s), Some(h), OpenOptions::empty()))
      }
  
-@@ -980,6 +1075,12 @@ impl FileSystem for ConfinedFs {
+@@ -1061,6 +1156,12 @@ impl FileSystem for ConfinedFs {
          _kill_priv: bool,
          _flags: u32,
      ) -> io::Result<usize> {
@@ -3185,7 +3185,7 @@ index 721cb4e..ebe9ae1 100644
          self.admit(&Mutation::Write { node: inode, handle })?;
          let mut st = self.lock();
          let h = Self::handle(&mut st, inode, handle)?;
-@@ -991,7 +1092,9 @@ impl FileSystem for ConfinedFs {
+@@ -1073,7 +1174,9 @@ impl FileSystem for ConfinedFs {
  
      fn flush(&self, _ctx: Context, inode: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
          let mut st = self.lock();
@@ -3196,7 +3196,7 @@ index 721cb4e..ebe9ae1 100644
      }
  
      fn fsync(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
-@@ -1022,6 +1125,8 @@ impl FileSystem for ConfinedFs {
+@@ -1104,6 +1207,8 @@ impl FileSystem for ConfinedFs {
      fn release(&self, _ctx: Context, inode: u64, _flags: u32, handle: u64, _flush: bool, _flock: bool, _owner: Option<u64>) -> io::Result<()> {
          let mut st = self.lock();
          Self::handle(&mut st, inode, handle)?;
@@ -3205,7 +3205,7 @@ index 721cb4e..ebe9ae1 100644
          st.handles.remove(&handle);
          Ok(())
      }
-@@ -1131,6 +1236,102 @@ impl FileSystem for ConfinedFs {
+@@ -1221,6 +1326,104 @@ impl FileSystem for ConfinedFs {
  }
  
  impl ConfinedFs {
@@ -3274,7 +3274,7 @@ index 721cb4e..ebe9ae1 100644
 +    /// pointer file's.
 +    fn pointer_resize(&self, st: &mut State, ctx: &Context, inode: u64, handle: u64, size: i64) -> io::Result<Option<(bindings::stat64, Duration)>> {
 +        let Some(h) = st.handles.get_mut(&handle).filter(|h| h.node == inode) else { return Ok(None) };
-+        let fd = h.file.as_raw_fd();
++        let fd = h.fd();
 +        let Some(p) = h.pointer.as_mut() else { return Ok(None) };
 +        self.hooks.admit(&Mutation::Setattr { node: inode, valid: SetattrValid::SIZE, mode: 0 })?;
 +        if size < 0 || size as usize > POINTER_MAX {
@@ -3301,8 +3301,10 @@ index 721cb4e..ebe9ae1 100644
 +        let (kind, buf) = (p.kind, p.buf.clone());
 +        self.git_pointer_check(st, inode, kind, &buf)?;
 +        let h = st.handles.get(&handle).ok_or_else(|| err(lx::EBADF))?;
-+        sys::ftruncate(h.file.as_raw_fd(), 0)?;
-+        h.file.write_all_at(&buf, 0)
++        // A pointer file's handle is always a file handle.
++        let Body::File(file) = &h.body else { return Err(err(lx::EBADF)) };
++        sys::ftruncate(file.as_raw_fd(), 0)?;
++        file.write_all_at(&buf, 0)
 +    }
 +
      fn apply_setattr(&self, ctx: &Context, fd: RawFd, attr: &bindings::stat64, valid: SetattrValid) -> io::Result<(bindings::stat64, Duration)> {
@@ -3454,10 +3456,10 @@ index 266b812..3b58eec 100644
 +    unsafe { libc::fpathconf(fd, libc::_PC_CASE_SENSITIVE) == 1 }
 +}
 diff --git a/src/devices/src/virtio/fs/macos/confined/tests.rs b/src/devices/src/virtio/fs/macos/confined/tests.rs
-index 2f32e44..15492af 100644
+index 79d4ad1..8e58ba9 100644
 --- a/src/devices/src/virtio/fs/macos/confined/tests.rs
 +++ b/src/devices/src/virtio/fs/macos/confined/tests.rs
-@@ -357,6 +357,10 @@ fn within<T: Send + 'static>(seconds: u64, f: impl FnOnce() -> T + Send + 'stati
+@@ -387,6 +387,10 @@ fn within<T: Send + 'static>(seconds: u64, f: impl FnOnce() -> T + Send + 'stati
      rx.recv_timeout(Duration::from_secs(seconds)).expect("the device thread blocked")
  }
  
@@ -3468,7 +3470,7 @@ index 2f32e44..15492af 100644
  // ---- R0: opcode allowlist, INIT ----------------------------------------------------------------------
  
  #[test]
-@@ -637,18 +641,30 @@ fn r2_host_calls_refuse_parent_absolute_and_symlinked_paths_on_their_own() {
+@@ -667,18 +671,30 @@ fn r2_host_calls_refuse_parent_absolute_and_symlinked_paths_on_their_own() {
  
  #[test]
  fn r2_no_path_open_no_volfs_no_realpath_in_the_server() {
