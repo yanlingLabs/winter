@@ -388,8 +388,25 @@ jobs:
       - name: verify:workflow
         run: bun run verify:workflow
 
+      # The ComputerV2 worker is the whole binary under its own seatbelt and a `{ PATH }`-only
+      # environment: a module that throws at load there (2026-10-19, a load-time homedir()) takes
+      # every ComputerV2 call down while verify:workflow, with its own profile, still passes. The
+      # job's name is kept: it is the check the branch's rules know.
+      - name: verify:automation-worker
+        run: bun run verify:automation-worker
+
       - name: verify:runtime-state
         run: bun run verify:runtime-state
+
+      # N2 S7B: the Cowork native pair's packaging gate. Builds the real launcher (swift build, scratch path), embeds it with a stand-in worker into a
+      # scratch bundle (ad hoc), accepts it and proves seven refusals. Never runs either binary, never signs with a real identity.
+      - name: verify:cowork-native
+        run: bun run verify:cowork-native
+
+      # N2 S7B: the Cowork channel's receiver thread must start in the COMPILED daemon (a third compile:core entrypoint). Compiles winter-core and runs a temp copy's
+      # probe on a socketpair; touches no home, Keychain, daemon or launcher.
+      - name: verify:fd-receiver
+        run: bun run verify:fd-receiver
 
       # WS-23 (fix round 1, minor 6): the vendored ant, pinned and checksum-verified by fetch-ant
       # itself, so verify:runtimes exercises ant's bundle rung and its record's SHA against the pin
@@ -450,7 +467,7 @@ jobs:
           python3 -I -B -c "
           import json
           d = json.load(open('$RUNNER_TEMP/prepare.json'))
-          assert d['fullSourceDiffSha256'] == 'c8e7c5b49cc7099debaa4dcc6c1d1f8107dc3b869803a5c084e5f14eb6de987f', d
+          assert d['fullSourceDiffSha256'] == '7ec7dd847bc09373d02ffe23894ca9f6ddebf2c992f8dbd2f251127823be5f24', d
           print('composed hash ok', d['fullSourceDiffSha256'])"
 
       - name: Guard tests (including the composition test)

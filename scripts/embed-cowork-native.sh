@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# The body of the "Embed Cowork native pair" build phase that S7 adds to apple/Winter/project.yml, in its own file so it is tested
-# standalone (scripts/embed-cowork-native.test.ts), like embed-computer-helper.sh beside it. NOTHING CALLS THIS YET: project.yml and
-# release.ts are S7's, and a test pins that they do not reference it.
+# The body of the "Embed Cowork native" build phase in apple/Winter/project.yml, in its own file so it is tested standalone
+# (scripts/embed-cowork-native.test.ts), like embed-computer-helper.sh beside it. release.ts builds the inputs first
+# (scripts/build-cowork-native.ts) and gates the result (checkCoworkNativeBundle in scripts/cowork-native-lib.ts). The feature stays OFF in the daemon:
+# shipping the pair activates nothing.
 #
 # The Cowork native pair is two nested tools the DAEMON spawns itself (never through LaunchServices):
 #
@@ -20,6 +21,9 @@
 #      executed worker image against it before resuming it, so the string stated here is the one the launcher enforces.
 #   4. Check the signatures took: recorded requirement == stated, identifier, hardened runtime, entitlements (worker: exactly the
 #      hypervisor key; launcher: none).
+#   5. Write Contents/Resources/cowork-native-pins.json: the CDHash of each signed binary and the hashes of the pin files the pair was built
+#      against (the worker's libkrun archive and header, the worker pins file, the guest artifact pins file). The release gate refuses a bundle
+#      whose manifest, binaries or pins disagree with each other or with the repository.
 #
 # Env (Xcode's, as in embed-computer-helper.sh): BUILT_PRODUCTS_DIR, CONTENTS_FOLDER_PATH, CONFIGURATION,
 # EXPANDED_CODE_SIGN_IDENTITY, DEVELOPMENT_TEAM. Inputs (default under dist/cowork-native/, S7's build step puts them there):
@@ -33,6 +37,21 @@ if [ "${CONFIGURATION:-}" != "Release" ]; then
   echo "skip Cowork native embed (non-Release)"
   exit 0
 fi
+
+# Three cases besides a normal embed (the order matters):
+#   COWORK_NATIVE=omit  an explicit release without the pair: nothing is embedded, and anything a previous build left in the bundle is removed (no helpers, no pins file).
+#   an unrelated value  refused (a typo must not ship or omit by accident).
+#   no input at all     a build that has no dist/cowork-native (a developer's Release build, CI): nothing is embedded and the build still succeeds. release.ts does not rely on this:
+#                       it either builds the inputs first or sets omit, and its gate then requires the pair (or its absence) to match that choice.
+# Exactly one of the two inputs is an error in every case.
+case "${COWORK_NATIVE:-}" in
+  "") ;;
+  omit)
+    rm -rf "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Helpers/WinterCowork" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/cowork-native-pins.json"
+    echo "skip Cowork native embed (COWORK_NATIVE=omit): no WinterCowork helpers, no pins file"
+    exit 0 ;;
+  *) echo "error: COWORK_NATIVE=${COWORK_NATIVE} is not a choice (the only value is omit)" >&2; exit 1 ;;
+esac
 
 TEAM="${DEVELOPMENT_TEAM:-37N77U9RSZ}"
 LAUNCHER_NAME="winter-cowork-launcher"
@@ -68,6 +87,11 @@ check_input() { # $1 = path, $2 = name
     fail "${name} embeds the builder's repository or home path — build with scripts/cowork-native-lib.ts's launcherBuildArgs (-Xswiftc -gnone -Xlinker -S -Xlinker -x)"
   fi
 }
+if [ ! -e "${LAUNCHER_SRC}" ] && [ ! -e "${WORKER_SRC}" ]; then
+  rm -rf "${DEST_DIR}" "${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/cowork-native-pins.json"
+  echo "skip Cowork native embed (no inputs under dist/cowork-native): the bundle carries no WinterCowork helpers and no pins file"
+  exit 0
+fi
 check_input "${LAUNCHER_SRC}" "${LAUNCHER_NAME}"
 check_input "${WORKER_SRC}" "${WORKER_NAME}"
 
@@ -114,5 +138,20 @@ sign_and_check() { # $1 = name, $2 = identifier, $3 = requirement, $4 = entitlem
 # is to check it.
 sign_and_check "${WORKER_NAME}" "${WORKER_ID}" "${WORKER_REQ}" "${ENTITLEMENTS_FILE}"
 sign_and_check "${LAUNCHER_NAME}" "${LAUNCHER_ID}" "${LAUNCHER_REQ}" ""
+
+# ---- the pin manifest (read back by checkCoworkNativeBundle; nothing in the daemon reads it)
+WORKER_PINS="${COWORK_WORKER_PINS:-${REPO}/apple/Cowork/WinterCoworkHVFWorker/pins.json}"
+GUEST_PINS="${COWORK_GUEST_ARTIFACT_PINS:-${REPO}/scripts/cowork-guest-artifact/pins.json}"
+[ -f "${WORKER_PINS}" ] || fail "the worker pins file is not at ${WORKER_PINS}"
+[ -f "${GUEST_PINS}" ] || fail "the guest artifact pins file is not at ${GUEST_PINS}"
+sha256_of() { shasum -a 256 "$1" | awk '{print $1}'; }
+cdhash_of() { codesign -dvvv "$1" 2>&1 | sed -n 's/^CDHash=//p'; }
+pin_of() { plutil -extract "$1" raw -o - "${WORKER_PINS}"; }
+MANIFEST="${BUILT_PRODUCTS_DIR}/${CONTENTS_FOLDER_PATH}/Resources/cowork-native-pins.json"
+mkdir -p "$(dirname "${MANIFEST}")"
+LAUNCHER_CDHASH="$(cdhash_of "${DEST_DIR}/${LAUNCHER_NAME}")"; WORKER_CDHASH="$(cdhash_of "${DEST_DIR}/${WORKER_NAME}")"
+[ -n "${LAUNCHER_CDHASH}" ] && [ -n "${WORKER_CDHASH}" ] || fail "could not read a CDHash from the signed pair"
+printf '{\n  "formatVersion": 1,\n  "launcher": { "identifier": "%s", "cdhash": "%s" },\n  "worker": { "identifier": "%s", "cdhash": "%s" },\n  "pins": {\n    "libkrunArchiveSha256": "%s",\n    "libkrunHeaderSha256": "%s",\n    "workerPinsSha256": "%s",\n    "guestArtifactPinsSha256": "%s"\n  }\n}\n' \
+  "${LAUNCHER_ID}" "${LAUNCHER_CDHASH}" "${WORKER_ID}" "${WORKER_CDHASH}" "$(pin_of libkrun.archiveSha256)" "$(pin_of libkrun.headerSha256)" "$(sha256_of "${WORKER_PINS}")" "$(sha256_of "${GUEST_PINS}")" > "${MANIFEST}"
 
 echo "Cowork native pair embedded at Contents/Helpers/WinterCowork and signed (${WORKER_NAME} as ${WORKER_ID} with the hypervisor entitlement only; ${LAUNCHER_NAME} as ${LAUNCHER_ID} with none; stated designated requirements, hardened runtime)"

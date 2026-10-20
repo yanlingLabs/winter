@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { UsageDb } from "../../src/usage/db";
 import { UsagePricer } from "../../src/usage/pricing";
 import { UsageService, type UsageTracking } from "../../src/usage/service";
-import { CLAUDE_STATS_FILE, parseClaudeStats, splitByRatios } from "../../src/usage/claude-stats";
+import { CLAUDE_STATS_FALLBACK_CALIBRATION, CLAUDE_STATS_FILE, parseClaudeStats, splitByRatios } from "../../src/usage/claude-stats";
 import { SECRETS, claudeAssistant, claudeTranscriptPath, claudeUser, lines, probeRootIn, tempDir } from "./fixtures";
 
 const pricer = new UsagePricer();
@@ -94,6 +94,7 @@ describe("the backfill boundary and the row shape", () => {
       "2026-09-25": { [A]: 10_000, [B]: 100_000, [C]: 3_000, [D]: 100_000 },
       "2026-10-01": { [A]: 10_000 },           // the first transcript day: the transcripts have it
       "2026-10-03": { [B]: 50_000 },           // B has no transcripts, but the day is after the boundary: never imported
+      "2026-10-05": { [A]: 10_000 },           // shared with the transcripts at 1:1 — the calibration is 1
       "2026-10-18": { [A]: 1 },                // today: never
     }));
     await svc.ingest(true);
@@ -149,8 +150,9 @@ describe("the backfill boundary and the row shape", () => {
 describe("re-imports", () => {
   test("stable: the same file again changes nothing, and is parsed only when its mtime or size changes", async () => {
     const { db, svc, claudeHome, statsPath } = setup();
-    transcripts(claudeHome, ["2026-10-01"]);
-    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 20_000 }, "2026-09-25": { [B]: 100_000 } }));
+    transcripts(claudeHome, ["2026-10-01", "2026-10-02"]);
+    const shared = { "2026-10-02": { [A]: 10_000 } }; // calibration 1
+    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 20_000 }, "2026-09-25": { [B]: 100_000 }, ...shared }));
     await svc.ingest(true);
     const first = synthetic(db);
     expect(first).toHaveLength(2);
@@ -163,7 +165,7 @@ describe("re-imports", () => {
     expect(svc.claudeStatsParses).toBe(2);
     expect(synthetic(db)).toEqual(first);
     // A changed day replaces its row (never adds a second one).
-    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 40_000 }, "2026-09-25": { [B]: 100_000 } }));
+    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 40_000 }, "2026-09-25": { [B]: 100_000 }, ...shared }));
     await svc.ingest(true);
     const rows = byKey(db);
     expect(rows.size).toBe(2);
@@ -251,11 +253,37 @@ describe("calibration and day semantics", () => {
     expect(byKey(env.db).get(`ccstats:${A}:2026-09-20`)).toMatchObject({ input: 1000, output: 3000, cache_read: 5000, cache_write: 1000 });
   });
 
+  test("a model's own factor needs a settled number of shared days; until then it takes the factor of all models", async () => {
+    const env = setup();
+    const week = ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08"];
+    transcripts(env.claudeHome, week, 10_000); // A: 7 comparable days (the first is the first transcript day) at ½
+    transcripts(env.claudeHome, ["2026-10-07", "2026-10-08"], 10_000, B, "cc-b"); // B: 2 days at ¼
+    writeFileSync(env.statsPath, statsCache({
+      "2026-09-10": { [A]: 100_000, [B]: 100_000 },
+      ...Object.fromEntries(week.map((d) => [d, { [A]: 20_000, ...(d >= "2026-10-07" ? { [B]: 40_000 } : {}) }])),
+    }));
+    await env.svc.ingest(true);
+    const t = (m: string): number => { const r = byKey(env.db).get(`ccstats:${m}:2026-09-10`)!; return r.input + r.output + r.cache_read + r.cache_write; };
+    expect(t(A)).toBe(50_000); // its own ½
+    expect(t(B)).toBe(Math.round(100_000 * (90_000 / 220_000))); // all pairs: (70k + 20k) / (140k + 80k)
+  });
+
   test("an older cache (dailyModelTokensVersion < 5) counted input + output only: scaled to all four kinds", async () => {
-    const { db, svc, statsPath } = setup();
-    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 4000 } }, { v: null }));
+    const { db, svc, claudeHome, statsPath } = setup();
+    transcripts(claudeHome, ["2026-10-01", "2026-10-02"]);
+    // 10-02: the transcripts' 4000 input + output against the cache's 4000 → 1.
+    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 4000 }, "2026-10-02": { [A]: 4000 } }, { v: null }));
     await svc.ingest(true);
     expect(byKey(db).get(`ccstats:${A}:2026-09-20`)).toMatchObject({ input: 1000, output: 3000, cache_read: 5000, cache_write: 1000 });
+  });
+
+  test("no day both cover: Claude Code's per-line figure is scaled by the fallback calibration, not taken as is", async () => {
+    const { db, svc, statsPath } = setup();
+    writeFileSync(statsPath, statsCache({ "2026-09-20": { [A]: 20_000 } }));
+    await svc.ingest(true);
+    const tokens = Math.round(20_000 * CLAUDE_STATS_FALLBACK_CALIBRATION);
+    const split = splitByRatios(tokens, { input: 1000, output: 3000, cacheRead: 5000, cacheWrite: 1000, costUsd: 0 })!;
+    expect(byKey(db).get(`ccstats:${A}:2026-09-20`)).toMatchObject({ input: split.input, output: split.output, cache_read: split.cacheRead, cache_write: split.cacheWrite });
   });
 });
 
@@ -369,7 +397,7 @@ describe("schema 3", () => {
     db.db.run("PRAGMA user_version = 2");
     db.close();
     db = new UsageDb(path);
-    expect(db.schemaVersion()).toBe(4);
+    expect(db.schemaVersion()).toBe(5);
     expect(db.db.query("SELECT dedupe, synthetic FROM usage_records").all()).toEqual([{ dedupe: "cc:m1:r1", synthetic: 0 }]);
     expect(db.earliestReal("claude-code")).toBe(NOW);
     expect(db.hourly(0, NOW + 1, ["claude-code"])[0]).toMatchObject({ records: 1, syntheticRecords: 0 });
@@ -437,5 +465,154 @@ describe("review fixes: transcripts win whatever the stats file's state; stable 
     }));
     await env.svc.ingest(true);
     expect(byKey(env.db).get(`ccstats:${A}:2026-09-20`)).toMatchObject({ input: 1000, output: 3000, cache_read: 5000, cache_write: 1000 });
+  });
+});
+
+describe("partial days: Claude Code's cleanup emptied them before Winter read them", () => {
+  // A fresh DB's first read is NOW (2026-10-18 09:00 UTC): with the 30-day retention, 09-18 and every day before it are
+  // partial; 09-19 on was read while all of its transcripts were still on disk.
+  const A_SPLIT = { input: 1000, output: 3000, cacheRead: 5000, cacheWrite: 1000, costUsd: 0 };
+  const total = (r: Row | undefined): number => (r === undefined ? 0 : r.input + r.output + r.cache_read + r.cache_write);
+  const state = (db: UsageDb): Record<string, unknown> => db.sourceState("claude-code:stats-history") ?? {};
+
+  /** Recent complete days at half Claude Code's figure (the calibration: ½ over four shared days), one resumed session
+   *  that survived with a line on 09-10, and a complete day OUTSIDE the calibration window holding a tenth. */
+  function scene() {
+    const env = setup();
+    transcripts(env.claudeHome, ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"], 10_000);
+    transcripts(env.claudeHome, ["2026-09-10"], 2_000, A, "cc-resumed");
+    transcripts(env.claudeHome, ["2026-09-19"], 2_000, A, "cc-low-day");
+    const cache = {
+      "2026-09-10": { [A]: 30_000 }, "2026-09-12": { [A]: 10_000 }, "2026-09-19": { [A]: 20_000 },
+      "2026-10-01": { [A]: 20_000 }, "2026-10-02": { [A]: 20_000 }, "2026-10-03": { [A]: 20_000 }, "2026-10-04": { [A]: 20_000 },
+    };
+    writeFileSync(env.statsPath, statsCache(cache));
+    return { ...env, cache };
+  }
+
+  test("a partial day gets only what its surviving transcripts lack; a complete day, however low, gets nothing", async () => {
+    const { db, svc } = scene();
+    await svc.ingest(true);
+    const rows = byKey(db);
+    expect([...rows.keys()].sort()).toEqual([`ccstats:${A}:2026-09-10`, `ccstats:${A}:2026-09-12`]);
+    // 09-10: ½ × 30k = 15k in all, 2k of it in the resumed session's transcript → 13k estimated.
+    const s = splitByRatios(13_000, A_SPLIT)!;
+    expect(rows.get(`ccstats:${A}:2026-09-10`)).toMatchObject({ input: s.input, output: s.output, cache_read: s.cacheRead, cache_write: s.cacheWrite });
+    expect(total(rows.get(`ccstats:${A}:2026-09-12`))).toBe(5_000);
+    // The day itself is counted once: transcript + estimate = the calibrated figure.
+    const day = db.db.query("SELECT SUM(input + output + cache_read + cache_write) t FROM usage_records WHERE at >= ? AND at < ?")
+      .get(Date.parse("2026-09-10T00:00:00Z"), Date.parse("2026-09-11T00:00:00Z")) as { t: number };
+    expect(day.t).toBe(15_000);
+    // The footnote: the first day read in full.
+    expect(svc.history().claudeCodeStats?.before).toBe(noon("2026-09-19"));
+    expectRollupConsistent(db);
+  });
+
+  test("a late transcript row on a partial day shrinks its row; the same inputs again write nothing", async () => {
+    const { db, svc, claudeHome, logs } = scene();
+    await svc.ingest(true);
+    transcripts(claudeHome, ["2026-09-12"], 1_000, A, "cc-surfaced");
+    await svc.ingest(true);
+    expect(total(byKey(db).get(`ccstats:${A}:2026-09-12`))).toBe(4_000);
+    const before = synthetic(db);
+    const logged = logs.length;
+    await svc.ingest(true);
+    await svc.ingest(true);
+    expect(synthetic(db)).toEqual(before);
+    expect(logs.length).toBe(logged);
+    expectRollupConsistent(db);
+  });
+
+  test("a partial day its transcripts reach in full loses its row (never counted twice)", async () => {
+    const { db, svc, claudeHome } = scene();
+    await svc.ingest(true);
+    transcripts(claudeHome, ["2026-09-12"], 6_000, A, "cc-surfaced");
+    await svc.ingest(true);
+    expect(byKey(db).has(`ccstats:${A}:2026-09-12`)).toBe(false);
+    expectRollupConsistent(db);
+  });
+
+  test("Claude Code's cache shrinking or dropping a day (a rebuild from the transcripts left) keeps the estimate", async () => {
+    const { db, svc, statsPath, cache } = scene();
+    await svc.ingest(true);
+    const before = synthetic(db);
+    const { "2026-09-12": _gone, ...rest } = cache;
+    writeFileSync(statsPath, statsCache({ ...rest, "2026-09-10": { [A]: 4_000 } }));
+    await svc.ingest(true);
+    expect(svc.claudeStatsParses).toBe(2);
+    expect(synthetic(db)).toEqual(before);
+  });
+
+  test("Winter's first read is remembered: a restart days later keeps the boundary", async () => {
+    const env = scene();
+    await env.svc.ingest(true);
+    const before = synthetic(env.db);
+    expect(state(env.db).firstPassAt).toBe(NOW);
+    const later = NOW + 10 * 86_400_000;
+    const svc2 = new UsageService({
+      db: env.db, pricer, tracking: () => env.tracking, claudeHome: env.claudeHome, codexExecutable: () => undefined, claudeExecutable: () => undefined,
+      winterCodexWindows: () => [], probeRoot: () => probeRootIn(env.home), ingestEveryMs: 0, now: () => later,
+    });
+    // Claude Code's cleanup takes the resumed session's file: its rows are Winter's already.
+    rmSync(claudeTranscriptPath(env.claudeHome, "cc-resumed"));
+    await svc2.ingest(true);
+    expect(synthetic(env.db)).toEqual(before);
+    expect(state(env.db).firstPassAt).toBe(NOW);
+    expect(svc2.history().claudeCodeStats?.before).toBe(noon("2026-09-19"));
+  });
+
+  test("a DB from before the note: the first read is the oldest file read-state", async () => {
+    const env = scene();
+    await env.svc.ingest(true);
+    // Back to a DB with no note, its files first read five days earlier (09-13 is then the last partial day).
+    env.db.db.run("DELETE FROM ingest_files WHERE key = 'claude-code:stats-history'");
+    env.db.db.run(`UPDATE ingest_files SET updated_at = ${NOW - 5 * 86_400_000} WHERE source = 'claude-code'`);
+    const svc2 = new UsageService({
+      db: env.db, pricer, tracking: () => env.tracking, claudeHome: env.claudeHome, codexExecutable: () => undefined, claudeExecutable: () => undefined,
+      winterCodexWindows: () => [], probeRoot: () => probeRootIn(env.home), ingestEveryMs: 0, now: () => NOW,
+    });
+    await svc2.ingest(true);
+    expect(state(env.db).firstPassAt).toBe(NOW - 5 * 86_400_000);
+    expect(svc2.history().claudeCodeStats?.before).toBe(noon("2026-09-14"));
+    expect([...byKey(env.db).keys()].sort()).toEqual([`ccstats:${A}:2026-09-10`, `ccstats:${A}:2026-09-12`]);
+  });
+
+  test("Winter away longer than the retention: the days in between become partial and are estimated", async () => {
+    const env = scene();
+    await env.svc.ingest(true);
+    // 45 days later. Claude Code ran on 10-22 meanwhile; its cleanup took those transcripts before Winter came back.
+    env.clock.now = NOW + 45 * 86_400_000; // 2026-12-02
+    transcripts(env.claudeHome, ["2026-11-25", "2026-11-26", "2026-11-27", "2026-11-28"], 10_000, A, "cc-back");
+    writeFileSync(env.statsPath, statsCache({
+      ...env.cache, "2026-10-22": { [A]: 8_000 },
+      "2026-11-25": { [A]: 20_000 }, "2026-11-26": { [A]: 20_000 }, "2026-11-27": { [A]: 20_000 }, "2026-11-28": { [A]: 20_000 },
+    }, { lastComputedDate: "2026-12-01" }));
+    await env.svc.ingest(true);
+    expect(state(env.db).gaps).toEqual([["2026-10-18", "2026-11-02"]]);
+    expect(total(byKey(env.db).get(`ccstats:${A}:2026-10-22`))).toBe(4_000);
+    // Days read in full before Winter left are untouched.
+    expect(byKey(env.db).has(`ccstats:${A}:2026-10-02`)).toBe(false);
+  });
+
+  test("an estimate on few shared days is re-calibrated as more arrive, then kept once settled", async () => {
+    const env = setup();
+    transcripts(env.claudeHome, ["2026-10-01", "2026-10-02"], 10_000);
+    writeFileSync(env.statsPath, statsCache({ "2026-09-10": { [A]: 30_000 }, "2026-10-02": { [A]: 10_000 } })); // 1 day at 1
+    await env.svc.ingest(true);
+    expect(total(byKey(env.db).get(`ccstats:${A}:2026-09-10`))).toBe(30_000);
+    // Seven more shared days at ½: (10k + 70k) / (10k + 140k) over 8 days — settled.
+    const days = ["2026-10-03", "2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07", "2026-10-08", "2026-10-09"];
+    transcripts(env.claudeHome, days, 10_000, A, "cc-more");
+    const more = Object.fromEntries(days.map((d) => [d, { [A]: 20_000 }]));
+    writeFileSync(env.statsPath, statsCache({ "2026-09-10": { [A]: 30_000 }, "2026-10-02": { [A]: 10_000 }, ...more }));
+    await env.svc.ingest(true);
+    const settled = Math.round(30_000 * (80_000 / 150_000));
+    expect(total(byKey(env.db).get(`ccstats:${A}:2026-09-10`))).toBe(settled);
+    // More days at ¼ move the factor, not the settled estimate.
+    const late = ["2026-10-10", "2026-10-11", "2026-10-12"];
+    transcripts(env.claudeHome, late, 5_000, A, "cc-late");
+    writeFileSync(env.statsPath, statsCache({ "2026-09-10": { [A]: 30_000 }, "2026-10-02": { [A]: 10_000 }, ...more, ...Object.fromEntries(late.map((d) => [d, { [A]: 20_000 }])) }));
+    await env.svc.ingest(true);
+    expect(total(byKey(env.db).get(`ccstats:${A}:2026-09-10`))).toBe(settled);
   });
 });

@@ -28,6 +28,7 @@ import { allowedOrigins, EXTENSION_IDS, NATIVE_HOST_NAME } from "../../../packag
 import { hostManifest, writeManifestInto } from "../../../packages/core/src/computer-use/browser/extension/manifest";
 import type { BackendId, BackendRegistry, BrowserBackendInfo, BrowserFamily, CdpEvent, CdpTransport } from "../../../packages/core/src/computer-use/browser/transport";
 import { startDaemon, type RunningDaemon } from "../../../packages/core/src/daemon";
+import { USAGE_INERT } from "../../../packages/core/src/usage/wiring";
 import { BrowserEngine } from "../../../packages/core/src/computer-use/browser/engine";
 import { BrowserBackendRegistry } from "../../../packages/core/src/computer-use/browser/registry";
 import type { TabRunScope } from "../../../packages/core/src/computer-use/browser/tab-scope";
@@ -483,6 +484,8 @@ async function main(): Promise<void> {
       home,
       secrets: new FileSecretStore(join(home, "test-secrets")),
       agentProvider: null,
+      // Never the user's own Codex / Claude Code / Antigravity / OpenCode, nor the background plan beat.
+      usage: USAGE_INERT,
       browserHost: { registry, allowedExtensionIds: EXTENSION_IDS.dev, hostRequirement: host.requirement },
     });
     let registry = new E2ERegistry();

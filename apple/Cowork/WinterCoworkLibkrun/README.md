@@ -15,8 +15,8 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
 | Patch queue | `patch-queue.json` | 23 patches, 0004-0026, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `c8e7c5b49cc7099debaa4dcc6c1d1f8107dc3b869803a5c084e5f14eb6de987f` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `6f088d7871f79ed023b4334b210d0a3641473ec98dec799197981d63b4c3b833`, stripped `18a77e6d04f0799789d7da2ad0545bfd1499da738b216812beec4c138b6236f5` |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `7ec7dd847bc09373d02ffe23894ca9f6ddebf2c992f8dbd2f251127823be5f24` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `e04b4dd70f199eb206c9508e1f714f3dc2cee05802fee47ef666875c9e74cd20`, stripped `06559a845e8815cebd9f28e65029c8696129af00e7e336c366ba3c6e52fd6f91` |
 | Exports | `expected-hashes.json` | 72 `krun_*` symbols: the 62 upstream ones for this feature set plus 10 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (702 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (710 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -77,7 +77,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
 | `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, served by 0026 | `c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85` |
-| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, served by 0026 | `70e52f454938ab011f796f6645aee9013f35434a41ba9e3e423a7d2fb070507e` |
+| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, served by 0026 | `c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af` |
 | `0026-proposed-guarded-fs-device-shares-abi-gate.patch` | the guarded fs device of the shares (one device per share, reclaim pins, freeze, chain bounds, revocation by the device thread, exit-path join), the budget from the share count, `krun_cowork_add_share_v1` / `revoke_share_v1` / `next_share_event_v1` (with the server's notices), the gate clause for `r.fs` and gate-matrix rows with shares present | production | `f4ed7ef2d32fdd0fad578e6fee136fc1dd38d287ee86aeb70956d69d99a5942c` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
@@ -117,6 +117,12 @@ Refusals are `EPERM`; refusals and writes to watched names (`.envrc`, `.vscode/t
 that the device layer drains (0026). **R16** (every read-write share): `com.apple.quarantine` = `0081;<hex seconds>;Winter Cowork;` by
 `fsetxattr` on the server's own descriptor, on CREATE, MKDIR, a SETATTR adding an execute bit, and a write-open or truncate of an
 executable; a tag failure is `EIO` and a new node is removed. No device, export or gate change itself; 0026 serves it.
+Symbolic links (follow-up after review): no link is made, moved or hard-linked into a `.git` chain or the zone except git's own
+`core.symlinks` probe; a protected name or a `.git` that is a link made on the Mac is resolved by the server's own walk inside the share
+and what it reaches is held immutable (a linked `.git` makes its git directory the zone instead); the written path of every tracked
+target, and each link on its way, is a protected name that cannot be removed, moved, replaced or re-pointed; a config the server cannot
+read or parse fails closed (held immutable, reported); nested git directories below `modules/` and `worktrees/` are read at discovery,
+and past 4,096 directories the whole git directory is held immutable.
 
 ## Guarded fs device and shares (0026)
 

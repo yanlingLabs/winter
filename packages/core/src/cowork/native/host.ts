@@ -4,7 +4,7 @@ import type { CoworkRepository } from "../repository";
 import type { CoworkVolumeOwner, CoworkVolumeRecord, CoworkVolumeRequest, CoworkVolumes } from "../volumes";
 import type { VolumeFilesystemPlan, VolumeFilesystemReceipt } from "../volume-filesystem";
 import { CoworkNativeAuthority, type CoworkNativeChannelBinding, type CoworkNativeLink } from "./authority";
-import { CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
+import { CoworkNativeRuntimeStreams, CoworkNativeMuxSequence, serializeCoworkNativeMuxFrame, COWORK_NATIVE_LIMITS, coworkNativeConversationsAreBound, type CoworkNativeConversation, type CoworkNativeRuntimeProfile, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, coworkNativeScopeDigest, sortedCanonical, type CoworkNativeMuxFrame, type CoworkNativeScope, type CoworkNativeToDaemon, type CoworkNativeToLauncher, type CoworkNativeUncertainReceipt, type CoworkNativeVolumeIdentity } from "./protocol";
 import type { CoworkNativeReceiptKey } from "./receipt-mac";
 import { CoworkNativePower, CoworkNativePowerError, type CoworkPowerKey } from "./power";
 import { CoworkNativeRecovery, CoworkNativeSimulatedCrash, describeNativeError, type CoworkNativeRecoveryReport } from "./recovery";
@@ -53,8 +53,8 @@ export interface CoworkLauncherPort { spawn(request: { readonly workspaceId: str
  * of the pinned runtime image; a missing or malformed pin refuses. */
 export interface CoworkNativeImagePins { runtimeImageDigest(workspaceId: string): string }
 
-export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; /** The VMM exit allowance after the guest budget (libkrun's exit watchdog plus the launcher's margin): the launcher kills no sooner. */ readonly exitAllowanceMs: number; /** From the conversation set's send to `runtime_ready`: the guest starts the tool supervisor and waits for its ready line. */ readonly runtimeReadyMs: number; readonly drainBudgetMs: number }
-export const COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: COWORK_NATIVE_LIMITS.hostStopMarginMs, exitAllowanceMs: coworkNativeLauncherKillMs(0), runtimeReadyMs: 60_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
+export interface CoworkNativeHostTimeouts { readonly spawnMs: number; readonly heartbeatMs: number; readonly begunMs: number; readonly volumesMs: number; readonly guestHelloMs: number; readonly receiptMs: number; readonly mountedMs: number; readonly stopGraceMs: number; /** The VMM exit allowance after the guest budget (libkrun's exit watchdog plus the launcher's margin): the launcher kills no sooner. */ readonly exitAllowanceMs: number; /** From the conversation set's send to `runtime_ready`: the guest starts the tool supervisor and waits for its ready line. */ readonly runtimeReadyMs: number; /** The longest a runtime send waits for the guest to read before the in-flight budget frees (it then fails with `timeout`). */ readonly runtimeStallMs: number; readonly drainBudgetMs: number }
+export const COWORK_NATIVE_HOST_DEFAULT_TIMEOUTS: CoworkNativeHostTimeouts = Object.freeze({ spawnMs: 20_000, heartbeatMs: 10_000, begunMs: 15_000, volumesMs: 15_000, guestHelloMs: 90_000, receiptMs: 180_000, mountedMs: 60_000, stopGraceMs: COWORK_NATIVE_LIMITS.hostStopMarginMs, exitAllowanceMs: coworkNativeLauncherKillMs(0), runtimeReadyMs: 60_000, runtimeStallMs: 60_000, drainBudgetMs: COWORK_NATIVE_LIMITS.drainBudgetMs });
 
 /** What the host decides for the guest's tool supervisor (contract 6.1): `profile` null = tools only. */
 export interface CoworkNativeConversationSet { readonly profile: CoworkNativeRuntimeProfile | null; readonly conversations: readonly CoworkNativeConversation[] }
@@ -87,8 +87,28 @@ export interface CoworkNativeHostDeps {
 export type CoworkNativeStopOutcome =
   | { readonly released: true; readonly evidence: CoworkNativeEvidenceKind }
   | { readonly released: false; readonly reason: string };
+/** What a caller of `start` may add: the conversation set comes from the caller (a Cowork session), not only from `deps.conversations`. */
+export interface CoworkNativeStartRequest {
+  /** Called once at `mounted`; returns this incarnation's set (N2: at most one host-query conversation), or null for none. Takes precedence over `deps.conversations`. */
+  readonly conversations?: (context: CoworkNativeConversationContext) => CoworkNativeConversationSet | null;
+}
+/** Runtime class 2 for conversation index 0, available once `runtime_ready` was accepted. Frames are never dropped: every OUT and ERR frame reaches every handler in order. */
+export interface CoworkNativeRuntimeLink {
+  /** IN bytes, chunked to at most 256 KiB, bounded by the 1 MiB unanswered budget (waits for the guest to read, fails with `timeout` after `runtimeStallMs`). Resolves when the frame is handed to L1. `end` closes the IN stream. */
+  send(bytes: Uint8Array, end?: boolean): Promise<void>;
+  /** OUT and ERR bytes in order; `end` is true once per stream. Returns an unsubscribe. */
+  onData(handler: (stream: "out" | "err", bytes: Uint8Array, end: boolean) => void): () => void;
+  /** Resolves when the incarnation's stop outcome is known (released or not). */
+  readonly ended: Promise<CoworkNativeStopOutcome>;
+}
 export interface CoworkNativeRunning {
   readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly admissionId: string; readonly owner: CoworkVolumeOwner;
+  /** The guest's boot id from its `hello` (what the conversation set was bound to). */
+  readonly guestBootId: string;
+  /** The runtime link of conversation 0; throws `not_running` when this incarnation has no host-query conversation. */
+  runtime(conversation: 0): CoworkNativeRuntimeLink;
+  /** Resolves when the incarnation's stop outcome is known (released or not), however it ended. */
+  readonly ended: Promise<CoworkNativeStopOutcome>;
   stop(reason?: "user" | "shutdown" | "restart" | "update"): Promise<CoworkNativeStopOutcome>;
 }
 export interface CoworkNativeUncertainEvent { readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly reason: string }
@@ -105,6 +125,32 @@ interface Run {
   conversationsSent: boolean; earlyReady: boolean;
   /** A second `runtime_ready` is ignored for power, admission and ownership but still passes the up-sequence check, so a later bootstrap-up consumer sees no gap. */
   readySeen: boolean; readyAccepted: boolean; duplicateSeqAnomaly: boolean; pendingDuplicates: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>[];
+  /** Set when a runtime violation must end the incarnation but the start has not finished yet (a stop needs a running guest): the start stops it as soon as it is running. */
+  overflowStop?: boolean;
+  request: CoworkNativeStartRequest | undefined; guestBootId: string;
+  /** The runtime class, created when the conversation set goes out. */
+  runtime: RuntimeEnd | null;
+  /** How this incarnation ended, known to `ended`; set before `dispose`. */
+  outcome: CoworkNativeStopOutcome | null; endedResolve: (outcome: CoworkNativeStopOutcome) => void; ended: Promise<CoworkNativeStopOutcome>;
+}
+
+const RUNTIME_CHUNK_BYTES = 256 * 1024;
+/** OUT/ERR bytes held for a first subscriber that has not attached yet (the caller can only attach after `start()` resolves). Beyond it, frames count as violations and are dropped. */
+const RUNTIME_PRESUBSCRIBE_BYTES = 1024 * 1024;
+/** The host end of the runtime class of one run: sequence and stream bookkeeping, the handlers, and the senders waiting for the guest to read. */
+class RuntimeEnd {
+  readonly streams: CoworkNativeRuntimeStreams;
+  readonly handlers = new Set<(stream: "out" | "err", bytes: Uint8Array, end: boolean) => void>();
+  readonly waiters: { resolve: () => void; reject: (error: unknown) => void }[] = [];
+  downSeq = 0; closed = false; violations = 0;
+  /** Frames that arrived before any subscriber ever attached, in order; the first subscriber receives them, then this stays empty. */
+  readonly held: { stream: "out" | "err"; bytes: Uint8Array; end: boolean }[] = []; heldBytes = 0; everSubscribed = false; overflowed = false;
+  constructor(conversations: number) { this.streams = new CoworkNativeRuntimeStreams(conversations); }
+  wake(): void { for (const waiter of this.waiters.splice(0)) waiter.resolve(); }
+  close(): void {
+    this.closed = true; this.handlers.clear();
+    for (const waiter of this.waiters.splice(0)) waiter.reject(new CoworkNativeHostError("closed", "the run ended"));
+  }
 }
 
 const isCrash = (error: unknown): boolean => error instanceof CoworkNativeSimulatedCrash;
@@ -190,7 +236,7 @@ export class CoworkNativeHost {
 
   // ===================================================================================================== start
 
-  async start(workspaceId: string): Promise<CoworkNativeRunning> {
+  async start(workspaceId: string, request?: CoworkNativeStartRequest): Promise<CoworkNativeRunning> {
     if (this.runs.has(workspaceId)) throw new CoworkNativeHostError("busy");
     const { records, volumes } = this.deps;
     const workspace = records.get(workspaceId);
@@ -213,7 +259,9 @@ export class CoworkNativeHost {
     const epoch = records.beginIncarnation(workspaceId, incarnationId, workspace.configRevision);
     const owner: CoworkVolumeOwner = { controllerInstanceId, workerInstanceId, incarnationId, leaseEpoch: epoch.leaseEpoch, runtimeImageDigest };
     const run: Run = { key: { workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch }, owner, homeId, receiptKey, admissionId: null, session: null, binding: null, inbox: null, phase: "starting", unsubscribe: [], downSeq: 0, upSeq: new CoworkNativeMuxSequence(),
-      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [] };
+      observed: { volumesAccepted: false, vmRunning: false, guestHello: false, guestFault: false }, stopHeartbeat: null, conversationsSent: false, earlyReady: false, readySeen: false, readyAccepted: false, duplicateSeqAnomaly: false, pendingDuplicates: [],
+      request, guestBootId: "", runtime: null, outcome: null, endedResolve: () => {}, ended: Promise.resolve({ released: false, reason: "never started" }) };
+    run.ended = new Promise<CoworkNativeStopOutcome>(resolve => { run.endedResolve = resolve; });
     this.runs.set(workspaceId, run);
     this.hook("incarnation-begun");
     try {
@@ -227,7 +275,8 @@ export class CoworkNativeHost {
     run.inbox!.seal();
     this.hook("power-running");
     this.watch(run);
-    return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
+    if (run.overflowStop) void this.stop(workspaceId, "shutdown").catch(() => {});
+    return Object.freeze({ workspaceId, incarnationId, leaseEpoch: epoch.leaseEpoch, admissionId: run.admissionId!, owner, guestBootId: run.guestBootId, ended: run.ended, runtime: (conversation: 0) => this.runtimeLink(run, conversation), stop: (reason: "user" | "shutdown" | "restart" | "update" = "user") => this.stop(workspaceId, reason) });
   }
 
   private async launch(run: Run): Promise<void> {
@@ -255,6 +304,7 @@ export class CoworkNativeHost {
       if (message.t === "worker_state" && message.state === "vm_running") run.observed.vmRunning = true;
       else if (message.t === "worker_state" && message.state === "guest_fault") run.observed.guestFault = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "hello") run.observed.guestHello = true;
+      else if (message.t === "mux_up" && message.frame.class === "runtime") this.onRuntimeUp(run, message.frame);
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "runtime_ready" && !run.conversationsSent) run.earlyReady = true;
       else if (message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "runtime_ready") {
         if (!run.readySeen) run.readySeen = true;
@@ -332,7 +382,8 @@ export class CoworkNativeHost {
     const mounted = await run.inbox.expect(message => message.t === "mux_up" && message.frame.class === "bootstrap" && message.frame.message.t === "mounted" && message.frame.message.operationId === plan.operationId && message.frame.message.nonce === nonce ? message.frame : undefined, this.timeouts.mountedMs, "mounted");
     if (run.earlyReady) throw new CoworkNativeHostError("protocol", "runtime_ready before the conversation set");
     run.upSeq.accept(mounted, "up");
-    await this.deliverConversations(run, { workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: hello.message.t === "hello" ? hello.message.guestBootId : "" }, plan.operationId, nonce);
+    run.guestBootId = hello.message.t === "hello" ? hello.message.guestBootId : "";
+    await this.deliverConversations(run, { workspaceId, incarnationId: owner.incarnationId, leaseEpoch: owner.leaseEpoch, guestBootId: run.guestBootId }, plan.operationId, nonce);
     binding.advance("ready");
     this.deps.power.transition(run.key, "starting", "running");
     this.moveAdmission(run, "running");
@@ -342,21 +393,27 @@ export class CoworkNativeHost {
   private acceptDuplicate(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>): void { try { run.upSeq.accept(frame, "up"); } catch { run.duplicateSeqAnomaly = true; /* recorded, otherwise ignored: the first runtime_ready stands */ } }
   /** True when a duplicate `runtime_ready` carried a wrong up-sequence number: the frame was ignored (no power, admission or ownership change) but the anomaly is kept for diagnostics. */
   duplicateReadySeqAnomaly(workspaceId: string): boolean | undefined { return this.runs.get(workspaceId)?.duplicateSeqAnomaly; }
+  /** Runtime frames the guest sent that broke the contract and were dropped (diagnostics and tests). */
+  runtimeViolations(workspaceId: string): number | undefined { return this.runs.get(workspaceId)?.runtime?.violations; }
   /** The up-direction bootstrap sequence number the host expects next for a workspace it runs (diagnostics and tests). */
   nextBootstrapUpSequence(workspaceId: string): number | undefined { return this.runs.get(workspaceId)?.upSeq.nextExpected("bootstrap", "up"); }
 
   /** Contract 6.1: the conversation set goes out ONCE, after `mounted`, bound to the plan's operation and nonce; `running` waits for `runtime_ready`.
    * A refusal to bind or to serialize means nothing was sent. A bootstrap fault, a wrong echo or a wrong count fails the start (and the stop that follows is orderly). */
   private async deliverConversations(run: Run, context: CoworkNativeConversationContext, operationId: string, nonce: string): Promise<void> {
-    const set = this.deps.conversations?.(context) ?? null;
+    const source = run.request?.conversations ?? this.deps.conversations;
+    const set = source?.(context) ?? null;
     if (set === null) return;
-    const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, conversations: set.conversations };
+    // `browseUid` is null until the file channel is routed (FC5); contract revision 3.
+    const message = { t: "conversations" as const, operationId, nonce, incarnationId: context.incarnationId, profile: set.profile, browseUid: null, conversations: set.conversations };
     if (set.profile !== null && set.conversations.length !== 1) throw new CoworkNativeHostError("protocol", "a host-query profile carries exactly one conversation");
     if (!coworkNativeConversationsAreBound(message, { operationId, nonce, workspaceId: context.workspaceId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch, guestBootId: context.guestBootId })) throw new CoworkNativeHostError("protocol", "conversation set is not bound to this incarnation");
     run.downSeq += 1;
     // The strict serializer refuses an oversized or malformed set before anything is sent (a throw leaves the sequence number used, and the start fails).
     const frame = { class: "bootstrap" as const, seq: run.downSeq, message };
     try { serializeCoworkNativeMuxFrame(frame, "down"); } catch { throw new CoworkNativeHostError("protocol", "conversation set refused by the contract"); }
+    // The runtime class exists from the moment the set goes out, so no frame the guest sends right after `runtime_ready` can fall between two steps.
+    if (set.profile !== null) run.runtime = new RuntimeEnd(set.conversations.length);
     run.session!.send({ t: "mux_down", frame });
     run.conversationsSent = true;
     this.hook("conversations-sent");
@@ -368,6 +425,82 @@ export class CoworkNativeHost {
     if (answer.t === "fault") throw new CoworkNativeHostError("guest_fault", answer.code);
     if (answer.t !== "runtime_ready" || answer.operationId !== operationId || answer.nonce !== nonce || answer.conversations !== set.conversations.length) throw new CoworkNativeHostError("protocol", "runtime_ready does not answer this set");
     this.hook("runtime-ready");
+  }
+
+  // ===================================================================================================== runtime class (conversation 0)
+
+  /** Up (guest to host) runtime frames, before the inbox's sealed filter ever sees them. A frame outside the contract (an IN frame from the guest, a wrong sequence, a second end, a frame before the runtime exists) is counted and dropped, never delivered. */
+  private onRuntimeUp(run: Run, frame: Extract<CoworkNativeMuxFrame, { class: "runtime" }>): void {
+    const end = run.runtime;
+    if (end === null || end.closed) return;
+    // Contract 6.2: runtime frames are delivered only after `runtime_ready`. `readySeen` is set synchronously when that frame arrives (before it is validated: a
+    // runtime_ready that does not answer the set fails the start), so a frame sent right behind it is not mistaken for an early one.
+    if (!run.readySeen) { try { run.upSeq.accept(frame, "up"); } catch { /* a bad sequence number is a violation too */ } end.violations += 1; return; }
+    try {
+      if (frame.stream === "in") throw new CoworkNativeHostError("protocol", "the guest sent an IN frame");
+      run.upSeq.accept(frame, "up");
+      end.streams.accept(frame);
+    } catch (error) { if (isCrash(error)) throw error; end.violations += 1; return; }
+    if (!end.everSubscribed) {
+      if (end.overflowed) return;
+      if (end.heldBytes + frame.payload.length > RUNTIME_PRESUBSCRIBE_BYTES) {
+        // A gap is never silent. Dropping this frame while a later, smaller one is still held would hand the first subscriber bytes with a hole in the middle, so the
+        // overflow ends the incarnation instead: nothing more is held or delivered, what is held is discarded, and the run is stopped as a contract violation.
+        end.overflowed = true; end.violations += 1; end.held.length = 0; end.heldBytes = 0;
+        // Closed for good: a subscriber that attaches during the stop that follows must not receive later frames after bytes were dropped.
+        end.close();
+        if (run.phase === "running") void this.stop(run.key.workspaceId, "shutdown").catch(() => {}); else run.overflowStop = true;
+        return;
+      }
+      end.held.push({ stream: frame.stream as "out" | "err", bytes: frame.payload, end: frame.end }); end.heldBytes += frame.payload.length;
+    }
+    for (const handler of [...end.handlers]) { try { handler(frame.stream as "out" | "err", frame.payload, frame.end); } catch { /* a consumer's fault is not the guest's */ } }
+    end.wake();
+  }
+  private runtimeLink(run: Run, conversation: 0): CoworkNativeRuntimeLink {
+    const end = run.runtime;
+    if (conversation !== 0 || end === null) throw new CoworkNativeHostError("not_running", "this incarnation has no runtime conversation");
+    return Object.freeze({
+      send: (bytes: Uint8Array, last = false) => this.sendRuntime(run, end, bytes, last),
+      onData: (handler: (stream: "out" | "err", bytes: Uint8Array, end: boolean) => void) => {
+        // An overflowed or closed stream delivers nothing to anyone, however late they attach.
+        if (end.overflowed || end.closed) return () => {};
+        end.handlers.add(handler);
+        if (!end.everSubscribed) {
+          end.everSubscribed = true;
+          for (const frame of end.held.splice(0)) { try { handler(frame.stream, frame.bytes, frame.end); } catch { /* a consumer's fault is not the guest's */ } }
+          end.heldBytes = 0;
+        }
+        return () => { end.handlers.delete(handler); };
+      },
+      ended: run.ended,
+    });
+  }
+  private async sendRuntime(run: Run, end: RuntimeEnd, bytes: Uint8Array, last: boolean): Promise<void> {
+    if (!(bytes instanceof Uint8Array)) throw new CoworkNativeHostError("protocol", "runtime bytes must be a Uint8Array");
+    if (end.overflowed || end.closed) throw new CoworkNativeHostError("closed", "the runtime stream ended");
+    if (bytes.length === 0 && !last) return;
+    for (let offset = 0; offset < bytes.length || (bytes.length === 0 && offset === 0); offset += RUNTIME_CHUNK_BYTES) {
+      const chunk = bytes.subarray(offset, offset + RUNTIME_CHUNK_BYTES), final = last && offset + RUNTIME_CHUNK_BYTES >= bytes.length;
+      await this.waitRuntimeBudget(run, end, chunk.length);
+      if (run.phase !== "running" || end.closed) throw new CoworkNativeHostError("closed", "the run ended");
+      end.downSeq += 1;
+      const frame = { class: "runtime" as const, seq: end.downSeq, conversation: 0, stream: "in" as const, end: final, payload: Uint8Array.from(chunk) };
+      end.streams.accept(frame);
+      run.session!.send({ t: "mux_down", frame });
+      if (bytes.length === 0) break;
+    }
+  }
+  /** IN bytes the guest has not answered stay within the contract's budget: wait until an OUT or ERR frame with payload shows it is reading. */
+  private async waitRuntimeBudget(run: Run, end: RuntimeEnd, needed: number): Promise<void> {
+    while (end.streams.inFlightBudget < needed) {
+      if (run.phase !== "running" || end.closed) throw new CoworkNativeHostError("closed", "the run ended");
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => { const at = end.waiters.indexOf(waiter); if (at >= 0) end.waiters.splice(at, 1); reject(new CoworkNativeHostError("timeout", "the guest did not read the runtime stream")); }, this.timeouts.runtimeStallMs);
+        const waiter = { resolve: () => { clearTimeout(timer); resolve(); }, reject: (error: unknown) => { clearTimeout(timer); reject(error); } };
+        end.waiters.push(waiter);
+      });
+    }
   }
 
   /** Move the admission to `to` from whatever state it REALLY is in. A row the ledger marked `uncertain` only because the heartbeat lapsed is
@@ -443,6 +576,7 @@ export class CoworkNativeHost {
     run.unsubscribe.push(session.onClose(() => { if (run.phase === "running") this.handleUncertain(run, "launcher channel ended"); }));
   }
   private handleUncertain(run: Run, reason: string): void {
+    run.outcome ??= { released: false, reason };
     try { this.markUncertain(run, reason); } catch (error) { if (isCrash(error)) throw error; }
     this.dispose(run);
   }
@@ -464,6 +598,8 @@ export class CoworkNativeHost {
   private dispose(run: Run): void {
     if (run.phase === "dead") return;
     run.phase = "dead";
+    run.runtime?.close();
+    run.endedResolve(run.outcome ?? { released: false, reason: "the run ended without a stop outcome" });
     run.stopHeartbeat?.(); run.stopHeartbeat = null;
     run.unsubscribe.splice(0).forEach(off => off());
     run.binding?.close(); run.inbox?.close();
@@ -488,6 +624,7 @@ export class CoworkNativeHost {
       } catch (error) { if (isCrash(error)) throw error; }
       this.hook("drain-requested");
       const outcome = await this.requestStop(run, reason);
+      run.outcome = outcome;
       if (!outcome.released) this.markUncertain(run, outcome.reason);
       return outcome;
     } finally { this.dispose(run); }

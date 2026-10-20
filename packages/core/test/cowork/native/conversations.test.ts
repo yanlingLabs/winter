@@ -83,7 +83,7 @@ test("a duplicate runtime_ready with a wrong sequence number is ignored but reco
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(false);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(true);
@@ -97,7 +97,7 @@ test("a duplicate runtime_ready that arrives after the start is counted in the u
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(6);
   expect(h.records.get(h.workspaceId).power).toBe("running");
@@ -123,9 +123,15 @@ for (const [name, behavior, code] of GUEST_FAILURES) {
   });
 }
 
+/** The first root of the first conversation, with `source` changed (guestPath untouched). */
+const withRootSource = (set: ReturnType<typeof guidedSet>, source: string): ReturnType<typeof guidedSet> => ({
+  ...set, conversations: set.conversations.map((conversation, index) => index > 0 ? conversation : { ...conversation, roots: conversation.roots.map((root, at) => at === 0 ? { ...root, source } : root) }),
+});
 const HOST_REFUSALS: [string, Parameters<typeof createHarness>[0] extends infer O ? NonNullable<O extends { conversations?: infer C } ? C : never> : never][] = [
   ["a second host-query conversation", twoGuidedSet],
   ["a set above the 20,480 byte ceiling", oversizedSet],
+  ["a root whose source differs from its guest path (both admitted views)", context => withRootSource(guidedSet(context), "/workspace/folders/other")],
+  ["a root whose source lies outside the admitted views", context => withRootSource(guidedSet(context), "/workspace/system/elsewhere")],
   ["a set bound to another lease epoch", context => guidedSet({ ...context, leaseEpoch: context.leaseEpoch + 1 })],
   ["a set bound to another incarnation", context => guidedSet({ ...context, incarnationId: "inc-other" })],
   ["a set whose providers name another guest boot", context => guidedSet({ ...context, guestBootId: "77777777-7777-4777-8777-777777777777" })],

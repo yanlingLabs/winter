@@ -199,7 +199,7 @@
         "src/devices/src/virtio/fs/macos/confined/tests.rs"
       ],
       "purpose": "the git rules and the quarantine tag of the confined virtio-fs server (SH2 R15 as revised for H1-H5, R16): on read-write folder sources, folded and (dev, ino) protected names (_PC_CASE_SENSITIVE), git directories recognised anywhere and none new outside a .git chain, git directories never moved or removed and no directory renamed into the zone, the creation-order check, pointer files buffered until FLUSH/RELEASE and checked, hooks immutable, config only through a checked config.lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets discovered before serving, watched names reported to a bounded share_notice sink; on every read-write share, com.apple.quarantine on CREATE, MKDIR, an exec-bit SETATTR and a write-open or truncate of an executable (a tag failure is EIO, a new node removed); FUSE-message tests. Not wired: no device, entry point or gate",
-      "patchSha256": "70e52f454938ab011f796f6645aee9013f35434a41ba9e3e423a7d2fb070507e"
+      "patchSha256": "c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af"
     },
     {
       "patchFile": "patches/0026-proposed-guarded-fs-device-shares-abi-gate.patch",

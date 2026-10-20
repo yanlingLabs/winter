@@ -11,6 +11,8 @@ extension AppDelegate {
         }
         guard let client = appModel?.client else { return }
         let model = UsageWindowModel()
+        // The plans the island last read, until the window's own answer lands.
+        model.seed = islandController?.tabModels.usage.summary
         model.fetchSeries = { range, sources in try await client.usageSeries(range: range, sources: sources) }
         model.fetchSummary = { range, sources in try await client.usageSummary(range: range, sources: sources) }
         model.fetchSubscriptions = { try await client.usageSubscriptions() }
@@ -19,6 +21,8 @@ extension AppDelegate {
         model.setTracking = { codex, claudeCode, antigravity, opencode in
             try await client.usageSetTracking(codex: codex, claudeCode: claudeCode, antigravity: antigravity, opencode: opencode)
         }
+        model.setAlarm = { provider, key, pct in try await client.usageSetAlarm(provider: provider, windowKey: key, thresholdPercent: pct) }
+        model.removeAlarm = { id in try await client.usageRemoveAlarm(id: id) }
         let controller = UsageWindowController(model: model)
         controller.onClosed = { [weak self] in self?.usageWindow = nil }
         usageWindow = controller

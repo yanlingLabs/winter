@@ -9,6 +9,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { COMPILED_EMBEDDED_WORKER_ENTRY } from "../../core/src/runtime-sdk/embedded";
+import { COMPILED_FD_RECEIVER_WORKER_ENTRY } from "../../core/src/cowork/native/fd-channel";
 
 const CLI_DIR = join(import.meta.dir, "..");
 const manifest = JSON.parse(readFileSync(join(CLI_DIR, "package.json"), "utf8")) as { scripts: Record<string, string> };
@@ -24,22 +25,35 @@ describe("compile:core carries the embedded Worker entry (WS-23)", () => {
     expect(dirname(WORKER_FILE)).toBe(join(CLI_DIR, "src"));
   });
 
-  test("both compile scripts pre-bundle the worker graph ALONE, then pass src/main.ts AND the worker file as entrypoints", () => {
+  test("both compile scripts pre-bundle each worker graph ALONE, then pass src/main.ts AND both worker files as entrypoints", () => {
     for (const name of ["compile", "compile:core"]) {
       const steps = manifest.scripts[name]!.split("&&").map((s) => s.trim().split(/\s+/));
-      expect([name, steps.length]).toEqual([name, 2]);
-      const [prebundle, compile] = steps as [string[], string[]];
-      // Step 1: the worker's graph, bundled on its own — never beside src/main.ts.
-      expect([name, prebundle.slice(0, 2), prebundle.filter((t) => t.startsWith("src/"))]).toEqual([name, ["bun", "build"], [WORKER_SOURCE_REL]]);
-      expect([name, prebundle.includes("--compile")]).toEqual([name, false]);
-      expect([name, prebundle[prebundle.indexOf("--target") + 1], prebundle[prebundle.indexOf("--outfile") + 1]]).toEqual([name, "bun", WORKER_BUNDLE_REL]);
-      // Step 2: the compile, whose second entrypoint is the plain-path Worker file.
+      expect([name, steps.length]).toEqual([name, 3]);
+      const [prebundle, prebundleFd, compile] = steps as [string[], string[], string[]];
+      // Steps 1 and 2: each worker's graph, bundled on its own — never beside src/main.ts.
+      for (const [step, source, bundle] of [[prebundle, WORKER_SOURCE_REL, WORKER_BUNDLE_REL], [prebundleFd, "src/fd-receiver-worker.source.ts", ".build/fd-receiver-worker.bundle.js"]] as const) {
+        expect([name, step.slice(0, 2), step.filter((t) => t.startsWith("src/"))]).toEqual([name, ["bun", "build"], [source]]);
+        expect([name, step.includes("--compile")]).toEqual([name, false]);
+        expect([name, step[step.indexOf("--target") + 1], step[step.indexOf("--outfile") + 1]]).toEqual([name, "bun", bundle]);
+      }
+      // Step 3: the compile, whose extra entrypoints are the plain-path Worker files.
       expect([name, compile.slice(0, 3), compile.filter((t) => t.startsWith("src/"))]).toEqual([
         name,
         ["bun", "build", "--compile"],
-        ["src/main.ts", `src/${basename(COMPILED_EMBEDDED_WORKER_ENTRY)}`],
+        ["src/main.ts", `src/${basename(COMPILED_EMBEDDED_WORKER_ENTRY)}`, `src/${basename(COMPILED_FD_RECEIVER_WORKER_ENTRY)}`],
       ]);
     }
+  });
+
+  test("the Cowork channel's receiver entry is a plain ./<file>.ts beside src/main.ts and imports only its pre-built bundle (bun run verify:fd-receiver proves it on the binary)", () => {
+    expect(COMPILED_FD_RECEIVER_WORKER_ENTRY).toMatch(/^\.\/[\w-]+\.ts$/);
+    const file = join(CLI_DIR, "src", basename(COMPILED_FD_RECEIVER_WORKER_ENTRY));
+    expect(existsSync(file)).toBe(true);
+    const importsOf = (path: string): string[] => [...readFileSync(path, "utf8").matchAll(/^import\s+"([^"]+)";$/gm)].map((m) => m[1]!);
+    expect(importsOf(file)).toEqual(["../.build/fd-receiver-worker.bundle.js"]);
+    expect(importsOf(join(CLI_DIR, "src", "fd-receiver-worker.source.ts"))).toEqual(["../../core/src/cowork/native/fd-receiver-worker"]);
+    // main.ts routes the probe the gate runs
+    expect(readFileSync(join(CLI_DIR, "src", "main.ts"), "utf8")).toContain('process.argv[2] === "__fd-receiver-probe"');
   });
 
   // SECURITY (no-autoload): by default a `bun build --compile` binary reads the bunfig.toml (its
@@ -49,7 +63,7 @@ describe("compile:core carries the embedded Worker entry (WS-23)", () => {
   // `__runtime-workflow-worker`) inherits it. `bun run verify:runtimes` proves it on the real binary.
   test("both compile scripts switch off the cwd bunfig.toml and .env autoloads", () => {
     for (const name of ["compile", "compile:core"]) {
-      const compile = manifest.scripts[name]!.split("&&").map((s) => s.trim().split(/\s+/))[1]!;
+      const compile = manifest.scripts[name]!.split("&&").map((s) => s.trim().split(/\s+/))[2]!;
       expect([name, compile.includes("--no-compile-autoload-bunfig"), compile.includes("--no-compile-autoload-dotenv")]).toEqual([name, true, true]);
     }
   });
