@@ -15,8 +15,8 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
 | Patch queue | `patch-queue.json` | 21 patches, 0004-0024, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `8dd731ce782d2c16263aae05c408f179e2526996bfa962f49c4d5fa60817b6e8` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `405dccc3e7e450d4677595d6b2816f50170186909e064b415922628ecc85feb8`, stripped `2a8fc100400e63195a66b8e51545dcb9aa8654cc7afe522c4aaf3b103f2d2ece` |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `625e5c9fd59c370e53c0360c19d358af06ee5319edcafd4bb46985328b0f9790` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `34a009494d6d650fb42550779fb8d4114404460a9cd3823490debcdce64752c5`, stripped `b0d10be490358c91f761a902a95098bdf21d0e268d82757d0024210e52c20c26` |
 | Exports | `expected-hashes.json` | 69 `krun_*` symbols: the 62 upstream ones for this feature set plus 7 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (587 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (592 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -76,7 +76,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0021-proposed-production-flush-and-pin-counters.patch` | flush counters per disk, pin high-water counters | production | `f3341cea82ea205507b7fc533674493c4c91b39ecf7b22e844f0017ea6c9cc3a` |
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
-| `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, not wired yet (the device, ABI and gate come in later patches) | `4cb81b56ee3da01eb9bc3c66d9cda529ae12ed5f77c7201bee6d5f05e13b18f5` |
+| `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, not wired yet (the device, ABI and gate come in later patches) | `c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
 entry points, but later patches (0007 onward, 0016, 0020) edit the files they create, so leaving one out means rewriting the stack and
@@ -91,8 +91,9 @@ fixture symbol and carries no trace-row string (both checked on every build). Th
 (`server.rs`) dispatches a closed opcode list to it; every other opcode answers `ENOSYS`, INIT negotiates only
 `ASYNC_READ | BIG_WRITES | AUTO_INVAL_DATA | MAX_PAGES` with `max_pages` 256, and a revoke flag answers `EACCES` before anything
 else. Host calls are `*at` on held directory descriptors with `O_NOFOLLOW_ANY | O_RESOLVE_BENEATH` (or the `AT_`/`RENAME_`
-equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shares. Limits: 4,096 handles (`ENFILE`), a directory
-LRU of 1,024, 1 s timeouts, modes masked to `0o755`. The constants the pinned `libc` crate lacks are defined with their SDK header
+equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shares. Limits: 4,096 handles (`ENFILE`), 262,144 nodes
+(`ENFILE`), a directory LRU of 1,024, 1 s timeouts, modes masked to `0o755`. A directory handle reads its own directory stream
+(one `DIR` and at most one entry read ahead); no handle caches a listing. The constants the pinned `libc` crate lacks are defined with their SDK header
 lines. Nothing serves it yet: no device, export or gate change is in this patch, and the export list is unchanged.
 
 ## Production ABI (`include/libkrun.h` after the queue)

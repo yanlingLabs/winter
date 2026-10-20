@@ -1,10 +1,10 @@
 {
   "_comment": "Hash pins of the composed queue and the production archive. The archive is rebuilt only when a patch or the upstream pin changes; scripts/build_archive.py fails if a rebuild differs from these values.",
-  "composedSourceDiffSha256": "8dd731ce782d2c16263aae05c408f179e2526996bfa962f49c4d5fa60817b6e8",
+  "composedSourceDiffSha256": "625e5c9fd59c370e53c0360c19d358af06ee5319edcafd4bb46985328b0f9790",
   "productionArchive": {
     "features": "blk,cowork-production-only",
-    "rawSha256": "405dccc3e7e450d4677595d6b2816f50170186909e064b415922628ecc85feb8",
-    "strippedSha256": "2a8fc100400e63195a66b8e51545dcb9aa8654cc7afe522c4aaf3b103f2d2ece",
+    "rawSha256": "34a009494d6d650fb42550779fb8d4114404460a9cd3823490debcdce64752c5",
+    "strippedSha256": "b0d10be490358c91f761a902a95098bdf21d0e268d82757d0024210e52c20c26",
     "linkThis": "stripped"
   },
   "exports": {
