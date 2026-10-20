@@ -23,6 +23,10 @@ final class PointClickTests: XCTestCase {
     let header = fakeElement(97_009)
     let headerButton = fakeElement(97_010)
     let content = fakeElement(97_011)
+    let iconButton = fakeElement(97_012)
+    let iconImage = fakeElement(97_013)
+    let row = fakeElement(97_014)
+    let rowText = fakeElement(97_015)
 
     var ax: FakeAX!
     var sys: FakeSystem!
@@ -42,7 +46,7 @@ final class PointClickTests: XCTestCase {
                extra: [kAXChildrenAttribute: [web]])
         ax.windowIDs[AXIdentity(element: window)] = 77
         ax.add(web, role: "AXWebArea", frame: CGRect(x: 0, y: 40, width: 900, height: 660),
-               extra: [kAXChildrenAttribute: [header, link, field, card, map, content], kAXParentAttribute: window])
+               extra: [kAXChildrenAttribute: [header, link, field, card, map, content, iconButton, row], kAXParentAttribute: window])
         ax.setActions(web, [kAXPressAction])
         ax.add(link, role: "AXLink", title: "Providers", frame: CGRect(x: 100, y: 100, width: 120, height: 20),
                extra: [kAXChildrenAttribute: [linkText], kAXParentAttribute: web])
@@ -70,6 +74,18 @@ final class PointClickTests: XCTestCase {
         ax.add(content, role: "AXLink", title: "Hidden under the header", frame: CGRect(x: 380, y: 50, width: 200, height: 20),
                extra: [kAXParentAttribute: web])
         ax.setActions(content, [kAXPressAction])
+        // An icon-only button (its glyph an image), and a sidebar row that takes presses (pressed at its centre it could hit
+        // another of its children).
+        ax.add(iconButton, role: kAXButtonRole, title: "Close", frame: CGRect(x: 600, y: 100, width: 30, height: 30),
+               extra: [kAXChildrenAttribute: [iconImage], kAXParentAttribute: web])
+        ax.setActions(iconButton, [kAXPressAction])
+        ax.add(iconImage, role: kAXImageRole, frame: CGRect(x: 605, y: 105, width: 20, height: 20), extra: [kAXParentAttribute: iconButton])
+        ax.add(row, role: kAXRowRole, title: "Drafts", frame: CGRect(x: 100, y: 600, width: 220, height: 30),
+               extra: [kAXChildrenAttribute: [rowText], kAXParentAttribute: web])
+        ax.setActions(row, [kAXPressAction])
+        ax.add(rowText, role: kAXStaticTextRole, title: "Drafts", frame: CGRect(x: 110, y: 605, width: 50, height: 16),
+               extra: [kAXParentAttribute: row])
+        ax.setActions(rowText, [kAXPressAction])
         sys = FakeSystem()
         sys.running = [pid, 1]
         sys.bundles[pid] = "com.example.browser"
@@ -148,6 +164,27 @@ final class PointClickTests: XCTestCase {
             XCTAssertTrue(ax.performed.isEmpty, what)
             XCTAssertEqual(downs.map(\.location), [CGPoint(x: point[0], y: point[1])], what)
         }
+    }
+
+    /// Review LOW 1: an icon-only button is hit on its image, which is never pressed — the image climbs one step to it.
+    func testAnIconOnlyButtonsImageClimbsToTheButton() async throws {
+        world()
+        navigatesOnPress(iconButton)
+        try await click([615, 115])
+        XCTAssertEqual(ax.performed, ["\(token(iconButton)):AXPress"])
+        XCTAssertTrue(downs.isEmpty)
+    }
+
+    /// Review LOW 2: only a control's role is pressed for a point on it — a pressable row (a sidebar's) is not, nor is its
+    /// text (it climbs only to a link or button).
+    func testAPressableRowOrItsTextIsClickedAsAPoint() async throws {
+        for point in [[280.0, 615.0], [120, 612]] {
+            world()
+            try await click(point)
+            XCTAssertTrue(ax.performed.isEmpty, "\(point)")
+            XCTAssertEqual(downs.map(\.location), [CGPoint(x: point[0], y: point[1])])
+        }
+        XCTAssertEqual(CUCore.pointPressRoles, ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXTab", "AXMenuItem"])
     }
 
     func testTheAppsHitTestDecidesNotTheTreesOrder() async throws {

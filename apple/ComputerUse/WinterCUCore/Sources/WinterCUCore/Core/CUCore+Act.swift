@@ -741,9 +741,12 @@ extension CUCore {
     /// - The window drawn on top at the point is the bound one (never a popover, panel or prompt over it).
     /// - The element is the APP's hit test at the point (`AXUIElementCopyElementAtPosition`: what is drawn on top — a
     ///   sticky header over the content — never the tree's child order).
-    /// - It is a control-sized element of the page that lists the press — never the page itself, an image or canvas, a
-    ///   text field (a point there places the caret), a disabled control, or anything larger than a control.
-    /// - Or, at most ONE step up, a link or button of a control's size that holds the point (a link's own text).
+    /// - It is a control-sized element of the page that lists the press, of a control's role (`pointPressRoles`: button,
+    ///   link, check box, radio, tab, menu item) — never the page itself, an image or canvas, a text field (a point there
+    ///   places the caret), a disabled control, a row or group (pressed at its centre it could hit another of its
+    ///   children), or anything larger than a control.
+    /// - Or, at most ONE step up, a link or button of a control's size that holds the point (a link's own text, an
+    ///   icon-only button's image).
     /// Nil otherwise: the point is clicked as a point.
     func webElementUnder(_ pt: CGPoint, _ t: CUTarget) -> (ref: Int, label: String)? {
         guard t.accessible, offScreenSubject(t) == nil, isWebBrowser(t),
@@ -759,18 +762,22 @@ extension CUCore {
             return info
         }
         let info = ElementInfo(hit, ax)
-        if Self.neverPressedForAPoint.contains(info.role ?? "") || editableElement(hit) || info.enabled == false { return nil }
+        let role = info.role ?? ""
+        // (An image may climb — an icon-only button's ×, heart or menu glyph — but is never pressed itself.)
+        if (role != "AXImage" && Self.neverPressedForAPoint.contains(role)) || editableElement(hit) || info.enabled == false { return nil }
         var chosen: (AXUIElement, ElementInfo)?
-        if let ok = pressable(hit, roles: nil) {
-            chosen = (hit, ok)
-        } else if !info.actions.contains(kAXPressAction), let parent = ax.element(hit, kAXParentAttribute),
-                  let ok = pressable(parent, roles: ["AXLink", "AXButton"]) {
+        if Self.pointPressRoles.contains(role) {
+            if let ok = pressable(hit, roles: Self.pointPressRoles) { chosen = (hit, ok) }
+        } else if let parent = ax.element(hit, kAXParentAttribute), let ok = pressable(parent, roles: ["AXLink", "AXButton"]) {
             chosen = (parent, ok)
         }
         guard let (e, chosenInfo) = chosen else { return nil }
         let ref = t.refs.ref(for: AXIdentity(element: e))
         return (ref, Self.elementLabel(ref, chosenInfo))
     }
+
+    /// The roles pressed for a point ON them: a control whose press is the click at that point.
+    static let pointPressRoles: Set<String> = ["AXButton", "AXLink", "AXCheckBox", "AXRadioButton", "AXTab", "AXMenuItem"]
 
     /// Never pressed for a point inside them: the page, an image (a map, a chart), a scroll area or a whole document.
     static let neverPressedForAPoint: Set<String> = ["AXWebArea", "AXImage", "AXScrollArea", "AXScrollView", "AXDocument",
