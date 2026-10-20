@@ -8,14 +8,32 @@ import { registerHostStorageFences } from "../../../src/runtime-sdk/host-storage
 const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-embedded-descendants-")));
 const home = join(root, "home"), cwd = join(root, "project");
 mkdirSync(join(home, "cowork"), { recursive: true }); mkdirSync(cwd);
-const host = createEmbeddedSessionHost({ home });
+// This fixture covers the floor of an SDK WITHOUT the host-code protection capability (the installed one has it since 0.0.54), so the capability is injected as absent.
+const host = createEmbeddedSessionHost({ home, hostPathProtectionCapability: null });
 const mode = process.argv[2];
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", WINTER_HOME: home, WINTER_DISABLE_GIT_INSTRUCTIONS: "1", WINTER_KEYCHAIN_SERVICE: "com.winter.core.test-isolated" };
-if (mode === "daemon") {
+if (mode === "daemon-capable") {
+  // The installed SDK HAS the capability: the real daemon's embedded host admits the chat and dispatch topologies under active protection.
   const { startDaemon } = await import("../../../src/daemon");
   const { FileSecretStore } = await import("../../../src/auth/secret-store");
   const { EmbeddedRuntimeUnavailable } = await import("../../../src/runtime-sdk/embedded");
   const daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null });
+  let unregister: (() => void) | undefined;
+  try {
+    unregister = await daemon.runtimeSdk!.codeExecution!.refreshForStorage(home, { coordinationDir: join(root, "coordination"), coworkStorageActive: true });
+    if (daemon.embedded.supportsProtectedPaths?.() !== true) throw new Error("the daemon's embedded host does not report protected paths with the installed SDK");
+    for (const topology of ["chat", "dispatch"] as const) {
+      if (daemon.runtimeSdk!.spawnHookFor(topology) instanceof EmbeddedRuntimeUnavailable) throw new Error("the capable SDK's embedded topology was refused");
+    }
+  } finally { unregister?.(); await daemon.stop(); }
+  process.stdout.write("embedded descendant gate verified\n");
+  process.exit(0);
+}
+if (mode === "daemon") {
+  const { startDaemon } = await import("../../../src/daemon");
+  const { FileSecretStore } = await import("../../../src/auth/secret-store");
+  const { EmbeddedRuntimeUnavailable } = await import("../../../src/runtime-sdk/embedded");
+  const daemon = await startDaemon({ home, secrets: new FileSecretStore(join(home, "test-secrets")), agentProvider: null, embeddedHost: { hostPathProtectionCapability: null } });
   let unregister: (() => void) | undefined;
   try {
     const captured = daemon.runtimeSdk!.spawnHookFor("chat") as { spawnClaudeCodeProcess: (options: unknown) => unknown };
