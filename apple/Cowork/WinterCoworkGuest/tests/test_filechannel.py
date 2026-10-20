@@ -141,7 +141,7 @@ class DataRootTests(unittest.TestCase):
             self.assertTrue(self.run_tool(self.gid, source) == "0", source)
         self.assertEqual(self.mode_of("outputs"), 0o711)
         self.assertEqual(self.mode_of(".winter/memory"), 0o711)
-        self.assertFalse((self.dir / "outputs/s1").exists())
+        self.assertFalse((self.dir / "outputs/s1").exists() or (self.dir / ".winter/memory/x").exists())
         # a sibling whose name merely starts the same way is a data root
         self.assertEqual(self.run_tool(self.gid, "/workspace/outputs-extra", "/workspace/.winter/memory2"), "0")
         self.assertEqual((self.mode_of("outputs-extra"), self.mode_of(".winter/memory2")), (0o2770, 0o2770))
