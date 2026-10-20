@@ -24,7 +24,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import type { PendingCard } from "./state";
-import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "../questions";
+import { answerPrompt, formatOptionLines, isFreeTextQuestion, isOtherChoice, otherMenuLine, parseQuestionAnswer, questionOptions } from "../questions";
 import { parsePlanResponse } from "../plan-response";
 import { theme } from "./theme";
 
@@ -270,8 +270,10 @@ interface LegacyQuestion {
   // `QuestionSchema`). code mode's `ask_user` always sends one.
   header?: string;
   question: string;
-  options: LegacyOption[];
+  // Absent or empty: a free-text question (2026-10-20) — no menu, the answer is typed.
+  options?: LegacyOption[];
   multiSelect: boolean;
+  placeholder?: string;
 }
 
 type QuestionPhase = "answer" | "otherAnswer" | "note";
@@ -291,12 +293,21 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
       if (!q) return;
       if (key.return) {
         if (phase === "answer") {
-          if (isOtherChoice(buffer, q.options.length)) {
+          if (isFreeTextQuestion(q)) {
+            // A free-text question: a blank Return is no answer (the Mac's disabled send) — nothing happens.
+            const typed = buffer.trim();
+            if (typed === "") return;
+            setAnswers((a) => ({ ...a, [q.question]: typed }));
+            setPhase("note");
+            setBuffer("");
+            return;
+          }
+          if (isOtherChoice(buffer, questionOptions(q).length)) {
             setPhase("otherAnswer");
             setBuffer("");
             return;
           }
-          const answer = parseQuestionAnswer(buffer, q.options.map((o) => o.label), q.multiSelect);
+          const answer = parseQuestionAnswer(buffer, questionOptions(q).map((o) => o.label), q.multiSelect);
           setAnswers((a) => ({ ...a, [q.question]: answer }));
           setPhase("note");
           setBuffer("");
@@ -337,15 +348,16 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
 
   if (!q) return null;
 
-  const optionLines = q.options
+  const freeText = isFreeTextQuestion(q);
+  const optionLines = questionOptions(q)
     .flatMap((o, i) => formatOptionLines(i + 1, o))
     .map((line) => line.replace(/\n$/, ""));
-  const otherLine = `  ${q.options.length + 1}) Other (type your answer)`;
+  // A free-text question has no menu and so no "Other" line — its hint (if any) instead.
+  const otherLine = freeText ? null : otherMenuLine(q).replace(/\n$/, "");
+  const hintLine = freeText && q.placeholder ? `  ${q.placeholder}` : null;
   const promptText =
     phase === "answer"
-      ? q.multiSelect
-        ? "choose (comma-separated numbers or text): "
-        : "choose (number or text): "
+      ? answerPrompt(q)
       : phase === "otherAnswer"
         ? "your answer: "
         : "note (enter to skip): ";
@@ -358,7 +370,8 @@ function QuestionCard({ pending, onAnswer }: { pending: Extract<PendingCard, { k
       {optionLines.map((line, i) => (
         <Text key={i}>{line}</Text>
       ))}
-      <Text>{otherLine}</Text>
+      {otherLine !== null && <Text>{otherLine}</Text>}
+      {hintLine !== null && <Text dimColor>{hintLine}</Text>}
       <Text>
         {promptText}
         {buffer}

@@ -322,14 +322,14 @@ final class PendingCardsTests: XCTestCase {
         XCTAssertEqual(draft.otherTexts[0], "", "selecting an option clears that question's Other text")
     }
 
-    func testToggleMultiAddsAndRemovesClearingOtherTextEachTime() {
+    /// Free-text questions (2026-10-20): a multiple-choice question's typed text JOINS its picks, so a toggle keeps it.
+    func testToggleMultiAddsAndRemovesKeepingTheTypedText() {
         var draft = PendingCardDraft()
         draft.otherTexts[0] = "typed something"
         draft.toggleMulti(1, forQuestion: 0)
         XCTAssertEqual(draft.selections[0], [1])
-        XCTAssertEqual(draft.otherTexts[0], "", "toggling an option on also clears Other text")
+        XCTAssertEqual(draft.otherTexts[0], "typed something", "a multiple-choice toggle keeps the typed text")
 
-        draft.otherTexts[0] = "typed again"
         draft.toggleMulti(2, forQuestion: 0)
         XCTAssertEqual(draft.selections[0], [1, 2])
 

@@ -608,6 +608,70 @@ describe("PendingCards — question (ask_user)", () => {
       expect(calls).toEqual([["q9", { answers: { "Which tier should I compare against?": "Free" } }]]);
     });
   });
+  // Free-text questions (2026-10-20): no options → no menu, no "Other" line; the typed text is the
+  // answer, a blank Return does nothing. A menu question shows its placeholder on the Other line.
+  describe("free-text question (no options)", () => {
+    const freeText = { header: "Branch", question: "Branch name?", options: [], multiSelect: false, placeholder: "e.g. feature/login" };
+
+    test("(g1) the frame shows the question and its hint, no numbered menu and no Other line", async () => {
+      const card: PendingCard = { kind: "question", callId: "g1", questions: [freeText] };
+      const { lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={() => {}} onPlan={() => {}} />);
+      await wait();
+      const frame = lastFrame() ?? "";
+      expect(frame).toContain("Branch — Branch name?");
+      expect(frame).toContain("e.g. feature/login");
+      expect(frame).not.toContain("1)");
+      expect(frame).not.toContain("Other");
+      expect(frame).toContain("your answer:");
+    });
+
+    test("(g2) a blank Return is not an answer; the typed text is sent verbatim", async () => {
+      const calls: unknown[] = [];
+      const card: PendingCard = { kind: "question", callId: "g2", questions: [freeText] };
+      const { stdin, lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={(id, payload) => calls.push([id, payload])} onPlan={() => {}} />);
+      await wait();
+      stdin.write("\r"); // blank: nothing happens, still on the answer prompt
+      await wait();
+      expect(lastFrame() ?? "").toContain("your answer:");
+      stdin.write("1"); // a digit is just text here — there is no menu to pick from
+      await wait();
+      stdin.write("\r"); // answer -> note
+      await wait();
+      stdin.write("\r"); // blank note -> done
+      await wait();
+      expect(calls).toEqual([["g2", { answers: { "Branch name?": "1" } }]]);
+    });
+
+    test("(g3) an absent `options` key is a free-text question too", async () => {
+      const calls: unknown[] = [];
+      const card: PendingCard = { kind: "question", callId: "g3", questions: [{ question: "Name?", multiSelect: false }] };
+      const { stdin } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={(id, payload) => calls.push([id, payload])} onPlan={() => {}} />);
+      await wait();
+      stdin.write("Winter");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      expect(calls).toEqual([["g3", { answers: { "Name?": "Winter" } }]]);
+    });
+
+    test("(g4) a menu question's placeholder is its Other line's hint; multiSelect joins typed text after the labels", async () => {
+      const calls: unknown[] = [];
+      const multi = { header: "Pick", question: "Which ones?", options: [{ label: "A" }, { label: "B" }, { label: "C" }], multiSelect: true, placeholder: "Another one" };
+      const card: PendingCard = { kind: "question", callId: "g4", questions: [multi] };
+      const { stdin, lastFrame } = render(<PendingCards pending={card} onApprove={() => {}} onAnswer={(id, payload) => calls.push([id, payload])} onPlan={() => {}} />);
+      await wait();
+      expect(lastFrame() ?? "").toContain("4) Other (Another one)");
+      stdin.write("3,1, my own");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      stdin.write("\r");
+      await wait();
+      expect(calls).toEqual([["g4", { answers: { "Which ones?": "C, A, my own" } }]]);
+    });
+  });
 });
 
 // ---------------------------------------------------------------------------------------------

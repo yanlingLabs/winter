@@ -50,6 +50,21 @@ describe("IslandRegistry", () => {
     expect(items[1]!.session).toEqual({ mode: "code", title: "Fix the build" });
   });
 
+  test("a free-text question (no options, a placeholder) is a card whose event passes through whole and schema-valid", () => {
+    const pending = new Set(["q:s1:q1"]);
+    const reg = new IslandRegistry({ pending: sources(pending), facts: () => ({}), hosts: () => [] });
+    const questions = [
+      { question: "Branch name?", header: "Branch", options: [], multiSelect: false, placeholder: "e.g. feature/login" },
+      { question: "Which targets?", header: "Targets", options: [{ label: "macOS" }, { label: "iOS" }], multiSelect: true, placeholder: "Another" },
+    ];
+    reg.observe(ev({ type: "question_asked", sessionId: "s1", callId: "q1", questions }));
+    const [item] = reg.list();
+    expect(item!.kind).toBe("question");
+    expect(item!.event.type === "question_asked" && item!.event.questions).toEqual(questions);
+    // `island.pending`'s result schema accepts it — the Mac app reads this payload verbatim.
+    expect(IslandPendingResult.safeParse({ items: reg.list() }).success).toBe(true);
+  });
+
   test("a resolve event removes the card; one the broker no longer holds is pruned at the next list", () => {
     const pending = new Set(["a:s1:c1", "a:s1:c2"]);
     const reg = new IslandRegistry({ pending: sources(pending), facts: () => ({}), hosts: () => [] });

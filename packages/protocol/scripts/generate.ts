@@ -114,6 +114,13 @@ const fixtures: Record<string, unknown> = {
   question_simplified: { type: "question_asked", sessionId: "s_1", threadId: "t_1", seq: 30, ts: 1700000000020, callId: "call_3",
     questions: [{ question: "Which tier should I compare against?", multiSelect: false,
       options: [{ label: "Free" }, { label: "Pro" }] }] },
+  // Free-text questions (2026-10-20): a question with NO `options` key at all (answered by typing
+  // alone) carrying a `placeholder`, beside a menu question with one. Swift must decode the absent key
+  // as an empty menu and round-trip the hint.
+  question_free_text: { type: "question_asked", sessionId: "s_1", threadId: "t_1", seq: 40, ts: 1700000000030, callId: "call_4",
+    questions: [{ question: "What should the new branch be called?", header: "Branch", multiSelect: false, placeholder: "e.g. feature/login-retry" },
+                { question: "Which targets?", header: "Targets", multiSelect: true, placeholder: "Another target",
+                  options: [{ label: "macOS" }, { label: "iOS" }] }] },
   // CC AskUserQuestion parity: per-answer `notes` ("press n to add notes") is optional/additive —
   // a dedicated fixture (distinct from question_resolved above) so Swift round-trips a
   // question_resolved carrying notes.
