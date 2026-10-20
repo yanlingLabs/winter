@@ -13,6 +13,10 @@ import type { IslandClient, IslandHost, IslandSessionFacts } from "./registry";
 //     autonomous loop's next turn) means the session did not stop, and nothing is published. Turns another agent or
 //     Dispatch started (`messaging`, `dispatch`) publish nothing — Dispatch reports its children itself.
 //   - `watches`: every ARMED ComputerV2 wake trigger (`wakeWhen`), read from the wake registry itself.
+//   - `usageAlarms`: every plan alarm that FIRED and whose notice no client has acknowledged yet (`docs/claude/usage.md`)
+//     — the island's notification pill ("Claude Code · Weekly at 80%"); no session behind it. Read from the usage DB at
+//     every list (`deps.usageAlarms`), so it survives a restart and waits for an app that is away; it goes only when a
+//     client acknowledges it (`usage.alarms.ack`).
 //
 // `island.activity` answers from here; `island.activityChanged` (bare, once per burst) tells the island clients to ask
 // again. No timer runs unless a turn just ended while an island client is connected (one one-shot per such turn).
@@ -89,10 +93,29 @@ export interface IslandWatchItem extends IslandWatchSource {
   session: IslandSessionFacts;
 }
 
+/** A plan alarm that fired: which plan and window (its kind, scope and length, so the client names it as its plan lines
+ *  do), the threshold, the used share that met it and when the window resets. */
+export interface IslandUsageAlarmItem {
+  /** The alarm's own id (stable: it fires once). */
+  id: string;
+  provider: "codex" | "claude-code" | "antigravity";
+  windowKey: string;
+  kind: string;
+  scope?: string;
+  windowMinutes?: number;
+  thresholdPercent: number;
+  usedPercent: number;
+  /** Epoch ms. */
+  resetsAt?: number;
+  /** Epoch ms: when it fired. */
+  at: number;
+}
+
 export interface IslandActivitySnapshot {
   computerUse: IslandComputerUseItem[];
   results: IslandResultItem[];
   watches: IslandWatchItem[];
+  usageAlarms: IslandUsageAlarmItem[];
 }
 
 export interface IslandActivityDeps {
@@ -102,6 +125,8 @@ export interface IslandActivityDeps {
   watches?(): IslandWatchSource[];
   /** The session still has a card waiting for an answer: its turn did not end idle. */
   hasPendingCard?(sessionId: string): boolean;
+  /** Every fired plan alarm not acknowledged yet (the usage DB's `firedAlarms`); absent without usage tracking. */
+  usageAlarms?(): IslandUsageAlarmItem[];
   now?(): number;
   settleMs?: number;
   /** Test seam: a one-shot timer; returns its cancel. */
@@ -240,7 +265,15 @@ export class IslandActivity {
     let sources: IslandWatchSource[] = [];
     try { sources = this.deps.watches?.() ?? []; } catch { sources = []; }
     const watches = sources.map((w): IslandWatchItem => ({ ...w, session: this.factsOf(w.sessionId) }));
-    return { computerUse, results, watches };
+    let usageAlarms: IslandUsageAlarmItem[] = [];
+    try { usageAlarms = this.deps.usageAlarms?.() ?? []; } catch { usageAlarms = []; }
+    return { computerUse, results, watches, usageAlarms };
+  }
+
+  /** A plan alarm fired, or a notice was acknowledged (`UsageService`'s `onAlarmNotices`): the island clients ask
+   *  again. Nothing is held here — the usage DB keeps the notices until they are acknowledged. */
+  usageAlarmsChanged(): void {
+    this.changed();
   }
 
   private factsOf(sid: string): IslandSessionFacts {

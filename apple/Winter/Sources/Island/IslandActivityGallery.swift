@@ -218,7 +218,7 @@ private struct IslandExpandedViewForGallery: View {
                     Color.clear.frame(height: shape.topInset)
                     IslandOpenHeader(store: store)
                 }
-                IslandWatchesList(activity: store.activity, scrolls: false, nowMs: { nowMs })
+                IslandWatchesTab(activity: store.activity, scrolls: false, nowMs: { nowMs })
             }
             .frame(width: size.width, height: size.height, alignment: .top)
         }

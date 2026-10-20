@@ -3,20 +3,24 @@ import { chmodSync, lstatSync, mkdirSync, mkdtempSync, realpathSync, rmdirSync, 
 import { join, sep } from "node:path";
 import { AGY_TIMEOUT_BACKOFF_MS, antigravityPlanFromCli } from "./antigravity";
 import { CLAUDE_JSON_MAX_BYTES, claudeCodeRecordOf, claudeCodeTranscripts, claudeCacheFile, claudePlanFromCli, claudeSubscriptionType, readCapped } from "./claude-code";
-import { CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, claudeStatsRecords, overlapFrom, parseClaudeStats, utcDay, utcNoon, type ClaudeStats } from "./claude-stats";
+import {
+  CLAUDE_STATS_FILE, CLAUDE_STATS_MAX_BYTES, CLAUDE_TRANSCRIPT_RETENTION_DAYS, estimateKey, isPartialDay, overlapFrom, parseClaudeStats, refreshEstimates,
+  statsDate, statsRows, utcDay, utcNoon, type ClaudeStats, type StatsCoverage, type StatsEstimate,
+} from "./claude-stats";
 import { codexPlanFromAppServer, codexPlanFromRollouts, codexRecordOf, codexRollouts, codexStateOf } from "./codex";
-import { USAGE_SOURCES, type Subscription, type SyntheticRow, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
+import { USAGE_SOURCES, type AlarmProvider, type FiredUsageAlarm, type Subscription, type SyntheticRow, type UsageAlarm, type UsageDb, type UsageRecordInput, type UsageRow, type UsageSource } from "./db";
 import { fileKey, readNewLines, type FoundFile } from "./ingest-files";
 import {
   OPENCODE_ALL_ARGS, OPENCODE_SETTLE_AFTER_DAY_MS, currentTimeZone, dayMinus, daysBefore, localDay, localDayEnd, localDayStart, localNoon, opencodeDayRecords, opencodeDaysArgs,
   opencodeDifference, opencodeFingerprint, runOpencodeStats, sameOpencodeStats, type OpencodeStats,
 } from "./opencode";
-import { staleness, type PlanReading, type PlanStatusWindow } from "./plan";
+import { planWindowKey, staleness, type PlanReading, type PlanStatusWindow, type PlanWindow } from "./plan";
 import type { UsagePricer } from "./pricing";
 
 // The usage service (`docs/claude/usage.md`): records Winter's own turns as they end, ingests the user's Codex and
 // Claude Code usage ON DEMAND (when a Usage surface asks — no watcher, no timer: an idle daemon does nothing), reads
-// the plans (Codex, Claude Code, Antigravity) through their source ladders, and answers the `usage.*` RPCs.
+// the plans (Codex, Claude Code, Antigravity) through their source ladders, keeps the user's one-shot plan alarms (every
+// plan read judges them; a background beat reads the plans — `startBackground`), and answers the `usage.*` RPCs.
 
 export type UsageRange = "1h" | "24h" | "7d" | "30d" | "all";
 export const USAGE_RANGES: readonly UsageRange[] = ["1h", "24h", "7d", "30d", "all"];
@@ -75,7 +79,35 @@ export interface UsageServiceDeps {
   claudeJsonMaxBytes?: number;
   /** Claude Code's `stats-cache.json` over this is not read (default 8 MiB). */
   claudeStatsMaxBytes?: number;
+  /** The fired alarms waiting for an acknowledgement changed — one fired, or one was acknowledged (the island's
+   *  notifications, `IslandActivity.usageAlarmsChanged`, which reads them back from `firedAlarms`). */
+  onAlarmNotices?: () => void;
+  /** The background plan checks (`startBackground`): every installed and tracked plan every `backgroundEveryMs`
+   *  (default 30 min), and a plan with an alarm on its own beat (`alarmBeatMs`; default its throttle — Codex 60 s, Claude
+   *  Code and Antigravity 5 min). Tests shorten them. */
+  backgroundEveryMs?: number;
+  alarmBeatMs?: Partial<Record<AlarmProvider, number>>;
+  /** Test seam: a repeating timer; returns its cancel. */
+  setInterval?: (fn: () => void, ms: number) => () => void;
 }
+
+/** The plans in their slots' order (what the background beat reads). */
+export const PLAN_PROVIDERS: readonly AlarmProvider[] = ["codex", "claude-code", "antigravity"];
+/** The background beat's period (user 2026-10-18: every installed and tracked plan, alarm or not). */
+export const USAGE_BACKGROUND_EVERY_MS = 30 * 60_000;
+/** A fast beat's spawn floor sits this far under its period. */
+export const FAST_BEAT_SLACK_MS = 5_000;
+
+/** PURE: a fast beat's spawn floor — the period less `FAST_BEAT_SLACK_MS`, never under half the period. */
+export function fastBeatFloor(periodMs: number): number {
+  return Math.max(periodMs / 2, periodMs - FAST_BEAT_SLACK_MS);
+}
+
+const defaultInterval = (fn: () => void, ms: number): (() => void) => {
+  const t = setInterval(fn, ms);
+  (t as { unref?: () => void }).unref?.();
+  return () => clearInterval(t);
+};
 
 /** A binary's identity for a probe latch: its realpath, mtime and size (an update is a new binary). */
 export function binaryKey(tool: string, exe: string): string | undefined {
@@ -107,6 +139,136 @@ function differs(s: SyntheticRow, r: UsageRecordInput): boolean {
   return s.input !== r.input || s.output !== r.output || s.cacheRead !== r.cacheRead || s.cacheWrite !== r.cacheWrite || s.costBasis !== r.costBasis
     || (cost === null) !== (s.costUsd === null) || (cost !== null && s.costUsd !== null && Math.abs(cost - s.costUsd) > 1e-9)
     || Math.abs((s.cacheSavingsUsd ?? 0) - (r.cacheSavingsUsd ?? 0)) > 1e-9;
+}
+
+/** Where Claude Code's `/stats` history keeps its own state in `ingest_files` (`sourceState`): when Winter first and last
+ *  read the transcripts in full, the spans between reads too far apart, and the per-day estimates. */
+export const CLAUDE_STATS_STATE_KEY = "claude-code:stats-history";
+/** A complete read's time is written at most this often (a gap is measured in weeks). */
+const PASS_NOTE_EVERY_MS = 6 * 3_600_000;
+
+export interface ClaudeStatsHistory {
+  firstPassAt?: number;
+  lastPassAt?: number;
+  gaps: Array<[string, string]>;
+  estimates: Map<string, StatsEstimate>;
+  /** The estimates were made at least once: until then the rows already stored are left alone. */
+  planned: boolean;
+}
+
+const finiteNum = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
+
+/** PURE: the stored state, validated — anything malformed is dropped, never trusted. */
+export function parseStatsHistory(state: Record<string, unknown> | undefined): ClaudeStatsHistory {
+  const firstPassAt = finiteNum(state?.firstPassAt);
+  const lastPassAt = finiteNum(state?.lastPassAt);
+  const gaps: Array<[string, string]> = [];
+  if (Array.isArray(state?.gaps)) {
+    for (const g of state.gaps) {
+      if (!Array.isArray(g)) continue;
+      const a = statsDate(g[0]);
+      const b = statsDate(g[1]);
+      if (a !== undefined && b !== undefined && a <= b) gaps.push([a, b]);
+    }
+  }
+  const estimates = new Map<string, StatsEstimate>();
+  const stored = state?.estimates;
+  if (typeof stored === "object" && stored !== null && !Array.isArray(stored)) {
+    for (const [key, v] of Object.entries(stored)) {
+      if (statsDate(key.slice(0, 10)) === undefined || key[10] !== ":" || key.length < 12 || typeof v !== "object" || v === null) continue;
+      const e = v as Record<string, unknown>;
+      const raw = finiteNum(e.raw);
+      const cal = finiteNum(e.cal);
+      const days = finiteNum(e.days);
+      if (raw === undefined || raw < 0 || cal === undefined || cal < 0 || cal > 1 || days === undefined || days < 0) continue;
+      const split = Array.isArray(e.split) && e.split.length === 4 && e.split.every((x) => finiteNum(x) !== undefined && (x as number) >= 0)
+        ? e.split as [number, number, number, number] : undefined;
+      const usdPerToken = finiteNum(e.usdPerToken);
+      estimates.set(key, { raw, cal, days, ...(split === undefined ? {} : { split }), ...(usdPerToken !== undefined && usdPerToken > 0 ? { usdPerToken } : {}) });
+    }
+  }
+  return {
+    ...(firstPassAt === undefined ? {} : { firstPassAt }), ...(lastPassAt === undefined ? {} : { lastPassAt }),
+    gaps, estimates, planned: state?.planned === true,
+  };
+}
+
+/** PURE: `gaps` with the span [a, b] added, overlapping or touching spans merged; undefined when it adds nothing. */
+export function addGap(gaps: ReadonlyArray<readonly [string, string]>, a: string, b: string): Array<[string, string]> | undefined {
+  if (gaps.some(([x, y]) => x <= a && b <= y)) return undefined;
+  const next = (d: string): string => utcDay(Date.parse(`${d}T00:00:00Z`) + 86_400_000);
+  const out: Array<[string, string]> = [];
+  for (const [x, y] of [...gaps.map(([x, y]) => [x, y] as [string, string]), [a, b] as [string, string]].sort(([x], [y]) => x.localeCompare(y))) {
+    const last = out[out.length - 1];
+    if (last !== undefined && x <= next(last[1])) { if (y > last[1]) last[1] = y; } else out.push([x, y]);
+  }
+  return out;
+}
+
+/** Where each plan's last good reading from its own probe is kept (`sourceState`, filed under "winter" so no Claude Code
+ *  or Codex file query ever counts it): shown, its staleness judged afresh, until a fresh read lands (user 2026-10-19:
+ *  "show the cached usage limits until the fresh re-fetch arrives") — through a failed probe and across a restart. */
+export const PLAN_READINGS_KEY = "plans:last-readings";
+/** The rungs whose reading is kept: each plan's own probe (a fallback rung is re-read on its own). */
+const KEPT_SOURCES: Record<PlanReading["provider"], PlanReading["source"]> = {
+  codex: "codex-app-server", "claude-code": "claude-cli", antigravity: "agy-cli",
+};
+const WINDOW_KINDS = new Set(["five_hour", "weekly", "weekly_scoped", "other"]);
+
+/** PURE: the kept readings, validated — anything malformed is dropped, never trusted (a stored `stale` or `windowKey` is
+ *  ignored: both are judged afresh on every answer). */
+export function parseKeptReadings(state: Record<string, unknown> | undefined): Map<PlanReading["provider"], PlanReading> {
+  const out = new Map<PlanReading["provider"], PlanReading>();
+  const str = (v: unknown, max = 200): string | undefined => (typeof v === "string" && v.length > 0 && v.length <= max ? v : undefined);
+  for (const provider of Object.keys(KEPT_SOURCES) as Array<PlanReading["provider"]>) {
+    const r = state?.[provider];
+    if (typeof r !== "object" || r === null || Array.isArray(r)) continue;
+    const o = r as Record<string, unknown>;
+    const at = finiteNum(o.at);
+    if (o.provider !== provider || o.source !== KEPT_SOURCES[provider] || at === undefined || !Array.isArray(o.windows)) continue;
+    const windows: PlanWindow[] = [];
+    for (const w of o.windows) {
+      if (typeof w !== "object" || w === null) continue;
+      const x = w as Record<string, unknown>;
+      const id = str(x.id, 120);
+      const used = finiteNum(x.usedPercent);
+      if (id === undefined || typeof x.kind !== "string" || !WINDOW_KINDS.has(x.kind) || used === undefined || used < 0 || used > 100) continue;
+      const windowMinutes = finiteNum(x.windowMinutes);
+      const resetsAt = finiteNum(x.resetsAt);
+      const scope = str(x.scope, 120);
+      const severity = str(x.severity, 40);
+      windows.push({
+        id, kind: x.kind as PlanWindow["kind"], usedPercent: used, stale: false,
+        ...(windowMinutes === undefined ? {} : { windowMinutes }), ...(resetsAt === undefined ? {} : { resetsAt }),
+        ...(scope === undefined ? {} : { scope }), ...(severity === undefined ? {} : { severity }),
+      });
+    }
+    if (windows.length === 0) continue;
+    const planType = str(o.planType, 40);
+    const limitReached = str(o.limitReached, 200);
+    const c = o.credits;
+    const credits = typeof c === "object" && c !== null && !Array.isArray(c) ? (() => {
+      const k = c as Record<string, unknown>;
+      const balance = str(k.balance, 40);
+      return {
+        ...(typeof k.hasCredits === "boolean" ? { hasCredits: k.hasCredits } : {}), ...(typeof k.unlimited === "boolean" ? { unlimited: k.unlimited } : {}),
+        ...(balance === undefined ? {} : { balance }),
+      };
+    })() : undefined;
+    out.set(provider, {
+      provider, source: KEPT_SOURCES[provider], at, windows,
+      ...(planType === undefined ? {} : { planType }), ...(limitReached === undefined ? {} : { limitReached }),
+      ...(credits === undefined ? {} : { credits }),
+    });
+  }
+  return out;
+}
+
+/** PURE: the newer of two readings by when they were measured (one with no time loses). */
+export function newerReading(a: PlanReading | undefined, b: PlanReading | undefined): PlanReading | undefined {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return (b.at ?? -Infinity) > (a.at ?? -Infinity) ? b : a;
 }
 
 /** Wait for `p`, at most `ms`. */
@@ -222,6 +384,8 @@ export class UsageService {
   private ingestMore = false;
   private lastTracking: UsageTracking | undefined;
   private codexCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
+  /** Each plan's last good probe reading (`PLAN_READINGS_KEY`), loaded once. */
+  private keptReadings: Map<PlanReading["provider"], PlanReading> | undefined;
   private codexRun: Promise<void> | undefined;
   private claudeCache: { at: number; reading?: PlanReading; failure?: string } | undefined;
   private claudeRun: Promise<void> | undefined;
@@ -241,11 +405,18 @@ export class UsageService {
   private claudeFileOverCapLogged = false;
   /** Claude Code's `stats-cache.json`, parsed only when its mtime or size changed. */
   private statsFile: { stamp: string; stats?: ClaudeStats } | undefined;
-  /** The last applied backfill's inputs (file stamp, transcript cutoff day, today): unchanged → nothing to do. */
+  /** The last estimate refresh's inputs (file stamp, coverage): unchanged → nothing to do. */
   private statsSignature: string | undefined;
+  /** The last row plan's inputs (the estimates, coverage, transcript totals on partial days): unchanged → nothing to do. */
+  private statsRowsSignature: string | undefined;
+  /** Claude Code's `/stats` history state (`CLAUDE_STATS_STATE_KEY`), loaded once. */
+  private statsHistoryState: ClaudeStatsHistory | undefined;
   private statsLogged = new Set<string>();
   /** Test seam: how many times `stats-cache.json` was parsed. */
   claudeStatsParses = 0;
+  /** The background beat (`startBackground`): the slow one's cancel, and each alarmed plan's fast one. */
+  private cancelSlowBeat: (() => void) | undefined;
+  private readonly fastBeats = new Map<AlarmProvider, () => void>();
 
   constructor(private readonly deps: UsageServiceDeps) {
     this.now = deps.now ?? Date.now;
@@ -317,14 +488,14 @@ export class UsageService {
           codexRecordOf(line, state, fileKey("codex", file.path).slice(6, 22), this.deps.pricer, file.mtimeMs))) || more;
       }
       if (tracking.claudeCode && this.deps.claudeHome !== undefined) {
+        const passAt = this.now();
         const files = await claudeCodeTranscripts(this.deps.claudeHome);
         const ccMore = await this.ingestFiles("claude-code", files, (line, _state, file) => claudeCodeRecordOf(line, this.deps.pricer, file.mtimeMs));
         more = ccMore || more;
-        // Transcripts win, EVERY pass (a chunked import, a missing or corrupt stats file included): a synthetic row on a
-        // day the transcripts now cover goes. New history is planned only once the transcripts are all in — its boundary
-        // is the first transcript day.
-        this.dropCoveredSynthetic();
-        if (!ccMore) await this.importClaudeStats(this.deps.claudeHome);
+        this.noteClaudePass(passAt, !ccMore);
+        // Transcripts win, EVERY pass (a chunked import, a missing or corrupt stats file included): the rows are re-planned
+        // against the transcript totals as they are. New estimates only once the transcripts are all in.
+        await this.importClaudeStats(this.deps.claudeHome, !ccMore);
       }
       const opencode = this.deps.opencodeExecutable?.();
       if (tracking.opencode && opencode !== undefined) more = (await this.ingestOpencode(opencode)) || more;
@@ -340,34 +511,69 @@ export class UsageService {
     this.deps.log?.warn?.(msg);
   }
 
-  /** The UTC day of the earliest TRANSCRIPT-derived Claude Code record (synthetic rows never move it). */
-  private cutoffDay(): string | undefined {
-    const earliest = this.deps.db.earliestReal("claude-code");
-    return earliest === undefined ? undefined : utcDay(earliest);
+  private statsState(): ClaudeStatsHistory {
+    this.statsHistoryState ??= parseStatsHistory(this.deps.db.sourceState(CLAUDE_STATS_STATE_KEY));
+    return this.statsHistoryState;
   }
 
-  /** Remove every synthetic Claude Code row on or after the first transcript day — an indexed seek; a write only when
-   *  there is something to remove. Independent of the stats file: it may be missing, corrupt or unchanged. */
-  private dropCoveredSynthetic(): void {
-    const cutoffDay = this.cutoffDay();
-    if (cutoffDay === undefined) return;
-    const covered = this.deps.db.syntheticDedupesFrom("claude-code", Date.parse(`${cutoffDay}T00:00:00Z`));
-    if (covered.length === 0) return;
-    const { removed } = this.deps.db.reconcileSynthetic("claude-code", covered, []);
-    if (removed > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added: 0, removed });
+  private saveStatsState(h: ClaudeStatsHistory): void {
+    this.deps.db.setSourceState(CLAUDE_STATS_STATE_KEY, "claude-code", {
+      ...(h.firstPassAt === undefined ? {} : { firstPassAt: h.firstPassAt }), ...(h.lastPassAt === undefined ? {} : { lastPassAt: h.lastPassAt }),
+      gaps: h.gaps, estimates: Object.fromEntries(h.estimates), planned: h.planned,
+    }, this.now());
   }
 
   /**
-   * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts no
-   * longer cover. The file is parsed only when its mtime or size changed; the rows are re-planned (and re-calibrated)
-   * only when the file or the transcript coverage (the first transcript day) changed — never merely because a day
-   * passed — and written only where they differ. A day the cache no longer lists keeps its rows (history). A missing,
-   * corrupt or over-cap file plans nothing; `dropCoveredSynthetic` runs before this regardless.
+   * Claude Code's transcripts were just read (`complete`: all of them, no chunk left). Note when Winter FIRST read them —
+   * on a DB from before this note, the oldest file read-state (a file read once and never grown since keeps the time of
+   * its first read) — and, when no complete read happened for longer than Claude Code's retention (the daemon not
+   * running, the tracking switch off), the days that may have been emptied in between.
    */
-  private async importClaudeStats(claudeHome: string): Promise<void> {
+  private noteClaudePass(passAt: number, complete: boolean): void {
+    const h = this.statsState();
+    let dirty = false;
+    if (h.firstPassAt === undefined) {
+      h.firstPassAt = Math.min(this.deps.db.firstFileReadAt("claude-code", CLAUDE_STATS_STATE_KEY) ?? passAt, passAt);
+      dirty = true;
+    }
+    const lost = passAt - CLAUDE_TRANSCRIPT_RETENTION_DAYS * DAY;
+    if (h.lastPassAt !== undefined && lost > h.lastPassAt) {
+      const gaps = addGap(h.gaps, utcDay(h.lastPassAt), utcDay(lost));
+      if (gaps !== undefined) { h.gaps = gaps; dirty = true; }
+    }
+    if (complete && (h.lastPassAt === undefined || passAt - h.lastPassAt >= PASS_NOTE_EVERY_MS)) { h.lastPassAt = passAt; dirty = true; }
+    if (dirty) this.saveStatsState(h);
+  }
+
+  /** Which days Winter's Claude Code transcript rows may not hold in full (`StatsCoverage`). */
+  private coverage(): StatsCoverage {
+    const h = this.statsState();
+    const earliest = this.deps.db.earliestReal("claude-code");
+    return {
+      ...(earliest === undefined ? {} : { firstTranscriptDay: utcDay(earliest) }),
+      ...(h.firstPassAt === undefined ? {} : { partialThrough: utcDay(h.firstPassAt - CLAUDE_TRANSCRIPT_RETENTION_DAYS * DAY) }),
+      gaps: h.gaps,
+    };
+  }
+
+  /** Winter's transcript totals (all four kinds) per model on each partial day, keyed like the estimates. An index seek
+   *  per span: partial days hold few transcript rows (most of theirs are gone). */
+  private partialRealTotals(c: StatsCoverage): Map<string, number> {
+    const spans: Array<[number, number]> = [];
+    if (c.partialThrough !== undefined) spans.push([Number.MIN_SAFE_INTEGER, Date.parse(`${c.partialThrough}T00:00:00Z`) + DAY]);
+    for (const [a, b] of c.gaps) spans.push([Date.parse(`${a}T00:00:00Z`), Date.parse(`${b}T00:00:00Z`) + DAY]);
+    const out = new Map<string, number>();
+    for (const [from, to] of spans) {
+      for (const r of this.deps.db.dailyRealTotals("claude-code", from, to)) if (isPartialDay(c, r.day)) out.set(estimateKey(r.model, r.day), r.all);
+    }
+    return out;
+  }
+
+  /** Claude Code's `stats-cache.json`, parsed only when its mtime or size changed; undefined when there is none. */
+  private async readClaudeStats(claudeHome: string): Promise<{ stamp: string; stats?: ClaudeStats } | undefined> {
     const path = join(claudeHome, CLAUDE_STATS_FILE);
     let st: { mtimeMs: number; size: number };
-    try { st = statSync(path); } catch { return; }
+    try { st = statSync(path); } catch { return undefined; }
     const stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
     if (this.statsFile?.stamp !== stamp) {
       const cap = this.deps.claudeStatsMaxBytes ?? CLAUDE_STATS_MAX_BYTES;
@@ -381,33 +587,70 @@ export class UsageService {
       }
       this.statsFile = { stamp, ...(stats === undefined ? {} : { stats }) };
     }
-    const stats = this.statsFile.stats;
-    if (stats === undefined) return;
-    const now = this.now();
-    const today = utcDay(now);
-    const cutoffDay = this.cutoffDay();
-    const signature = `${stamp}|${cutoffDay ?? ""}`;
-    if (signature === this.statsSignature) return;
-    const from = overlapFrom(now);
-    const real = cutoffDay === undefined ? [] : this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
-    const wanted = claudeStatsRecords({ stats, ...(cutoffDay === undefined ? {} : { cutoffDay }), today, real, overlapFromDay: from, pricer: this.deps.pricer });
+    return this.statsFile;
+  }
+
+  /**
+   * Backfill Claude Code's history from its own `/stats` cache (`usage/claude-stats.ts`) for the days its transcripts may
+   * no longer hold in full — the PARTIAL days (`StatsCoverage`): before Winter first read them less Claude Code's
+   * retention, before the first transcript day, and any span Winter was away longer than the retention.
+   *  - After a COMPLETE transcript read, the cache refreshes the estimates (`refreshEstimates`) — parsed only when its
+   *    mtime or size changed, re-estimated only when it or the coverage changed (never merely because a day passed).
+   *    The estimates live in the usage DB: a day the cache stops listing or shrinks keeps its estimate.
+   *  - EVERY pass the rows are re-planned (`statsRows`) when the estimates, the coverage or the transcript totals on
+   *    partial days changed: each partial day gets what its surviving transcripts lack, a day transcripts now cover in
+   *    full loses its row — written only where they differ. A missing, corrupt or over-cap file refreshes nothing;
+   *    the rows still follow the transcripts.
+   */
+  private async importClaudeStats(claudeHome: string, complete: boolean): Promise<void> {
+    const h = this.statsState();
+    const coverage = this.coverage();
+    const coverageKey = JSON.stringify(coverage);
+    if (complete) {
+      const read = await this.readClaudeStats(claudeHome);
+      const signature = `${read?.stamp ?? ""}|${coverageKey}`;
+      if (read?.stats !== undefined && signature !== this.statsSignature) {
+        const now = this.now();
+        const from = overlapFrom(now);
+        const real = this.deps.db.dailyRealTotals("claude-code", Date.parse(`${from}T00:00:00Z`));
+        const r = refreshEstimates(h.estimates, { stats: read.stats, coverage, today: utcDay(now), real, overlapFromDay: from });
+        if (r.changed || !h.planned) {
+          h.estimates = r.estimates;
+          h.planned = true;
+          this.saveStatsState(h);
+          this.statsRowsSignature = undefined;
+        }
+        this.statsSignature = signature;
+      }
+    }
+    if (!h.planned) return; // never estimated yet: the rows already stored stay as they are
+    const real = this.partialRealTotals(coverage);
+    const rowsSignature = `${coverageKey}|${[...real].sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${k}=${v}`).join(",")}`;
+    if (rowsSignature === this.statsRowsSignature) return;
+    const wanted = statsRows(h.estimates, coverage, real, this.deps.pricer);
     const stored = new Map(this.deps.db.syntheticRows("claude-code").map((r) => [r.dedupe, r]));
-    // Covered days were removed by `dropCoveredSynthetic` this very pass; the plan never reaches them.
+    const keep = new Set(wanted.map((r) => r.dedupe));
+    const remove = [...stored.keys()].filter((d) => !keep.has(d));
     const upsert = wanted.filter((r) => { const s = stored.get(r.dedupe); return s === undefined || differs(s, r); });
-    const { removed, added } = this.deps.db.reconcileSynthetic("claude-code", [], upsert);
-    this.statsSignature = signature;
+    const { removed, added } = remove.length + upsert.length > 0 ? this.deps.db.reconcileSynthetic("claude-code", remove, upsert) : { removed: 0, added: 0 };
+    this.statsRowsSignature = rowsSignature;
     if (removed + added > 0) this.deps.log?.info?.("[usage] Claude Code /stats history updated", { added, removed });
   }
 
-  /** Where the Claude Code history came from (the Usage window's footnote). */
+  /** Where the Claude Code history came from (the Usage window's footnote): its first day, and the first day after the
+   *  partial ones — the later of the first transcript day and the day after Winter's first read less the retention;
+   *  with no transcripts at all, the day after the last imported day. */
   history(): UsageHistory {
     const span = this.deps.db.syntheticSpan("claude-code");
     if (span === undefined) return {};
-    // The first transcript day when there is one (every synthetic row lies before it); with no transcripts at all, the
-    // day after the last imported day.
-    const cutoffDay = this.cutoffDay();
-    const before = cutoffDay !== undefined ? utcNoon(cutoffDay) : utcNoon(utcDay(span.last + 86_400_000));
-    return { claudeCodeStats: { from: span.first, before } };
+    const c = this.coverage();
+    let before: string;
+    if (c.firstTranscriptDay === undefined) before = utcDay(span.last + DAY);
+    else {
+      const afterPartial = c.partialThrough === undefined ? c.firstTranscriptDay : utcDay(Date.parse(`${c.partialThrough}T00:00:00Z`) + DAY);
+      before = afterPartial > c.firstTranscriptDay ? afterPartial : c.firstTranscriptDay;
+    }
+    return { claudeCodeStats: { from: span.first, before: utcNoon(before) } };
   }
 
   /**
@@ -574,13 +817,39 @@ export class UsageService {
 
   // ── plans ───────────────────────────────────────────────────────────────────────────────────────
 
-  /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. */
-  async codexPlan(): Promise<PlanReading> {
+  /** A plan's last good probe reading — kept through a failed probe and across a restart; undefined before the first. */
+  private kept(provider: PlanReading["provider"]): PlanReading | undefined {
+    this.keptReadings ??= parseKeptReadings(this.deps.db.sourceState(PLAN_READINGS_KEY));
+    return this.keptReadings.get(provider);
+  }
+
+  /** A probe gave a reading: keep it (memory and usage.db — a failed write keeps it in memory). */
+  private keep(reading: PlanReading): void {
+    if (reading.source !== KEPT_SOURCES[reading.provider] || reading.at === undefined) return;
+    this.kept(reading.provider);
+    this.keptReadings!.set(reading.provider, reading);
+    try {
+      this.deps.db.setSourceState(PLAN_READINGS_KEY, "winter", Object.fromEntries(this.keptReadings!), this.now());
+    } catch { /* kept in memory; the next reading tries again */ }
+  }
+
+  /** A reading as of now: each window's staleness judged afresh from when it was measured. */
+  private judged(r: PlanReading): PlanReading {
+    return { ...r, windows: r.windows.map((w) => ({ ...w, ...staleness(r.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+  }
+
+  /** The Codex plan: Codex's app-server → the newest rollout's `rate_limits` → Winter's own codex-oauth report. Every
+   *  answer judges the plan's alarms. `minAgeMs`: a fast beat's own floor for a fresh spawn (below the throttle). */
+  async codexPlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readCodexPlan(minAgeMs));
+  }
+
+  private async readCodexPlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().codex) return { provider: "codex", source: "disabled", windows: [] };
     // Not on this Mac: no slot at all (user 2026-10-18), whatever an old rollout or Winter's own sign-in could say.
     if (this.deps.codexExecutable() === undefined) return { provider: "codex", source: "not-installed", windows: [] };
     const now = this.now();
-    const every = this.deps.codexAppServerEveryMs ?? 60_000;
+    const every = minAgeMs ?? this.deps.codexAppServerEveryMs ?? 60_000;
     if (this.codexRun !== undefined) {
       await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.codexCache === undefined || now - this.codexCache.at >= every) {
@@ -592,30 +861,43 @@ export class UsageService {
           ...(this.deps.appServerTimeoutMs === undefined ? {} : { timeoutMs: this.deps.appServerTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as string, reading: undefined }));
         this.codexCache = { at: this.now(), ...r };
+        if (r.reading !== undefined) this.keep(r.reading);
+        // Judged as it lands: a read that stopped waiting (`planWaitMs` — a background beat's) answered the cache before.
+        this.judgeAlarms(r.reading);
         if (r.failure !== undefined) this.deps.log?.info?.("[usage] codex app-server gave no plan reading", { reason: r.failure });
       })().finally(() => { this.codexRun = undefined; });
       await within(this.codexRun, this.deps.planWaitMs ?? 2_000);
     }
-    if (this.codexCache?.reading !== undefined) return this.codexCache.reading;
+    // The latest probe's own reading; else the last good one (a failed probe, a restart) against the passive rung — the
+    // newer of the two.
+    if (this.codexCache?.reading !== undefined) return this.judged(this.codexCache.reading);
+    const kept = this.kept("codex");
+    let fromRollout: PlanReading | undefined;
     if (this.deps.codexHome !== undefined) {
       // The passive rung, cached like the spawn (a tree walk + tail reads every 5 s would not be cheap).
       if (this.rolloutCache === undefined || this.now() - this.rolloutCache.at >= (this.deps.fallbackEveryMs ?? 60_000)) {
         this.rolloutCache = { at: this.now(), reading: await codexPlanFromRollouts(await codexRollouts(this.deps.codexHome), this.now()) };
       }
-      const fromRollout = this.rolloutCache.reading;
-      if (fromRollout !== undefined) return { ...fromRollout, windows: fromRollout.windows.map((w) => ({ ...w, ...staleness(fromRollout.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+      fromRollout = this.rolloutCache.reading;
     }
+    const best = newerReading(kept, fromRollout);
+    if (best !== undefined) return this.judged(best);
     const winter = this.deps.winterCodexWindows();
     if (winter.length > 0) return { provider: "codex", source: "winter-codex-oauth", windows: [], statusOnly: winter, at: Math.max(...winter.map((w) => w.at)) };
     return { provider: "codex", source: "none", windows: [] };
   }
 
-  /** The Claude Code plan (`ClaudeCodePlanUsageSource`): Claude Code's own `/usage` → `~/.claude.json`'s cache. */
-  async claudeCodePlan(): Promise<PlanReading> {
+  /** The Claude Code plan (`ClaudeCodePlanUsageSource`): Claude Code's own `/usage` → `~/.claude.json`'s cache. Every
+   *  answer judges the plan's alarms. */
+  async claudeCodePlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readClaudeCodePlan(minAgeMs));
+  }
+
+  private async readClaudeCodePlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().claudeCode) return { provider: "claude-code", source: "disabled", windows: [] };
     if (this.deps.claudeExecutable() === undefined) return { provider: "claude-code", source: "not-installed", windows: [] };
     const now = this.now();
-    const every = this.deps.claudeCliEveryMs ?? 300_000;
+    const every = minAgeMs ?? this.deps.claudeCliEveryMs ?? 300_000;
     if (this.claudeRun !== undefined) {
       await within(this.claudeRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.claudeCache === undefined || now - this.claudeCache.at >= every) {
@@ -634,7 +916,11 @@ export class UsageService {
           cwd, now: this.now,
           ...(this.deps.claudeCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.claudeCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
+        // Kept with the plan's name (a restart forgets `auth status` until its next run).
+        const name = this.claudePlanName?.value;
+        if (r.reading !== undefined) this.keep(name === undefined || r.reading.planType !== undefined ? r.reading : { ...r.reading, planType: name });
         this.claudeCache = { at: this.now(), ...r };
+        this.judgeAlarms(r.reading);
         if (r.failure === "guard" || r.failure === "guard-model-turn") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
           this.deps.log?.warn?.("[usage] claude /usage did not come back as the local command; not asked again until Claude Code changes");
@@ -646,22 +932,32 @@ export class UsageService {
     }
     // The plan's name from `auth status` ("max"), its size from `~/.claude.json` ("20x" → "max_20x", shown "Max 20x").
     const file = this.deps.claudeJsonPath === undefined ? undefined : await this.claudeJsonFile(this.deps.claudeJsonPath);
-    const name = this.claudePlanName?.value;
-    const plan = name === undefined ? undefined : file?.multiple === undefined ? name : `${name}_${file.multiple}`;
-    const named = (r: PlanReading): PlanReading => (plan === undefined || r.planType !== undefined ? r : { ...r, planType: plan });
-    if (this.claudeCache?.reading !== undefined) return named(this.claudeCache.reading);
-    const cached = file?.reading;
-    if (cached !== undefined) return named({ ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) });
+    // A kept reading carries the name it was read with (a restart forgets `auth status` until its next run).
+    const named = (r: PlanReading): PlanReading => {
+      const base = r.planType ?? this.claudePlanName?.value;
+      if (base === undefined) return r;
+      return { ...r, planType: file?.multiple === undefined || /_\d{1,3}x$/.test(base) ? base : `${base}_${file.multiple}` };
+    };
+    if (this.claudeCache?.reading !== undefined) return named(this.judged(this.claudeCache.reading));
+    // The last good `/usage` (a failed probe, a restart) against `~/.claude.json`'s cache — the newer of the two.
+    const best = newerReading(this.kept("claude-code"), file?.reading);
+    if (best !== undefined) return named(this.judged(best));
     return { provider: "claude-code", source: "none", windows: [] };
   }
 
-  /** The Antigravity plan: `agy`'s own `/usage` (no other rung — nothing else of agy's is read). */
-  async antigravityPlan(): Promise<PlanReading> {
+  /** The Antigravity plan: `agy`'s own `/usage` (no other rung — nothing else of agy's is read). Every answer judges
+   *  the plan's alarms. */
+  async antigravityPlan(minAgeMs?: number): Promise<PlanReading> {
+    return this.answered(await this.readAntigravityPlan(minAgeMs));
+  }
+
+  private async readAntigravityPlan(minAgeMs?: number): Promise<PlanReading> {
     if (!this.deps.tracking().antigravity) return { provider: "antigravity", source: "disabled", windows: [] };
     if (this.deps.agyExecutable?.() === undefined) return { provider: "antigravity", source: "not-installed", windows: [] };
     const now = this.now();
-    // A run killed at Winter's own deadline (agy ignored its `--print-timeout`) backs off for hours, not minutes.
-    const every = this.agyCache?.failure === "timeout" ? (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS) : (this.deps.agyCliEveryMs ?? 300_000);
+    // A run killed at Winter's own deadline (agy ignored its `--print-timeout`) backs off for hours, not minutes — a
+    // beat's floor never shortens that.
+    const every = this.agyCache?.failure === "timeout" ? (this.deps.agyTimeoutBackoffMs ?? AGY_TIMEOUT_BACKOFF_MS) : (minAgeMs ?? this.deps.agyCliEveryMs ?? 300_000);
     if (this.agyRun !== undefined) {
       await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
     } else if (this.agyCache === undefined || now - this.agyCache.at >= every) {
@@ -683,6 +979,8 @@ export class UsageService {
           ...(this.deps.agyCliTimeoutMs === undefined ? {} : { timeoutMs: this.deps.agyCliTimeoutMs }),
         })).catch(() => ({ failure: "spawn-failed" as const, reading: undefined }));
         this.agyCache = { at: this.now(), ...r };
+        if (r.reading !== undefined) this.keep(r.reading);
+        this.judgeAlarms(r.reading);
         if (r.failure === "guard") {
           try { this.deps.db.setLatch(key, r.failure, this.now()); } catch { /* the in-memory cache still holds it back for the throttle */ }
           this.deps.log?.warn?.("[usage] agy /usage did not come back as the read-only command; not asked again until Antigravity changes");
@@ -695,9 +993,159 @@ export class UsageService {
       })().finally(() => { this.agyRun = undefined; });
       await within(this.agyRun, this.deps.planWaitMs ?? 2_000);
     }
-    const cached = this.agyCache?.reading;
-    if (cached !== undefined) return { ...cached, windows: cached.windows.map((w) => ({ ...w, ...staleness(cached.at, w.windowMinutes, w.resetsAt, this.now()) })) };
+    // The latest probe's reading, else the last good one (a failed or backed-off probe, a restart).
+    const cached = this.agyCache?.reading ?? this.kept("antigravity");
+    if (cached !== undefined) return this.judged(cached);
     return { provider: "antigravity", source: "none", windows: [] };
+  }
+
+  // ── plan alarms ─────────────────────────────────────────────────────────────────────────────────
+
+  /** A reading as answered: each window carries its stable key, and the plan's alarms are judged against it. */
+  private answered(reading: PlanReading): PlanReading {
+    const keyed: PlanReading = { ...reading, windows: reading.windows.map((w) => ({ ...w, windowKey: planWindowKey(w) })) };
+    this.judgeAlarms(keyed);
+    return keyed;
+  }
+
+  /** Every ARMED alarm, oldest first (a fired one waiting for its acknowledgement is not a tick any more). */
+  alarms(): UsageAlarm[] {
+    return this.deps.db.alarms();
+  }
+
+  /** Every fired alarm whose notice no client has acknowledged yet, in the order they fired — from the DB, so a
+   *  restart, an app away for hours or a busy island never loses one. */
+  firedAlarms(): FiredUsageAlarm[] {
+    try { return this.deps.db.firedAlarms(); } catch { return []; }
+  }
+
+  /** A client acknowledged a fired alarm's notice (dismissed it, opened it, or showed it its full time): the row goes. */
+  ackAlarm(id: string): boolean {
+    const acked = this.deps.db.ackAlarm(id);
+    if (acked) this.noticesChanged();
+    return acked;
+  }
+
+  private noticesChanged(): void {
+    try { this.deps.onAlarmNotices?.(); } catch { /* the island's failure is its own */ }
+  }
+
+  /** Set an alarm (whole percent); one already set for the same window and threshold is answered instead. The plan's
+   *  fast beat starts with its first alarm. Whether the window is already past it is the client's rule: the daemon
+   *  keeps it, and the next fresh reading that meets it fires it. */
+  setAlarm(input: { provider: AlarmProvider; windowKey: string; thresholdPercent: number }): UsageAlarm {
+    const alarm = this.deps.db.addAlarm({
+      id: randomUUID(), provider: input.provider, windowKey: input.windowKey,
+      thresholdPercent: Math.min(100, Math.max(1, Math.round(input.thresholdPercent))), createdAt: this.now(),
+    });
+    this.rescheduleBeats();
+    return alarm;
+  }
+
+  /** Remove an alarm; the plan's fast beat stops with its last one. */
+  removeAlarm(id: string): boolean {
+    const removed = this.deps.db.removeAlarm(id);
+    this.rescheduleBeats();
+    return removed;
+  }
+
+  /**
+   * Fire the alarms a reading meets — ONCE each: a window that is not stale, in a reading measured no earlier than the
+   * alarm was set (an older one is no news about it), whose used share is at the threshold or above. The alarm is
+   * MARKED fired with its notice (`UsageDb.fireAlarm`: `fired_at` set only where it was null) and counts only when THIS
+   * call marked it, so two reads of the same reading — a spawn landing while a client's read answers the cache,
+   * concurrent asks — fire it once. The row then waits, persisted, for a client to acknowledge its notice. Not installed
+   * or tracking off: the reading has no windows, nothing fires, the alarms stay armed.
+   */
+  private judgeAlarms(reading: PlanReading | undefined): void {
+    if (reading === undefined || reading.at === undefined || reading.windows.length === 0) return;
+    let alarms: UsageAlarm[];
+    try { alarms = this.deps.db.alarms().filter((a) => a.provider === reading.provider); } catch { return; }
+    let fired = false;
+    for (const a of alarms) {
+      if (reading.at < a.createdAt) continue;
+      const w = reading.windows.find((x) => !x.stale && planWindowKey(x) === a.windowKey && x.usedPercent >= a.thresholdPercent);
+      if (w === undefined) continue;
+      const notice = {
+        kind: w.kind, ...(w.scope === undefined ? {} : { scope: w.scope }), ...(w.windowMinutes === undefined ? {} : { windowMinutes: w.windowMinutes }),
+        usedPercent: w.usedPercent, ...(w.resetsAt === undefined ? {} : { resetsAt: w.resetsAt }),
+      };
+      try { if (!this.deps.db.fireAlarm(a.id, this.now(), notice)) continue; } catch { continue; }
+      fired = true;
+      this.deps.log?.info?.("[usage] plan alarm fired", { provider: a.provider, window: a.windowKey, threshold: a.thresholdPercent });
+    }
+    if (fired) {
+      this.rescheduleBeats();
+      this.noticesChanged();
+    }
+  }
+
+  // ── the background plan checks ──────────────────────────────────────────────────────────────────
+
+  /**
+   * The background beat (user 2026-10-18, reversing "no background plan polling"): every installed and tracked plan is
+   * read every `backgroundEveryMs` (30 min), alarm or not; a plan with at least one alarm is ALSO read on its own fast
+   * beat — its throttle (Codex 60 s, Claude Code and Antigravity 5 min) — which stops with its last alarm. Each read is
+   * the plan's own ladder (not installed or tracking off answers at once: nothing spawned, nothing fired), and every read
+   * judges the alarms. Unref'd timers: they never hold the daemon. No read at start.
+   */
+  startBackground(): void {
+    if (this.cancelSlowBeat !== undefined) return;
+    this.cancelSlowBeat = this.interval(() => { void this.checkPlans(PLAN_PROVIDERS); }, this.deps.backgroundEveryMs ?? USAGE_BACKGROUND_EVERY_MS);
+    this.rescheduleBeats();
+  }
+
+  stopBackground(): void {
+    this.cancelSlowBeat?.();
+    this.cancelSlowBeat = undefined;
+    for (const cancel of this.fastBeats.values()) cancel();
+    this.fastBeats.clear();
+  }
+
+  /** Test seam: the background beat is running. */
+  get backgroundRunning(): boolean {
+    return this.cancelSlowBeat !== undefined;
+  }
+
+  /** Test seam: the plans on a fast beat now. */
+  get beating(): AlarmProvider[] {
+    return PLAN_PROVIDERS.filter((p) => this.fastBeats.has(p));
+  }
+
+  /** Read these plans now (each answer judges their alarms) — the beats' entry; a failure is the next beat's to retry.
+   *  `fast`: a fast beat ticks just as its cache comes of age (a spawn's own run time ends its age early), so its floor
+   *  is the period less `FAST_BEAT_SLACK_MS` (5 s; at most half the period) — each tick reads, and a client's read in
+   *  between rarely adds a second spawn to a period. */
+  async checkPlans(providers: readonly AlarmProvider[], fast = false): Promise<void> {
+    await Promise.all(providers.map((p) => {
+      const floor = fast ? fastBeatFloor(this.beatMs(p)) : undefined;
+      const read = p === "codex" ? this.codexPlan(floor) : p === "claude-code" ? this.claudeCodePlan(floor) : this.antigravityPlan(floor);
+      return read.catch(() => undefined);
+    }));
+  }
+
+  private beatMs(p: AlarmProvider): number {
+    const own = this.deps.alarmBeatMs?.[p];
+    if (own !== undefined) return own;
+    if (p === "codex") return this.deps.codexAppServerEveryMs ?? 60_000;
+    return p === "claude-code" ? (this.deps.claudeCliEveryMs ?? 300_000) : (this.deps.agyCliEveryMs ?? 300_000);
+  }
+
+  private interval(fn: () => void, ms: number): () => void {
+    return (this.deps.setInterval ?? defaultInterval)(fn, ms);
+  }
+
+  /** A fast beat for each plan with an alarm, none for the rest — only while the background runs. */
+  private rescheduleBeats(): void {
+    if (this.cancelSlowBeat === undefined) return;
+    let wanted: Set<AlarmProvider>;
+    try { wanted = new Set(this.deps.db.alarms().map((a) => a.provider)); } catch { wanted = new Set(); }
+    for (const [p, cancel] of [...this.fastBeats]) {
+      if (!wanted.has(p)) { cancel(); this.fastBeats.delete(p); }
+    }
+    for (const p of PLAN_PROVIDERS) {
+      if (wanted.has(p) && !this.fastBeats.has(p)) this.fastBeats.set(p, this.interval(() => { void this.checkPlans([p], true); }, this.beatMs(p)));
+    }
   }
 
   /** `~/.claude.json`'s plan cache and the plan's size ("20x"): re-parsed only when the file's mtime or size changed;
@@ -812,9 +1260,15 @@ export class UsageService {
       spark: s.buckets.map((b) => b.costUsd), sparkTokens: s.buckets.map((b) => b.tokens),
       ...(plans === undefined ? {} : { plans }),
       tracking: this.deps.tracking(), ingest: this.ingestState(), history: s.history,
+      // The plan alarms, so both surfaces draw their ticks from the answer they already ask for.
+      alarms: this.alarmsSafe(),
       // A source with no plan slot to say "not installed": OpenCode's toggle shows only when it is on this Mac.
       installed: { opencode: this.deps.opencodeExecutable?.() !== undefined },
     };
+  }
+
+  private alarmsSafe(): UsageAlarm[] {
+    try { return this.deps.db.alarms(); } catch { return []; }
   }
 
   /** Run (or join) an ingest pass, waiting at most `ms` for it — what is stored by then is answered. */

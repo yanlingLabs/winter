@@ -105,6 +105,23 @@ struct DispatchPillChildFeed {
     let stop: () -> Void
 }
 
+/// The doors a Dispatch-pill draft carrying attachments goes through (2026-10-19) — the ones a code window's submit
+/// uses (`ShellSessionHost.submit`), on the app's own client. Closures, so a test can hand in fakes.
+struct DispatchPillAttachmentSender {
+    /// The session to stage into and send to, resolved ONCE per submit: the bound one, else created as a first
+    /// message creates it (`AppModel.ensureFocusedSession`). Nil: nothing is sent.
+    let session: () async -> String?
+    /// What the daemon said it takes (hello `features`): a file image's own path in `images`, and `files`. Without
+    /// either, those paths go into the text instead (`resolveComposerAttachments`).
+    let features: () async -> (originalPaths: Bool, attachmentFiles: Bool)
+    /// `session.stageImage` into that session — clipboard data, staged raw.
+    let stage: (_ sessionId: String, _ image: ComposerImageData) async throws -> StagedImage
+    /// `session.send` — or `session.steer` when `steer` — carrying `images` and `files`. It THROWS the daemon's
+    /// refusal: its sentence is the notice, and `image_file_unreadable` makes the pill read and stage that file
+    /// itself (`FieldStateAdapter.composerSend`). A `try?` here would lose both.
+    let send: (_ sessionId: String, _ outgoing: ComposerOutgoing, _ steer: Bool) async throws -> Void
+}
+
 /// Owns the dispatch pill: a bottom-anchored, screen-centred panel that replaces the orb as the
 /// 4-finger tap's surface. Four looks — compact (idle), expanded (typing), full screen (transcript
 /// and composer), and working (compact while a turn runs) — over the ONE dispatch session the orb
@@ -230,6 +247,37 @@ final class DispatchPillController: ObservableObject {
     var currentSessionId: (() -> String?)? {
         didSet { adapter.boundSessionId = { [weak self] in self?.currentSessionId?() } }
     }
+
+    /// Image and file attachments (2026-10-19): the bound session's ROW, read fresh — its mode turns the composer's
+    /// paste/drop intake on (code or dispatch; `composerImageInputEnabled`) and its model is what an image is checked
+    /// against at attach time. Nil (tests, no directory yet) keeps attachments off: a paste types the file's name.
+    var currentSessionRow: (() -> SessionSummary?)? {
+        didSet { adapter.currentSessionRow = { [weak self] in self?.currentSessionRow?() } }
+    }
+
+    /// Re-lists the sessions (the app's directory) — asked when the pill is summoned and the bound session's row is not
+    /// there yet: the directory's first `session.list` can lose its race with the connect, and a long-lived Dispatch
+    /// session announces no `session_created`, so without this the intake (fail-closed without a row) could stay off
+    /// and a paste would type the file's name.
+    var refreshSessionRows: (() async -> Void)?
+
+    /// The model catalogue (`sync.config`) the attach-time image check reads — fetched when an image is attached with
+    /// none loaded yet (`FieldStateAdapter.attachComposerImage`). Nil leaves the check to the daemon, at submit.
+    var fetchModelCatalogue: (() async -> SyncConfigSnapshot?)? {
+        didSet {
+            adapter.onRefreshModelCatalogue = { [weak self] in
+                guard let self, let fetch = self.fetchModelCatalogue else { return }
+                Task { @MainActor [weak self] in
+                    guard let snapshot = await fetch() else { return }
+                    self?.adapter.modelCatalogue = snapshot
+                }
+            }
+        }
+    }
+
+    /// What a draft carrying attachments is sent through (2026-10-19) — the code windows' own door, on the app's
+    /// client. Nil (tests that never attach): a draft with chips is not sent, and the notice says so.
+    var attachmentSender: DispatchPillAttachmentSender?
 
     // MARK: Test seams
 
@@ -366,6 +414,8 @@ final class DispatchPillController: ObservableObject {
         commandMode.workingDirectory = { [weak self] in
             self?.commandDirectory() ?? commandEnvironment.homeDirectory
         }
+        // A draft holding a live chip is never a shell line.
+        commandMode.holdsChips = { [weak self] text in self?.draftHoldsChips(text) ?? false }
         // A run that recorded no session adds to the transcript the way the composer sends: the pill's current
         // conversation at click time, created if there is none.
         commandRuns.onSendToCurrentConversation = { [weak self] text in
@@ -437,6 +487,7 @@ final class DispatchPillController: ObservableObject {
         refreshCards()
         snapToTarget()
         isVisible = true
+        refreshSessionRowIfMissing()
         onScreenPaths.activate()
         reconcileChildFeeds()
         installContent()
@@ -533,6 +584,9 @@ final class DispatchPillController: ObservableObject {
         closedAt = nil
         let hadDraft = draftCache.restore() != nil
         draftCache.clear()
+        // The put-away draft's attachments go with it (the composer is empty while the pill is away — `hide()`
+        // stashed the text — so nothing on screen still holds a chip).
+        if adapter.composerDraft.isEmpty { adapter.resetComposerAttachments() }
         // The option only — never the text.
         if hadDraft { NSLog("[DispatchPill] put-away draft cleared (draft expiry: \(expiry.rawValue))") }
     }
@@ -607,35 +661,47 @@ final class DispatchPillController: ObservableObject {
         // the card either — an approval is a click on ✓; a question's fields send through its own ✓.
         guard !cardHoldsPill else { return }
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        // The `/` menu: a row the arrows moved to runs at once; otherwise the first Enter completes a
-        // partly typed command (or mode) to the closest match, and the next one runs it.
-        if let menu = currentMenu, let selected = menuSelection, menu.matches.contains(selected) {
-            runMenuItem(selected)
-            return
-        }
-        // Command mode: the line runs in the user's shell instead of being sent — only when it was SHOWN purple
-        // (a verdict for this exact text); Return never turns white text into a run.
-        if commandMode.shouldRunOnReturn(text) {
-            runCommand(text)
-            return
-        }
-        if case .complete(let full) = dispatchPillEnterAction(draft: text, currentPolicy: knownPolicy) {
-            adapter.composerDraft = full
-            return
-        }
-        // A command the pill handles itself is never sent (`dispatchPillLocalCommand`).
-        if let command = dispatchPillLocalCommand(text) {
-            runLocalCommand(command)
-            return
+        // A draft holding attachment chips (each a private-use marker character in the text) is a MESSAGE: never the
+        // `/` menu, a shell line or a pill command — the shell would be handed the markers as words.
+        let carriesChips = draftHoldsChips(text)
+        if !carriesChips {
+            // The `/` menu: a row the arrows moved to runs at once; otherwise the first Enter completes a
+            // partly typed command (or mode) to the closest match, and the next one runs it.
+            if let menu = currentMenu, let selected = menuSelection, menu.matches.contains(selected) {
+                runMenuItem(selected)
+                return
+            }
+            // Command mode: the line runs in the user's shell instead of being sent — only when it was SHOWN purple
+            // (a verdict for this exact text); Return never turns white text into a run.
+            if commandMode.shouldRunOnReturn(text) {
+                runCommand(text)
+                return
+            }
+            if case .complete(let full) = dispatchPillEnterAction(draft: text, currentPolicy: knownPolicy) {
+                adapter.composerDraft = full
+                return
+            }
+            // A command the pill handles itself is never sent (`dispatchPillLocalCommand`).
+            if let command = dispatchPillLocalCommand(text) {
+                runLocalCommand(command)
+                return
+            }
         }
         guard adapter.beginComposerSubmit() else { return }
         let stayFullScreen = presentation == .fullScreen
+        // Steer or send is decided at Enter, as the code windows decide it.
+        let steer = session.state.turnRunning
         Task { @MainActor [weak self] in
             guard let self else { return }
-            let ok = await self.onSubmit?(text) ?? false
+            let sentAttachments: Set<Int>?
+            if carriesChips {
+                sentAttachments = await self.sendWithAttachments(text, steer: steer)
+            } else {
+                sentAttachments = await self.onSubmit?(text) == true ? [] : nil
+            }
             self.adapter.endComposerSubmit()
-            guard ok else { return } // failure: the draft stays — never lost
-            self.adapter.composerSendSucceeded(sentDraft: text)
+            guard let sentAttachments else { return } // failure: the draft (and its chips) stays — never lost
+            self.adapter.composerSendSucceeded(sentDraft: text, sentAttachments: sentAttachments)
             self.commandMode.reset()
             self.draftCache.clear()
             self.historyIndex = nil
@@ -649,6 +715,47 @@ final class DispatchPillController: ObservableObject {
 
     /// The stop button.
     func interrupt() { onInterrupt?() }
+
+    // MARK: - Attachments (2026-10-19)
+
+    /// The bound session's row is missing from the directory: re-list once (`refreshSessionRows`). Unwired: nothing.
+    private func refreshSessionRowIfMissing() {
+        guard let rowOf = currentSessionRow, rowOf() == nil, let refresh = refreshSessionRows else { return }
+        Task { @MainActor in await refresh() }
+    }
+
+    /// Whether `text` holds a LIVE attachment chip — a marker the draft still holds an attachment for
+    /// (`ComposerAttachmentDraft.live(in:)`). Never the character alone: a typed private-use glyph (the Apple logo,
+    /// U+F8FF; a Nerd Font or Powerline icon) shares the markers' range and stays plain text — the `/` menu, the pill's
+    /// commands and shell mode all keep working on it, and it is sent unchanged.
+    func draftHoldsChips(_ text: String) -> Bool {
+        !adapter.composerAttachments.live(in: text).isEmpty
+    }
+
+    /// A draft with chips, through the code windows' own door: the session resolved ONCE (the bound one, created as a
+    /// first message creates it), the text serialised with its placeholders and the images staged INTO that session
+    /// (`FieldStateAdapter.composerTextForSend`), then sent — or steered, `steer` — with `images`/`files`
+    /// (`composerSend`, which restages an image file the daemon cannot read, once). Answers the ids of the attachments
+    /// the message carried, or nil when nothing was sent: the daemon's own sentence is on `composerNotice` (shown
+    /// above the pill) and the draft, chips included, stays.
+    func sendWithAttachments(_ text: String, steer: Bool) async -> Set<Int>? {
+        guard let sender = attachmentSender, let sessionId = await sender.session() else {
+            adapter.composerNotice = "couldn't send — try again"
+            return nil
+        }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let stage: (ComposerImageData) async throws -> StagedImage = { image in
+            try await sender.stage(sessionId, image)
+        }
+        let features = await sender.features()
+        guard let outgoing = await adapter.composerTextForSend(trimmed, originalPaths: features.originalPaths,
+                                                               attachmentFiles: features.attachmentFiles,
+                                                               stage: stage) else { return nil }
+        let ok = await adapter.composerSend(outgoing, send: { out in
+            try await sender.send(sessionId, out, steer)
+        }, stage: stage)
+        return ok ? outgoing.sentAttachmentIDs : nil
+    }
 
     // MARK: - Command mode
 
@@ -688,6 +795,8 @@ final class DispatchPillController: ObservableObject {
     /// The `/` menu for what is typed (`dispatchPillMenu`) — never over the picker, a pinned turn or full screen.
     var currentMenu: DispatchPillMenu? {
         guard presentation != .fullScreen, !permissionsPickerOpen, historyIndex == nil else { return nil }
+        // A draft holding a chip is a message: no `/` menu, whose pick would replace the draft and drop the chip.
+        guard !draftHoldsChips(adapter.composerDraft) else { return nil }
         return dispatchPillMenu(draft: adapter.composerDraft, currentPolicy: knownPolicy)
     }
 
@@ -852,9 +961,10 @@ final class DispatchPillController: ObservableObject {
         }
     }
 
-    /// "Clear Draft" (⋯).
+    /// "Clear Draft" (⋯) — its attachments go with it.
     func clearDraft() {
         adapter.composerDraft = ""
+        adapter.resetComposerAttachments()
         draftCache.clear()
         commandMode.reset()
     }
@@ -1670,6 +1780,12 @@ final class DispatchPillController: ObservableObject {
 
     private func wireAdapter() {
         adapter.onSubmit = { [weak self] text in self?.submit(text) }
+        // The composer's notice — why an attachment was not taken, or the daemon's sentence for a refused send — has no
+        // line of its own in the pill: it floats above it as a command's answer does.
+        adapter.$composerNotice
+            .compactMap { $0 }
+            .sink { [weak self] notice in self?.showCommandNotice(notice, seconds: 5) }
+            .store(in: &cancellables)
         adapter.onClearMessage = { [weak self] in self?.clearDraft() }
         adapter.onInterrupt = { [weak self] in self?.interrupt() }
         adapter.onOpenChild = { [weak self] sessionId in self?.onOpenChild?(sessionId) }
