@@ -100,7 +100,7 @@ The helper's clicks into a browser bound as an APP are trusted DOM events in its
 
 ## Focus, the guardian and the user's view
 
-**ComputerV2 never moves the user's view** (user rule: "this shouldn't happen on any app at all ever"). No action may change the user's frontmost app, key focus or desktop. The only exemptions: the consented rung-4 foreground card, the scoped desktop visit (both above), and the focus blip below. The helper engine is `apple/ComputerUse/WinterCUCore`; its contract is `apple/ComputerUse/PROTOCOL.md` (helper `VERSION` 1.21.0 in `apple/ComputerUse/VERSION`; 1.22.0 — `work.lift` — is unreleased, its bump still owed).
+**ComputerV2 never moves the user's view** (user rule: "this shouldn't happen on any app at all ever"). No action may change the user's frontmost app, key focus or desktop. The only exemptions: the consented rung-4 foreground card, the scoped desktop visit (both above), and the focus blip below. The helper engine is `apple/ComputerUse/WinterCUCore`; its contract is `apple/ComputerUse/PROTOCOL.md` (helper `VERSION` 1.22.0 in `apple/ComputerUse/VERSION` — `work.lift` since 1.22.0).
 
 ### The focus blip (`Core/CUCore+Blip.swift`)
 - Used only to re-validate a menu command/shortcut that reads disabled in the background (and its one retry), and for keyboard input (type, paste as keys, key, editing shortcuts) into a window that does not hold the key focus — once per burst of keys, a fresh blip per burst (`CUKeyBlips`). Never for clicks or reads.
