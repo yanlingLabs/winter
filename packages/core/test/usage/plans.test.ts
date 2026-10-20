@@ -298,3 +298,96 @@ describe("the Claude Code plan", () => {
     expect((await installed.svc.claudeCodePlan()).source).toBe("none");
   });
 });
+
+describe("a plan's last good reading is shown until a fresh one lands (user 2026-10-19)", () => {
+  const ROLLOUT_AT = NOW + 10 * 60_000;
+
+  test("Codex: kept through a failed probe with its own time, its staleness judged afresh; a newer rollout wins", async () => {
+    const bin = tempDir("bin");
+    const ok = fakeCodex(bin, "ok", { primary: 12, secondary: 40, resetsAtSec: sec(NOW + 7 * 86_400_000) });
+    const broken = fakeCodex(tempDir("bin2"), "error");
+    let exe = ok.path;
+    let now = NOW;
+    const codexHome = tempDir("codex-home");
+    const { svc } = service({ codexExecutable: () => exe, codexHome, now: () => now, codexAppServerEveryMs: 60_000 });
+    expect((await svc.codexPlan()).source).toBe("codex-app-server");
+    // The next probe fails: the kept reading answers, measured when it was — not "none", not a guess.
+    exe = broken.path;
+    now += 61_000;
+    let plan = await svc.codexPlan();
+    expect([plan.source, plan.at]).toEqual(["codex-app-server", NOW]);
+    expect(plan.windows.map((w) => [w.kind, w.usedPercent, w.stale])).toEqual([["five_hour", 12, false], ["weekly", 40, false]]);
+    // Six hours on (still failing): the five-hour window is older than itself — stale; the weekly one is not.
+    now = NOW + 6 * 3_600_000;
+    plan = await svc.codexPlan();
+    expect(plan.windows.map((w) => [w.kind, w.stale])).toEqual([["five_hour", true], ["weekly", false]]);
+    // A Codex session writes newer limits: the newer reading wins.
+    const file = codexRolloutPath(codexHome, ROLLOUT_AT, "rnew");
+    writeFileSync(file, lines(codexMeta(ROLLOUT_AT, "snew"), codexTurnContext(ROLLOUT_AT, "gpt-5.1"),
+      codexTokenCount(ROLLOUT_AT, { input: 1, cached: 0, output: 1, reasoning: 0 }, { input: 1, cached: 0, output: 1, reasoning: 0 },
+        codexRateLimits(55, 66, { primary: sec(NOW + 8 * 3_600_000), secondary: sec(NOW + 7 * 86_400_000) }))));
+    plan = await svc.codexPlan();
+    expect(plan.source).toBe("codex-rollout");
+    expect(plan.windows.map((w) => w.usedPercent)).toEqual([55, 66]);
+  });
+
+  test("a restart answers the kept reading (usage.db) while the probe fails; off or not installed never shows it", async () => {
+    const ok = fakeCodex(tempDir("bin"), "ok", { primary: 21, secondary: 31, resetsAtSec: sec(NOW + 7 * 86_400_000) });
+    const env = service({ codexExecutable: () => ok.path, now: () => NOW });
+    await env.svc.codexPlan();
+    let tracking = { codex: true, claudeCode: true, antigravity: true, opencode: true };
+    let exe: string | undefined = FAILING;
+    const restarted = new UsageService({
+      db: env.db, pricer, tracking: () => tracking, codexExecutable: () => exe, claudeExecutable: () => undefined,
+      winterCodexWindows: () => [], probeRoot: () => probeRootIn(env.home), planWaitMs: 20_000, now: () => NOW + 120_000,
+    });
+    const plan = await restarted.codexPlan();
+    expect([plan.source, plan.at, plan.windows.map((w) => w.usedPercent)]).toEqual(["codex-app-server", NOW, [21, 31]]);
+    tracking = { ...tracking, codex: false };
+    expect((await restarted.codexPlan()).source).toBe("disabled");
+    tracking = { ...tracking, codex: true };
+    exe = undefined;
+    expect((await restarted.codexPlan()).source).toBe("not-installed");
+  });
+
+  test("Claude Code: the kept /usage beats an older ~/.claude.json, a newer one beats it; the plan's name survives a restart", async () => {
+    const ok = fakeClaude(tempDir("bin"), "ok");
+    const broken = fakeClaude(tempDir("bin2"), "no-report");
+    const jsonPath = join(tempDir("claude-json"), ".claude.json");
+    claudeJson(jsonPath, NOW - 3_600_000, { five_hour: { utilization: 5, resets_at: new Date(NOW + 3_600_000).toISOString() } }, "default_claude_max_20x");
+    let exe = ok.path;
+    let now = NOW;
+    const env = service({ claudeExecutable: () => exe, claudeJsonPath: jsonPath, now: () => now, claudeCliEveryMs: 60_000 });
+    const fresh = await env.svc.claudeCodePlan();
+    expect([fresh.source, fresh.planType]).toEqual(["claude-cli", "max_20x"]);
+    exe = broken.path;
+    now += 61_000;
+    let plan = await env.svc.claudeCodePlan();
+    expect([plan.source, plan.at, plan.planType]).toEqual(["claude-cli", fresh.at, "max_20x"]);
+    expect(plan.windows.map((w) => w.usedPercent)).toEqual(fresh.windows.map((w) => w.usedPercent));
+    // A restart (Claude Code still not answering): the same kept reading, its name included.
+    const restarted = new UsageService({
+      db: env.db, pricer, tracking: () => ({ codex: true, claudeCode: true, antigravity: true, opencode: true }), codexExecutable: () => undefined,
+      claudeExecutable: () => broken.path, claudeJsonPath: jsonPath, winterCodexWindows: () => [], probeRoot: () => probeRootIn(env.home),
+      planWaitMs: 20_000, now: () => now,
+    });
+    plan = await restarted.claudeCodePlan();
+    expect([plan.source, plan.at, plan.planType]).toEqual(["claude-cli", fresh.at, "max_20x"]);
+    // Claude Code refreshes its own cache later: the newer reading wins.
+    claudeJson(jsonPath, now, { five_hour: { utilization: 77, resets_at: new Date(now + 3_600_000).toISOString() } }, "default_claude_max_20x");
+    plan = await restarted.claudeCodePlan();
+    expect([plan.source, plan.windows[0]!.usedPercent]).toEqual(["claude-cache", 77]);
+  });
+
+  test("a malformed kept reading is dropped, never trusted", async () => {
+    const { PLAN_READINGS_KEY, parseKeptReadings } = await import("../../src/usage/service");
+    const { svc, db } = service({ codexExecutable: () => FAILING, now: () => NOW });
+    db.setSourceState(PLAN_READINGS_KEY, "winter", {
+      codex: { provider: "codex", source: "codex-app-server", at: "yesterday", windows: [{ id: "p", kind: "five_hour", usedPercent: 10 }] },
+      "claude-code": { provider: "claude-code", source: "claude-cache", at: NOW, windows: [{ id: "p", kind: "five_hour", usedPercent: 10 }] },
+      antigravity: { provider: "antigravity", source: "agy-cli", at: NOW, windows: [{ id: "p", kind: "hourly", usedPercent: 300 }] },
+    }, NOW);
+    expect(parseKeptReadings(db.sourceState(PLAN_READINGS_KEY)).size).toBe(0);
+    expect((await svc.codexPlan()).source).toBe("none");
+  });
+});

@@ -94,5 +94,9 @@ export function winterSystemPromptFor(assembler: Pick<ContextAssembler, "assembl
     workdirLess: input.primary === undefined,
     extraDirs: input.primary === undefined ? [] : (input.extraDirs ?? []),
     ...(input.runHomeApplied === true ? { runHomeApplied: true } : {}),
+    // Dispatch takes image attachments (2026-10-19), and its base slot is swapped whole, so its own image-path line
+    // (no move/copy licence — it routes file changes to SpawnSession) is asked for explicitly; code keeps the code
+    // line by default; chat never gets one (it takes no attachments).
+    ...(isDispatch ? { imagePathGuidance: "dispatch" as const } : {}),
   });
 }

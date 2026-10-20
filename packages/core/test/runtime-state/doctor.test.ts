@@ -191,6 +191,9 @@ describe("diagnoseRuntimeState — WS-16 §15 read-only diagnostics", () => {
       });
 
       expect(kinds(await diagnoseRuntimeState(home))).toEqual(["db-newer-schema"]);
+      // The finding tells the user the exact way back (an older Winter cannot open this store until the schema is rolled back).
+      const finding = (await diagnoseRuntimeState(home)).find(f => f.kind === "db-newer-schema")!;
+      expect(finding.detail).toContain("winter migrate --cowork-schema --rollback");
     });
   });
 

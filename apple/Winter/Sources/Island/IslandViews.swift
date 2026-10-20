@@ -516,7 +516,7 @@ struct IslandExpandedContent: View {
     @ViewBuilder private var tabBody: some View {
         switch store.tabs.selected?.id {
         case IslandTabRegistry.needsYou.id?: IslandNeedsYouList(store: store, scrolls: scrolls)
-        case IslandTabRegistry.watches.id?: IslandWatchesList(activity: store.activity, scrolls: scrolls)
+        case IslandTabRegistry.watches.id?: IslandWatchesTab(activity: store.activity, scrolls: scrolls)
         case let id?:
             if let tabModels { IslandTabBody(id: id, models: tabModels, scrolls: scrolls) } else { Spacer() }
         default: Spacer()
@@ -716,6 +716,29 @@ struct IslandPointerReader<Content: View>: View {
             content(false)
         }
     }
+}
+
+/// Reads WHERE the island's pointer is (`dispatchPillPointer`, in `DispatchPillView.canvasSpace`) — for a view that
+/// follows it, like a plan line's marker; nil outside the island's panels (no pointer: the window, the gallery) or when
+/// the pointer is off the panel.
+struct IslandPointerLocationReader<Content: View>: View {
+    @ViewBuilder let content: (CGPoint?) -> Content
+    @Environment(\.dispatchPillPointer) private var pointer
+
+    var body: some View {
+        if let pointer {
+            IslandPointerLocationTracking(pointer: pointer, content: content)
+        } else {
+            content(nil)
+        }
+    }
+}
+
+private struct IslandPointerLocationTracking<Content: View>: View {
+    @ObservedObject var pointer: DispatchPillPointer
+    let content: (CGPoint?) -> Content
+
+    var body: some View { content(pointer.location) }
 }
 
 private struct IslandPointerTracking<Content: View>: View {

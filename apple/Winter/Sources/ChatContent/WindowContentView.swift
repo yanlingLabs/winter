@@ -334,7 +334,7 @@ struct WindowContentView<Accessory: View>: View {
                             onSubmit: { adapter.onSubmit(adapter.composerDraft) },
                             usesAdaptiveColors: true,
                             // Composer attachments, inline chips — live only while the adapter's wired
-                            // session row is a code session (the detached window wires it; the orb does not).
+                            // session row is a code or dispatch session (the detached window wires it; the orb does not).
                             imageIntake: adapter.composerImageIntake
                         )
                         .frame(height: 88)
