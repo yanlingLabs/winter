@@ -186,8 +186,8 @@ class PinTests(unittest.TestCase):
         self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
         self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
         self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
-        self.assertEqual(PINS['sdkCommit'],'7e71929d0231be2d77645bfa47ee2b550f3add22')
-        self.assertIn(29,PINS['sdkPin']['mergedPullRequests']);self.assertIn(30,PINS['sdkPin']['mergedPullRequests'])
+        self.assertEqual(PINS['sdkCommit'],'7511bbaedd734c7379bdafdc68c13027f60fe398')
+        for number in (29,30,42,43,44):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
         self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
     def test_the_current_artifact_is_pinned_and_the_last_real_one_before_the_re_pin_is_kept(self):
         self.assertEqual(set(PINS['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
@@ -566,7 +566,7 @@ class RuntimeArtifactPinTests(unittest.TestCase):
     def test_the_pinned_supervisor_reads_exactly_this_shape_when_a_checkout_is_given(self):
         if not self.SDK:self.skipTest('set WINTER_SDK_CHECKOUT to an SDK clone to re-derive')
         text=subprocess.check_output(['git','-C',self.SDK,'show',PINS['sdkCommit']+':packages/runtime/src/guest/linux-supervisor.py'],text=True)
-        self.assertIn("set(config[runtime_key])!={'artifacts'} or set(config[runtime_key]['artifacts'])!={'launcher','executable','ownerLibrary'}",text)
+        self.assertIn("set(config[runtime_key])!=({'artifacts','reader'} if self.runtime_profile==GUIDED_PROFILE else {'artifacts'}) or set(config[runtime_key]['artifacts'])!={'launcher','executable','ownerLibrary'}",text)
         self.assertIn("if set(value)!={'path','sha256'} or not re.fullmatch('[a-f0-9]{64}',value['sha256']):raise Refusal('artifact_pin')",text)
         self.assertIn("st.st_uid!=0 or st.st_nlink!=1 or st.st_mode&0o222 or st.st_size>128*1024*1024",text)
         self.assertIn("RUNTIME_KEYS=(('fresh','freshRuntime'),('host-query-v1','hostQueryRuntime'),(GUIDED_PROFILE,'hostQueryGuidedRuntime'))",text)
