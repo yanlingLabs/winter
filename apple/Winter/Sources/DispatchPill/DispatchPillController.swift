@@ -1067,10 +1067,23 @@ final class DispatchPillController: ObservableObject {
     /// shape springs (`DispatchPillComposerBar`).
     var plumeLayoutWidth: CGFloat { morph.target.width }
 
-    /// The pinned turn's height, or nil when no turn is pinned (the composer shows).
+    /// The pinned turn's height, or nil when no turn is pinned (the composer shows): its WHOLE reply, up to
+    /// `dispatchPillPreviewCeiling` (past it the reply scrolls inside the pill).
     private var previewHeight: CGFloat? {
         guard presentation == .expanded, let preview = turnPreview else { return nil }
-        return dispatchPillPreviewHeight(reply: preview.reply)
+        let measured = previewReplyLayout.flatMap { $0.reply == preview.reply ? $0.height : nil }
+        return dispatchPillPreviewHeight(reply: preview.reply, ceiling: dispatchPillPreviewCeiling(visibleFrame: lockedVisibleFrame),
+                                         measuredReplyHeight: measured)
+    }
+
+    /// The pinned reply's height as its own view laid it out (the measure `previewHeight` trusts over its estimate).
+    private var previewReplyLayout: (reply: String, height: CGFloat)?
+
+    /// `ExpandedPillTurnPreview` laid its reply out: size the pill to exactly it.
+    func previewReplyLaidOut(_ reply: String, height: CGFloat) {
+        if let known = previewReplyLayout, known.reply == reply, abs(known.height - height) <= 0.5 { return }
+        previewReplyLayout = (reply, height)
+        if presentation == .expanded, turnPreview?.reply == reply { retargetMain() }
     }
 
     /// A click on a pinned turn (and Esc there): back to the composer, keyboard included.
@@ -1647,6 +1660,8 @@ final class DispatchPillController: ObservableObject {
 
     var composerBlurRadiusForTesting: CGFloat { max(0, appliedComposerBlur) }
     var composerTextViewForTesting: NSTextView? { composerView?.documentView as? NSTextView }
+    /// The pinned reply's height as its view laid it out (nil until it has).
+    var previewReplyLaidOutHeightForTesting: CGFloat? { previewReplyLayout?.height }
     /// The bar's look as `DispatchPillComposerBar` derives it now (`dispatchPillBarLook`).
     var barLookForTesting: DispatchPillBarLook {
         dispatchPillBarLook(expanded: presentation == .expanded, running: showsTurnRunning, draft: adapter.composerDraft,

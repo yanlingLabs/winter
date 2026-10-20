@@ -248,7 +248,8 @@ struct DispatchPillComposerBar: View {
             // A pinned turn shows ALONE — no composer. The composer stays mounted underneath,
             // invisible, so typing still lands in it (and the first keystroke leaves the turn).
             if let preview {
-                ExpandedPillTurnPreview(preview: preview)
+                ExpandedPillTurnPreview(preview: preview,
+                                        onReplyHeight: { controller.previewReplyLaidOut(preview.reply, height: $0) })
                     .contentShape(Rectangle())
                     .onTapGesture { controller.exitPreview() }
                     .transition(.opacity.animation(.easeOut(duration: 0.2)))
@@ -430,13 +431,28 @@ func dispatchPillBarLook(expanded: Bool, running: Bool, draft: String, cardShown
                                placeholder: placeholder)
 }
 
-/// A pinned turn's height for `reply`, measured at the composer's own face (the size every line of
-/// the turn is drawn at).
-func dispatchPillPreviewHeight(reply: String) -> CGFloat {
+/// A pinned turn's height for `reply`, laid out whole at the preview's text width and the composer's own face (the
+/// size every line of the turn is drawn at), up to `ceiling`. `measuredReplyHeight` is the reply's own laid-out height
+/// once the view has reported it (`DispatchPillController.previewReplyLaidOut`); until then it is measured here.
+func dispatchPillPreviewHeight(reply: String, ceiling: CGFloat, measuredReplyHeight: CGFloat? = nil) -> CGFloat {
     let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
-    let width = ceil((reply as NSString).size(withAttributes: [.font: font]).width)
-    return dispatchPillPreviewHeight(replyWidth: width,
-                                     lineHeight: ceil(NSLayoutManager().defaultLineHeight(for: font)))
+    return dispatchPillPreviewHeight(replyHeight: measuredReplyHeight ?? dispatchPillPreviewReplyHeight(reply),
+                                     lineHeight: ceil(NSLayoutManager().defaultLineHeight(for: font)),
+                                     ceiling: ceiling)
+}
+
+/// The reply's height laid out at `previewTextWidth` in the composer's face — every line, wrapped.
+func dispatchPillPreviewReplyHeight(_ reply: String) -> CGFloat {
+    let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
+    let storage = NSTextStorage(string: reply.isEmpty ? " " : reply, attributes: [.font: font])
+    let layout = NSLayoutManager()
+    let container = NSTextContainer(size: CGSize(width: DispatchPillMetrics.previewTextWidth,
+                                                 height: .greatestFiniteMagnitude))
+    container.lineFragmentPadding = 0
+    layout.addTextContainer(container)
+    storage.addLayoutManager(layout)
+    layout.ensureLayout(for: container)
+    return ceil(layout.usedRect(for: container).height)
 }
 
 /// The draft's single-line width at the composer's own face — what `dispatchPillAccessoryButtonsVisible`

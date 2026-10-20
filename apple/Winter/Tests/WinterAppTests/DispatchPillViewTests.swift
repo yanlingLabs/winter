@@ -30,7 +30,8 @@ final class DispatchPillViewTests: XCTestCase {
         XCTAssertEqual(height(60), 60 + DispatchPillMetrics.composerVerticalPadding)
         XCTAssertEqual(height(2_000), DispatchPillMetrics.maxExpandedHeight, "capped; the text scrolls inside")
         XCTAssertEqual(height(120, preview: 80), 80, "a pinned turn shows alone: its height, not the composer's")
-        XCTAssertEqual(height(0, preview: 900), DispatchPillMetrics.maxExpandedHeight)
+        XCTAssertEqual(height(0, preview: 2_000), dispatchPillPreviewCeiling(visibleFrame: visible),
+                       "a pinned turn grows to its own ceiling (most of the screen), past the typing pill's")
         XCTAssertEqual(dispatchPillMainSize(presentation: .expanded, composerContentHeight: 0,
                                             visibleFrame: visible).width,
                        DispatchPillMetrics.expandedWidth)
@@ -161,25 +162,37 @@ final class DispatchPillViewTests: XCTestCase {
         XCTAssertEqual(preview?.reply, "fix-auth finished: all green")
     }
 
-    func testAPinnedTurnIsSizedToItsReplysLines() {
+    func testAPinnedTurnIsSizedToItsWholeReply() {
         let line: CGFloat = 20
-        let one = dispatchPillPreviewHeight(replyWidth: 120, lineHeight: line)
-        let two = dispatchPillPreviewHeight(replyWidth: DispatchPillMetrics.previewTextWidth + 1, lineHeight: line)
-        let long = dispatchPillPreviewHeight(replyWidth: DispatchPillMetrics.previewTextWidth * 5, lineHeight: line)
+        let one = dispatchPillPreviewHeight(replyHeight: line, lineHeight: line, ceiling: 1000)
+        let six = dispatchPillPreviewHeight(replyHeight: 6 * line, lineHeight: line, ceiling: 1000)
         XCTAssertEqual(one, 2 * DispatchPillMetrics.previewVerticalInset + line + DispatchPillMetrics.previewLineGap + line,
                        "the prompt line and one reply line")
-        XCTAssertEqual(two - one, line, "a second reply line")
-        XCTAssertEqual(long, two, "capped at two reply lines")
-        XCTAssertEqual(dispatchPillPreviewHeight(replyWidth: 0, lineHeight: 1), DispatchPillMetrics.pillHeight,
+        XCTAssertEqual(six - one, 5 * line, "every reply line, never capped at a count")
+        XCTAssertEqual(dispatchPillPreviewHeight(replyHeight: 100 * line, lineHeight: line, ceiling: 300), 300,
+                       "up to the ceiling — the rest scrolls")
+        XCTAssertEqual(dispatchPillPreviewHeight(replyHeight: 0, lineHeight: 1, ceiling: 1000), DispatchPillMetrics.pillHeight,
                        "never smaller than the capsule")
+    }
+
+    func testThePinnedTurnsCeilingIsMostOfTheScreen() {
+        let screen = CGRect(x: 0, y: 0, width: 1440, height: 900)
+        XCTAssertEqual(dispatchPillPreviewCeiling(visibleFrame: screen), 540, "60% of the visible height")
+        XCTAssertEqual(dispatchPillPreviewCeiling(visibleFrame: CGRect(x: 0, y: 0, width: 800, height: 200)),
+                       DispatchPillMetrics.maxExpandedHeight, "never below the typing pill's own ceiling")
+        let main = dispatchPillMainSize(presentation: .expanded, composerContentHeight: 0, previewHeight: 500,
+                                        visibleFrame: screen)
+        XCTAssertEqual(main.height, 500, "a pinned turn is not held to the typing pill's 240")
     }
 
     func testAPinnedTurnsTextIsTheComposersSize() {
         let font = Typography.sansNS(ofSize: Typography.composerFieldSize)
         let lineHeight = ceil(NSLayoutManager().defaultLineHeight(for: font))
-        XCTAssertEqual(dispatchPillPreviewHeight(reply: "ok"),
-                       dispatchPillPreviewHeight(replyWidth: 10, lineHeight: lineHeight),
-                       "measured at the composer's own face")
+        XCTAssertEqual(dispatchPillPreviewReplyHeight("ok"), lineHeight, accuracy: 1, "one line at the composer's face")
+        XCTAssertEqual(dispatchPillPreviewReplyHeight("1\n2\n3\n4\n5\n6"), 6 * lineHeight, accuracy: 6, "six lines")
+        XCTAssertEqual(dispatchPillPreviewHeight(reply: "ok", ceiling: 1000),
+                       dispatchPillPreviewHeight(replyHeight: dispatchPillPreviewReplyHeight("ok"), lineHeight: lineHeight,
+                                                 ceiling: 1000))
     }
 
     // MARK: - Blur while the shape changes
@@ -260,20 +273,23 @@ final class DispatchPillViewTests: XCTestCase {
 
     // MARK: - Turn previews
 
-    func testTheTurnPreviewShortensThePromptAndTakesTheReplysFirstLine() {
+    func testTheTurnPreviewShortensThePromptAndTakesTheWholeReply() {
         let exchanges = [
             Exchange(prompt: "first", reply: "ok"),
-            Exchange(prompt: "Please  look\n at the\tlogs", reply: "\n## Found it\nThe second line"),
+            Exchange(prompt: "Please  look\n at the\tlogs", reply: "\n## Found it\nThe second line\n\n\n- one **bold**\n- two\n\n"),
         ]
         let preview = dispatchPillTurnPreview(exchanges: exchanges, index: 1)
         XCTAssertEqual(preview?.prompt, "Please look at the logs")
-        XCTAssertEqual(preview?.reply, "Found it")
+        XCTAssertEqual(preview?.reply, "Found it\nThe second line\n\n• one bold\n• two")
         XCTAssertEqual(preview?.position, "2/2")
         XCTAssertNil(dispatchPillTurnPreview(exchanges: exchanges, index: 2))
         XCTAssertEqual(dispatchPillTurnPreview(exchanges: [Exchange(prompt: "p", reply: "")], index: 0)?.reply,
                        "no reply yet")
         XCTAssertEqual(dispatchPillTurnPreview(exchanges: [Exchange(prompt: "p", reply: "", aborted: true)], index: 0)?.reply,
                        "stopped")
+        let long = String(repeating: "word ", count: 400)
+        XCTAssertEqual(dispatchPillTurnPreview(exchanges: [Exchange(prompt: "p", reply: long)], index: 0)?.reply,
+                       long.trimmingCharacters(in: .whitespaces), "never cut")
     }
 
     func testShorteningCutsWithAnEllipsis() {

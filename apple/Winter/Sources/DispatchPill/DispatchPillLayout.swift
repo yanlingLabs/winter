@@ -53,8 +53,8 @@ enum DispatchPillMetrics {
     static let previewVerticalInset: CGFloat = 12
     /// Between the prompt line and the reply.
     static let previewLineGap: CGFloat = 4
-    /// How many lines of the reply a pinned turn shows.
-    static let previewReplyLines = 2
+    /// The most of the screen's visible height a pinned turn grows to before its reply scrolls inside it.
+    static let previewMaxScreenShare: CGFloat = 0.6
     /// The text width inside a pinned turn.
     static var previewTextWidth: CGFloat { expandedWidth - 2 * leadingPadding }
     /// How far above the Dock (the visible frame's bottom edge) the pill's bottom sits.
@@ -141,8 +141,14 @@ func dispatchPillMainSize(
     case .compact:
         return CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
     case .expanded:
-        let total = previewHeight ?? max(DispatchPillMetrics.pillHeight,
-                                         composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
+        // A pinned turn shows its whole reply, up to its own ceiling (`dispatchPillPreviewCeiling`); the typing pill
+        // keeps `maxExpandedHeight`.
+        if let previewHeight {
+            return CGSize(width: DispatchPillMetrics.expandedWidth,
+                          height: min(max(previewHeight, DispatchPillMetrics.pillHeight),
+                                      dispatchPillPreviewCeiling(visibleFrame: visibleFrame)))
+        }
+        let total = max(DispatchPillMetrics.pillHeight, composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
         return CGSize(width: DispatchPillMetrics.expandedWidth,
                       height: min(max(total, DispatchPillMetrics.pillHeight), DispatchPillMetrics.maxExpandedHeight))
     case .fullScreen:
@@ -412,8 +418,7 @@ func dispatchPillRevealsReply(
 
 // MARK: - Swiping through turns
 
-/// What the swiped-to-turn band shows: the turn's prompt, shortened to one line, and the first line
-/// of its reply.
+/// What the swiped-to-turn band shows: the turn's prompt, shortened to one line, and its whole reply.
 struct DispatchPillTurnPreview: Equatable {
     let prompt: String
     let reply: String
@@ -421,35 +426,33 @@ struct DispatchPillTurnPreview: Equatable {
     let position: String
 }
 
-/// PURE: a pinned turn's height — the prompt line and as many reply lines as the reply needs (up to
-/// `previewReplyLines`), all at the composer's own text size, plus the insets. `lineHeight` and
-/// `replyWidth` are measured by the caller (`dispatchPillPreviewHeight(reply:)`).
-func dispatchPillPreviewHeight(replyWidth: CGFloat, lineHeight: CGFloat) -> CGFloat {
-    let lines = min(DispatchPillMetrics.previewReplyLines,
-                    max(1, Int((replyWidth / DispatchPillMetrics.previewTextWidth).rounded(.up))))
+/// PURE: the tallest a pinned turn gets — `previewMaxScreenShare` of the screen's visible height, never less than the
+/// typing pill's own ceiling. Past it the reply scrolls inside the pill; it is never cut.
+func dispatchPillPreviewCeiling(visibleFrame: CGRect) -> CGFloat {
+    max(DispatchPillMetrics.maxExpandedHeight, (visibleFrame.height * DispatchPillMetrics.previewMaxScreenShare).rounded(.down))
+}
+
+/// PURE: a pinned turn's height — the prompt line and the WHOLE reply as laid out (`replyHeight`, at
+/// `previewTextWidth`), plus the insets; never smaller than the capsule, never taller than `ceiling`. `lineHeight` and
+/// `replyHeight` are measured by the caller (`dispatchPillPreviewHeight(reply:ceiling:)`, or the reply's own layout).
+func dispatchPillPreviewHeight(replyHeight: CGFloat, lineHeight: CGFloat, ceiling: CGFloat) -> CGFloat {
     let height = 2 * DispatchPillMetrics.previewVerticalInset + lineHeight
-        + DispatchPillMetrics.previewLineGap + CGFloat(lines) * lineHeight
-    return ceil(max(DispatchPillMetrics.pillHeight, height))
+        + DispatchPillMetrics.previewLineGap + max(lineHeight, replyHeight)
+    return min(max(DispatchPillMetrics.pillHeight, ceil(height)), max(DispatchPillMetrics.pillHeight, ceiling))
 }
 
 /// The prompt line of a turn the user did not start — Dispatch reporting on its child sessions.
 let dispatchPillSessionUpdateLabel = "Update from your sessions"
 
-/// The longest a preview line gets before it is cut with "…".
+/// The longest the prompt line gets before it is cut with "…". The reply is never cut.
 let dispatchPillPreviewPromptLimit = 90
-let dispatchPillPreviewReplyLimit = 140
 
 /// PURE: the preview for `exchanges[index]`, or `nil` when the index is out of range.
 func dispatchPillTurnPreview(exchanges: [Exchange], index: Int) -> DispatchPillTurnPreview? {
     guard exchanges.indices.contains(index) else { return nil }
     let exchange = exchanges[index]
     let prompt = dispatchPillShortened(exchange.prompt, limit: dispatchPillPreviewPromptLimit)
-    let firstLine = exchange.reply
-        .components(separatedBy: .newlines)
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-        .first { !$0.isEmpty } ?? ""
-    let reply = dispatchPillShortened(dispatchPillStrippingMarkdownLead(firstLine),
-                                      limit: dispatchPillPreviewReplyLimit)
+    let reply = dispatchPillReplyText(exchange.reply)
     return DispatchPillTurnPreview(
         // A turn with no prompt is Dispatch's own: the daemon woke it to report on the sessions it
         // spawned (`dispatch-wake`, which `SessionReducer` opens as a promptless exchange).
@@ -467,7 +470,27 @@ func dispatchPillShortened(_ text: String, limit: Int) -> String {
     return String(collapsed.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
 }
 
-/// A reply's first line is often a markdown heading or bullet; the preview shows its words.
+/// PURE: the WHOLE reply as a pinned turn shows it (user, 2026-10-20: "it should show the full answer"): every line,
+/// each read as plain words — a heading's or quote's marks dropped, a bullet drawn as "•", bold markers gone — with
+/// runs of blank lines folded to one and none at either end.
+func dispatchPillReplyText(_ reply: String) -> String {
+    var lines: [String] = []
+    for raw in reply.components(separatedBy: .newlines) {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        let indent = String(raw.prefix { $0 == " " || $0 == "\t" }.prefix(6)).replacingOccurrences(of: "\t", with: "  ")
+        let bullet = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ")
+        let words = dispatchPillStrippingMarkdownLead(trimmed)
+        if words.isEmpty {
+            if let last = lines.last, !last.isEmpty { lines.append("") }
+            continue
+        }
+        lines.append(bullet ? indent + "• " + words : words)
+    }
+    while lines.last?.isEmpty == true { lines.removeLast() }
+    return lines.joined(separator: "\n")
+}
+
+/// A reply's line is often a markdown heading or bullet; the preview shows its words.
 func dispatchPillStrippingMarkdownLead(_ line: String) -> String {
     var s = Substring(line)
     while let first = s.first, first == "#" || first == ">" { s = s.dropFirst() }
