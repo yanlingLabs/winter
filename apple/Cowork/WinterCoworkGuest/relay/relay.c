@@ -16,6 +16,9 @@
  *     or for a conversation outside the delivered set, they end the stream. OUT and ERR are read only after the bootstrap-up
  *     `runtime_ready` has been framed, so the host never sees runtime output before it.
  *   * sends a control-up `fault` when PID 1 asks ('X'), and when the host's stream violates the contract (best effort).
+ *   * with WG_FILE_CHANNEL_V1 only (an image that declares the runtime capability `file-channel-v1`; the production build does not): streams 4 and 5 on
+ *     conversation 0, the supervisor's FILE_IN and FILE_OUT pipes (`--file-in` and `--file-out`). FILE_IN goes down through its own 256 KiB ring and its own flow rule
+ *     (common/fileflow.c), FILE_OUT comes back as stream 5, a drain closes FILE_IN FIRST (before PID 1 is told), and FILE_OUT's end is framed before `halting`.
  * Every queue is bounded; overflow, a malformed frame or a vanished peer ends the process, and PID 1 then stops the guest.
  *
  * Production reads the port with plain read(2) because the port is a character device and cannot carry descriptors; the
@@ -25,6 +28,9 @@
 #include "../common/ctl.h"
 #include "../common/ring.h"
 #include "../common/wmx.h"
+#ifdef WG_FILE_CHANNEL_V1
+#include "../common/fileflow.h"
+#endif
 
 #include <errno.h>
 #include <fcntl.h>
@@ -66,6 +72,15 @@ static uint8_t rt_in_storage[4u * 1024u * 1024u];
 /* The host keeps runtime IN in flight (sent with no OUT or ERR byte received since) at or below 1 MiB (contract section 6.2, runtime-flow.json); a quarter of this queue. */
 #define RUNTIME_IN_FLIGHT_LIMIT (1024u * 1024u)
 _Static_assert(sizeof rt_in_storage >= 4u * RUNTIME_IN_FLIGHT_LIMIT, "the IN queue must stay at least four times the host's in-flight bound");
+#ifdef WG_FILE_CHANNEL_V1
+/* FILE_IN has its own ring, four times the most the host may have outstanding (4 request lines of 16 KiB), and never joins the runtime IN queue. */
+static uint8_t file_in_storage[256u * 1024u];
+_Static_assert(sizeof file_in_storage == 4u * WG_FILE_IN_FLIGHT * WG_FILE_REQUEST_BYTES, "the FILE_IN ring is four times the host's file in-flight bound");
+static struct wg_ring file_in_ring;
+static struct wg_fileflow file_flow;
+static int file_in_fd = -1, file_out_fd = -1;
+static int file_active, file_in_ended, file_out_end_sent;
+#endif
 static uint8_t ctl_out_storage[128u * 1024u];
 static uint8_t ctl_payload[CTL_MAX_PAYLOAD];
 static uint8_t frame_scratch[WMX_HEADER_BYTES + WMX_RUNTIME_PREFIX_BYTES + CTL_MAX_PAYLOAD];
@@ -186,6 +201,15 @@ static void fatal_status(enum wmx_status status) {
     die(EXIT_WMX_BASE + (int)status, 1, status);
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+/* The relay holds the only write end of FILE_IN. Closing it is what the supervisor reads as "the host closed its port". */
+static void close_file_in(void) {
+    if (file_in_fd >= 0) { close(file_in_fd); file_in_fd = -1; }
+    wg_ring_clear(&file_in_ring);
+}
+static void finish_file_out(void);
+#endif
+
 static void handle_control(const uint8_t *payload, size_t length) {
     struct wmx_control control;
     enum wmx_status status = wmx_parse_control(payload, length, WMX_DOWN, &control);
@@ -205,6 +229,9 @@ static void handle_control(const uint8_t *payload, size_t length) {
     }
     draining = 1;
     memcpy(drain_nonce, control.stop_nonce, sizeof drain_nonce);
+#ifdef WG_FILE_CHANNEL_V1
+    close_file_in();   /* FIRST, before PID 1 hears of the drain: the file service sees the host's port close and stops answering */
+#endif
     uint8_t message[CTL_DRAIN_PAYLOAD_BYTES];
     memcpy(message, control.stop_nonce, WMX_NONCE_CHARS);
     message[32] = (uint8_t)control.budget_ms; message[33] = (uint8_t)(control.budget_ms >> 8);
@@ -230,6 +257,18 @@ static void handle_frame(void) {
         struct wmx_runtime_prefix prefix;
         status = wmx_parse_runtime_payload(rx.payload, rx.current.length, WMX_DOWN, &prefix);
         if (status != WMX_OK) fatal_status(status);
+#ifdef WG_FILE_CHANNEL_V1
+        if (prefix.stream == WMX_STREAM_FILE_IN) {
+            /* Conversation 0 only is the codec's rule. The stream exists only once PID 1 said the file service is up, and not after its end. */
+            if (!file_active || file_in_ended) fatal_status(WMX_BAD_FIELD);
+            if (prefix.end) file_in_ended = 1;
+            size_t request = rx.current.length - WMX_RUNTIME_PREFIX_BYTES;
+            status = wg_fileflow_request(&file_flow, rx.payload + WMX_RUNTIME_PREFIX_BYTES, request);
+            if (status != WMX_OK) fatal_status(status);
+            if (wg_ring_put(&file_in_ring, rx.payload + WMX_RUNTIME_PREFIX_BYTES, request) != 0) die(EXIT_OVERFLOW, 1, WMX_OVERSIZE);
+            break;
+        }
+#endif
         /* Not delivered yet (the host speaks before `runtime_ready`), outside the delivered set, or after the stream's end. */
         if (!runtime_open || (int)prefix.conversation >= runtime_streams || in_ended) fatal_status(WMX_BAD_FIELD);
         if (prefix.end) in_ended = 1;
@@ -290,6 +329,9 @@ static void on_ctl_message(void) {
         nonce[WMX_NONCE_CHARS] = '\0';
         if (!draining || strcmp(nonce, drain_nonce) != 0 || (tag == CTL_DRAIN_ACK ? drain_acked : (!drain_acked || halting)) || faulted)
             die(EXIT_STATE, 1, WMX_BAD_FIELD);
+#ifdef WG_FILE_CHANNEL_V1
+        if (tag == CTL_HALTING) finish_file_out();   /* the host sees the file service's end BEFORE `halting` */
+#endif
         struct wmx_control message;
         memset(&message, 0, sizeof message);
         message.type = tag == CTL_DRAIN_ACK ? WMX_CONTROL_DRAIN_ACK : WMX_CONTROL_HALTING;
@@ -299,9 +341,17 @@ static void on_ctl_message(void) {
         halting = 1;
         flush_blocking_and_report();
     } else if (tag == CTL_RUNTIME_GO) {
+#ifdef WG_FILE_CHANNEL_V1
+        /* bit 0: one host-query conversation's runtime streams exist; bit 1: the supervisor has a file service (PID 1 passed it --file-channel-fds) */
+        if (length != 1 || ctl_reader.payload[0] > 3 || runtime_open || draining) die(EXIT_STATE, 1, WMX_BAD_FIELD);
+        file_active = (ctl_reader.payload[0] & 2) != 0;
+        runtime_open = 1;
+        runtime_streams = ctl_reader.payload[0] & 1;
+#else
         if (length != 1 || ctl_reader.payload[0] > 1 || runtime_open || draining) die(EXIT_STATE, 1, WMX_BAD_FIELD);
         runtime_open = 1;
         runtime_streams = ctl_reader.payload[0];
+#endif
         if (!runtime_streams) { rt_out_eof = rt_err_eof = 1; out_end_sent = err_end_sent = 1; rt_in_dead = 1; }
     } else if (tag == CTL_FAULT) {
         if ((length != 1 && length != 1 + WMX_NONCE_CHARS) || ctl_reader.payload[0] < WMX_FAULT_UNMOUNT_FAILED || ctl_reader.payload[0] > WMX_FAULT_INTERNAL || faulted || halting)
@@ -328,11 +378,21 @@ static void check_descriptor(int fd, int want_fifo, const char *role) {
     if (want_fifo && !S_ISFIFO(st.st_mode)) die(EXIT_DESCRIPTOR, 0, WMX_OK);
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+#define DESCRIPTORS 8
+#else
+#define DESCRIPTORS 6
+#endif
+
 static void reject_stray_descriptors(void) {
-    int allowed[6] = { port_fd, ctl_in_fd, ctl_out_fd, rt_in_fd, rt_out_fd, rt_err_fd };
+    int allowed[DESCRIPTORS] = { port_fd, ctl_in_fd, ctl_out_fd, rt_in_fd, rt_out_fd, rt_err_fd
+#ifdef WG_FILE_CHANNEL_V1
+        , file_in_fd, file_out_fd
+#endif
+    };
     for (int fd = 3; fd < MAX_STRAY_SCAN; fd++) {
         int known = 0;
-        for (int i = 0; i < 6; i++) known |= allowed[i] == fd;
+        for (int i = 0; i < DESCRIPTORS; i++) known |= allowed[i] == fd;
         if (!known && fcntl(fd, F_GETFD) != -1) die(EXIT_STRAY_FD, 0, WMX_OK);
     }
 }
@@ -344,10 +404,18 @@ static int parse_fd(const char *text) {
 }
 
 static void parse_arguments(int argc, char **argv) {
-    static const char *const names[6] = { "--port", "--ctl-in", "--ctl-out", "--rt-in", "--rt-out", "--rt-err" };
-    int *slots[6] = { &port_fd, &ctl_in_fd, &ctl_out_fd, &rt_in_fd, &rt_out_fd, &rt_err_fd };
-    if (argc != 13) _exit(EXIT_ARGUMENTS);
-    for (int i = 0; i < 6; i++) {
+    static const char *const names[DESCRIPTORS] = { "--port", "--ctl-in", "--ctl-out", "--rt-in", "--rt-out", "--rt-err"
+#ifdef WG_FILE_CHANNEL_V1
+        , "--file-in", "--file-out"
+#endif
+    };
+    int *slots[DESCRIPTORS] = { &port_fd, &ctl_in_fd, &ctl_out_fd, &rt_in_fd, &rt_out_fd, &rt_err_fd
+#ifdef WG_FILE_CHANNEL_V1
+        , &file_in_fd, &file_out_fd
+#endif
+    };
+    if (argc != 1 + 2 * DESCRIPTORS) _exit(EXIT_ARGUMENTS);
+    for (int i = 0; i < DESCRIPTORS; i++) {
         if (strcmp(argv[1 + 2 * i], names[i]) != 0) _exit(EXIT_ARGUMENTS);
         *slots[i] = parse_fd(argv[2 + 2 * i]);
         if (*slots[i] < 0) _exit(EXIT_ARGUMENTS);
@@ -368,6 +436,39 @@ static void pump_up(int fd, enum wmx_stream stream, int *end_sent) {
     }
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+/* One read of the supervisor's FILE_OUT pipe, framed as stream 5; its end becomes an empty frame with the end flag. The supervisor is the guest's own, so a response the
+ * flow rule refuses (a byte with no request outstanding, a line over 384 KiB) is a broken guest, not a host violation: the relay leaves and PID 1 stops the guest. */
+static void pump_file_out(void) {
+    ssize_t n = read(file_out_fd, up_chunk + WMX_RUNTIME_PREFIX_BYTES, RUNTIME_CHUNK);
+    if (n > 0) {
+        enum wmx_status status = wg_fileflow_response(&file_flow, up_chunk + WMX_RUNTIME_PREFIX_BYTES, (size_t)n);
+        if (status != WMX_OK) die(EXIT_STATE, 1, status);
+        wmx_write_runtime_prefix(up_chunk, 0, WMX_STREAM_FILE_OUT, 0);
+        enqueue_up(WMX_CLASS_RUNTIME, up_chunk, WMX_RUNTIME_PREFIX_BYTES + (size_t)n);
+    } else if (n == 0 || (errno != EAGAIN && errno != EINTR)) {
+        wmx_write_runtime_prefix(up_chunk, 0, WMX_STREAM_FILE_OUT, 1);
+        enqueue_up(WMX_CLASS_RUNTIME, up_chunk, WMX_RUNTIME_PREFIX_BYTES);
+        file_out_end_sent = 1;
+    }
+}
+
+/* Before `halting` the supervisor is gone (PID 1 stops it first): whatever it wrote is read to the end, and FILE_OUT's end is framed exactly once. */
+static void finish_file_out(void) {
+    if (!file_active || !runtime_ready_framed) return;
+    while (!file_out_end_sent && wg_ring_free(&out_ring) >= RUNTIME_GATE) {
+        size_t before = wg_ring_used(&out_ring);
+        pump_file_out();
+        if (!file_out_end_sent && wg_ring_used(&out_ring) == before) break;   /* nothing more to read now (a writer is still open) */
+    }
+    if (!file_out_end_sent) {
+        wmx_write_runtime_prefix(up_chunk, 0, WMX_STREAM_FILE_OUT, 1);
+        enqueue_up(WMX_CLASS_RUNTIME, up_chunk, WMX_RUNTIME_PREFIX_BYTES);
+        file_out_end_sent = 1;
+    }
+}
+#endif
+
 int main(int argc, char **argv) {
     parse_arguments(argc, argv);
     signal(SIGPIPE, SIG_IGN);
@@ -387,9 +488,17 @@ int main(int argc, char **argv) {
     check_descriptor(rt_in_fd, 1, "rt-in");
     check_descriptor(rt_out_fd, 1, "rt-out");
     check_descriptor(rt_err_fd, 1, "rt-err");
+#ifdef WG_FILE_CHANNEL_V1
+    check_descriptor(file_in_fd, 1, "file-in");
+    check_descriptor(file_out_fd, 1, "file-out");
+#endif
     reject_stray_descriptors();
-    int all[6] = { port_fd, ctl_in_fd, ctl_out_fd, rt_in_fd, rt_out_fd, rt_err_fd };
-    for (int i = 0; i < 6; i++) if (set_nonblocking(all[i], 1) != 0) die(EXIT_DESCRIPTOR, 0, WMX_OK);
+    int all[DESCRIPTORS] = { port_fd, ctl_in_fd, ctl_out_fd, rt_in_fd, rt_out_fd, rt_err_fd
+#ifdef WG_FILE_CHANNEL_V1
+        , file_in_fd, file_out_fd
+#endif
+    };
+    for (int i = 0; i < DESCRIPTORS; i++) if (set_nonblocking(all[i], 1) != 0) die(EXIT_DESCRIPTOR, 0, WMX_OK);
 
     wmx_rx_init(&rx, rx_payload, sizeof rx_payload);
     rx.limit[WMX_CLASS_BOOTSTRAP] = WMX_GUEST_MAX_BOOTSTRAP_DOWN;
@@ -398,15 +507,23 @@ int main(int argc, char **argv) {
     wg_ring_init(&out_ring, out_storage, sizeof out_storage);
     wg_ring_init(&rt_in_ring, rt_in_storage, sizeof rt_in_storage);
     wg_ring_init(&ctl_out_ring, ctl_out_storage, sizeof ctl_out_storage);
+#ifdef WG_FILE_CHANNEL_V1
+    wg_ring_init(&file_in_ring, file_in_storage, sizeof file_in_storage);
+    wg_fileflow_init(&file_flow);
+#endif
     ctl_reader_init(&ctl_reader, ctl_payload, sizeof ctl_payload, "UKHGX");
 
     long long connect_deadline = now_ms() + PORT_CONNECT_WAIT_MS;
     uint8_t buffer[65536];
     for (;;) {
-        struct pollfd fds[6];
-        enum { PORT, CTL_IN, CTL_OUT, RT_IN, RT_OUT, RT_ERR };
+        struct pollfd fds[DESCRIPTORS];
+        enum { PORT, CTL_IN, CTL_OUT, RT_IN, RT_OUT, RT_ERR
+#ifdef WG_FILE_CHANNEL_V1
+            , FILE_IN, FILE_OUT
+#endif
+        };
         memset(fds, 0, sizeof fds);
-        for (int i = 0; i < 6; i++) fds[i].fd = -1;
+        for (int i = 0; i < DESCRIPTORS; i++) fds[i].fd = -1;
         fds[PORT].fd = port_fd; fds[PORT].events = POLLIN | ((connected_once && wg_ring_used(&out_ring)) ? POLLOUT : 0);
         fds[CTL_IN].fd = ctl_in_fd; fds[CTL_IN].events = POLLIN;
         fds[CTL_OUT].fd = ctl_out_fd; fds[CTL_OUT].events = wg_ring_used(&ctl_out_ring) ? POLLOUT : 0;
@@ -414,9 +531,13 @@ int main(int argc, char **argv) {
         int room = wg_ring_free(&out_ring) >= RUNTIME_GATE;
         if (runtime_open && runtime_ready_framed && !out_end_sent && room) { fds[RT_OUT].fd = rt_out_fd; fds[RT_OUT].events = POLLIN; }
         if (runtime_open && runtime_ready_framed && !err_end_sent && room) { fds[RT_ERR].fd = rt_err_fd; fds[RT_ERR].events = POLLIN; }
+#ifdef WG_FILE_CHANNEL_V1
+        if (file_in_fd >= 0 && wg_ring_used(&file_in_ring)) { fds[FILE_IN].fd = file_in_fd; fds[FILE_IN].events = POLLOUT; }
+        if (runtime_open && runtime_ready_framed && file_active && !file_out_end_sent && room) { fds[FILE_OUT].fd = file_out_fd; fds[FILE_OUT].events = POLLIN; }
+#endif
         long long wait = connected_once ? -1 : connect_deadline - now_ms();
         if (!connected_once && wait <= 0) die(EXIT_NEVER_CONNECTED, 0, WMX_OK);
-        int ready = poll(fds, 6, connected_once ? -1 : (int)(wait > 100 ? 100 : wait));
+        int ready = poll(fds, DESCRIPTORS, connected_once ? -1 : (int)(wait > 100 ? 100 : wait));
         if (ready < 0) { if (errno == EINTR) continue; die(EXIT_INTERNAL, 0, WMX_OK); }
 
         short port_events = fds[PORT].revents;
@@ -470,6 +591,18 @@ int main(int argc, char **argv) {
         }
         /* The end of the host's IN stream closes the supervisor's input once everything before it was written. */
         if (in_ended && rt_in_fd >= 0 && !wg_ring_used(&rt_in_ring)) { close(rt_in_fd); rt_in_fd = -1; rt_in_dead = 1; }
+#ifdef WG_FILE_CHANNEL_V1
+        if (fds[FILE_IN].fd >= 0 && (fds[FILE_IN].revents & (POLLOUT | POLLERR | POLLHUP))) {
+            const uint8_t *run;
+            size_t n = wg_ring_peek(&file_in_ring, &run);
+            ssize_t written = write(file_in_fd, run, n);
+            if (written > 0) wg_ring_drop(&file_in_ring, (size_t)written);
+            else if (written < 0 && errno != EAGAIN && errno != EINTR) close_file_in();   /* the file service is gone: the host's requests are dropped, not the guest */
+        }
+        /* The end of the host's FILE_IN closes the supervisor's side once everything before it was written. */
+        if (file_in_ended && file_in_fd >= 0 && !wg_ring_used(&file_in_ring)) close_file_in();
+        if (fds[FILE_OUT].fd >= 0 && (fds[FILE_OUT].revents & (POLLIN | POLLHUP))) pump_file_out();
+#endif
         if (fds[RT_OUT].fd >= 0 && (fds[RT_OUT].revents & (POLLIN | POLLHUP)))
             pump_up(rt_out_fd, WMX_STREAM_OUT, &out_end_sent);
         if (fds[RT_ERR].fd >= 0 && (fds[RT_ERR].revents & (POLLIN | POLLHUP)))

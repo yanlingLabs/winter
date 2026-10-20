@@ -27,11 +27,43 @@ static void note(struct wg_boot *boot, const char *code) { boot->ops->log(boot->
 
 static const char *const PURPOSES[2] = { "data", "environment" };
 
+#ifdef WG_FILE_CHANNEL_V1
+static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
+
+/* A root's `source` as PID 1 will walk it: /workspace/ and then components of [A-Za-z0-9._-], none empty, "." or ".." (the helper checked the same; PID 1 acts on it, so it checks again). */
+static int root_source_ok(const uint8_t *text, size_t length) {
+    static const char prefix[] = "/workspace/";
+    if (length < sizeof prefix || memcmp(text, prefix, sizeof prefix - 1) != 0) return 0;   /* (the length is a byte: at most WG_ROOT_SOURCE_MAX) */
+    size_t component = 0;
+    for (size_t i = sizeof prefix - 1; i <= length; i++) {
+        char c = i < length ? (char)text[i] : '/';
+        if (c == '/') {
+            const uint8_t *start = text + i - component;
+            if (component == 0 || (component == 1 && start[0] == '.') || (component == 2 && start[0] == '.' && start[1] == '.')) return 0;
+            component = 0;
+        } else {
+            int ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-';
+            if (!ok || ++component > 64) return 0;
+        }
+    }
+    return 1;
+}
+#endif
+
 int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct wg_conversation_set *out) {
+#ifdef WG_FILE_CHANNEL_V1
+    int extended = length >= 1 && (payload[0] & WG_PAYLOAD_EXTENDED) != 0;
+    unsigned profile_byte = length >= 1 ? payload[0] & ~WG_PAYLOAD_EXTENDED : 0;
+    if (length < 2 || profile_byte > 2 || payload[1] < 1 || payload[1] > WG_CONVERSATIONS_MAX) return -1;
+    if (profile_byte != 0 && payload[1] != 1) return -1;   /* N2: ONE host-query conversation per guest */
+    memset(out, 0, sizeof *out);
+    out->profile = profile_byte;
+#else
     if (length < 2 || payload[0] > 2 || payload[1] < 1 || payload[1] > WG_CONVERSATIONS_MAX) return -1;
     if (payload[0] != 0 && payload[1] != 1) return -1;   /* N2: ONE host-query conversation per guest */
     memset(out, 0, sizeof *out);
     out->profile = payload[0];
+#endif
     out->count = payload[1];
     size_t at = 2;
     for (unsigned i = 0; i < out->count; i++) {
@@ -51,6 +83,36 @@ int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct 
         at += id_length;
         for (unsigned j = 0; j < i; j++) if (strcmp(out->session_id[j], out->session_id[i]) == 0) return -1;
     }
+#ifdef WG_FILE_CHANNEL_V1
+    if (extended) {
+        if (length - at < 4) return -1;
+        out->browse_uid = le32(payload + at);
+        at += 4;
+        if (out->browse_uid != 0 && (out->browse_uid < WG_UNIX_ID_MIN || out->browse_uid > WG_UNIX_ID_MAX)) return -1;
+        for (unsigned i = 0; i < out->count; i++) {
+            if (length - at < 5) return -1;
+            uint32_t gid = le32(payload + at);
+            unsigned roots = payload[at + 4];
+            at += 5;
+            if (gid < WG_UNIX_ID_MIN || gid > WG_UNIX_ID_MAX || roots < 1 || roots > WG_ROOTS_MAX) return -1;
+            out->workspace_gid[i] = gid;
+            out->root_count[i] = roots;
+            for (unsigned r = 0; r < roots; r++) {
+                if (length - at < 1) return -1;
+                size_t source_length = payload[at++];
+                if (length - at < source_length || !root_source_ok(payload + at, source_length)) return -1;
+                memcpy(out->root_source[i][r], payload + at, source_length);
+                out->root_source[i][r][source_length] = '\0';
+                at += source_length;
+            }
+        }
+        /* The browse uid is a fourth kind of id beside runtime uids, tool uids and workspace gids: it is none of the ones PID 1 can see. */
+        for (unsigned i = 0; i < out->count; i++)
+            if (out->browse_uid != 0 && (out->browse_uid == out->runtime_uid[i] || out->browse_uid == out->workspace_gid[i])) return -1;
+        for (unsigned i = 0; i < out->count; i++)
+            for (unsigned j = 0; j < out->count; j++) if (out->workspace_gid[i] == out->runtime_uid[j]) return -1;
+    }
+#endif
     if (length - at < 2) return -1;
     out->json = (const char *)payload + at;
     out->json_length = length - at;
@@ -182,8 +244,24 @@ static void start_conversations(struct wg_boot *boot, const uint8_t *payload, si
                                                           config_buffer, sizeof config_buffer, &config_length);
     if (built == WG_CONFIG_RUNTIME_SHAPE) { conversations_failed(boot, 2, "runtime-artifacts-invalid"); return; }   /* the image's own file is not what the supervisor reads */
     if (built != WG_CONFIG_OK) { conversations_failed(boot, 1, "config-refused"); return; }
+#ifdef WG_FILE_CHANNEL_V1
+    int start_flags = set.profile != 0 ? WG_START_PORTS : 0;
+    if (set.browse_uid != 0) {
+        uint64_t device = 0;
+        if (ops->read_data_device(ops->ctx, &device) != 0 || wg_add_file_channel(config_buffer, config_length, sizeof config_buffer, set.browse_uid, device, &config_length) != 0) {
+            conversations_failed(boot, 2, "file-channel-config-failed");
+            return;
+        }
+        start_flags |= WG_START_FILE_CHANNEL;
+    }
+#endif
     if (ops->prepare_conversation_dirs(ops->ctx, &set) != 0) { conversations_failed(boot, 2, "conversation-dirs-failed"); return; }
+#ifdef WG_FILE_CHANNEL_V1
+    if (ops->start_supervisor(ops->ctx, config_buffer, config_length, start_flags) != 0) { conversations_failed(boot, 2, "supervisor-start-failed"); return; }
+    boot->conv_file_channel = (start_flags & WG_START_FILE_CHANNEL) != 0;
+#else
     if (ops->start_supervisor(ops->ctx, config_buffer, config_length, set.profile != 0) != 0) { conversations_failed(boot, 2, "supervisor-start-failed"); return; }
+#endif
     boot->supervisor_started = 1;
     boot->supervisor_alive = 1;
     boot->conv_state = WG_CONV_STARTING;
@@ -308,6 +386,9 @@ void wg_boot_supervisor_ready(struct wg_boot *boot) {
     /* The relay first: its pipe carries the helper's `runtime_ready` right after this, so no runtime frame can be answered before it
      * admits them. */
     uint8_t streams = boot->conv_profile != 0 ? 1 : 0;
+#ifdef WG_FILE_CHANNEL_V1
+    if (boot->conv_file_channel) streams |= 2;   /* bit 1: the supervisor has a file service, so the relay admits streams 4 and 5 */
+#endif
     boot->ops->to_relay(boot->ops->ctx, CTL_RUNTIME_GO, &streams, 1);
     answer_conversations(boot, 0);
 }
