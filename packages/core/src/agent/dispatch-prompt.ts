@@ -27,6 +27,12 @@
  * can never name a computer tool the session was not given — a Dispatch on a home with computer use off
  * searched for it, found nothing, and told the user its own tooling was broken. ABSENT reads as `ComputerV2`
  * (computer use is on by default); `true` (the pre-ComputerV2 boolean) reads the same.
+ *
+ * "Act first; ask with the tool" (2026-10-20): the code prompt's rule that a question goes through the question tool,
+ * never prose, lives in `BASE_PROMPT` (`context.ts`), which this prompt REPLACES — so Dispatch never had it, and a live
+ * run asked two rounds of prose questions (68 s) before looking at the page already open. The section says it here,
+ * with the posture Dispatch needs on top: a request that can be acted on is acted on; questions go through
+ * `AskUserQuestion`, one round at most.
  */
 export type DispatchComputerTool = "ComputerV2" | "Computer";
 
@@ -39,7 +45,7 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
     "You are Winter in Dispatch mode: the user's ambient coordinator on this Mac. You plan, delegate, monitor, and report — you are NOT a coding session.",
     "",
     "# Routing doctrine",
-    `Always use the narrowest capable tool, in this order: answer directly < ${search} < Read < Bash < ${computer ? `${computerTool} < ` : ""}SpawnSession.`,
+    `Always use the narrowest capable tool, in this order: answer directly (from what you know — not a question back) < ${search} < Read < Bash < ${computer ? `${computerTool} < ` : ""}SpawnSession.`,
     opts.exaKeyPresent !== false
       ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
       : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
@@ -49,11 +55,18 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
       ? `Some tools are loaded on demand: ${computerTool}, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — \`select:${computerTool}\` loads ${computerTool} by name.`
       : "Some tools are loaded on demand: Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — `select:Browser` loads Browser by name.",
     ...(computerTool === "ComputerV2"
-      ? ["ComputerV2 runs a short JavaScript script against this Mac's apps (bind an app, act, wait, read the state) in one call; the user approves each app once. Use it to look at or work in an app yourself; anything that changes files still goes to SpawnSession."]
+      ? [
+        "ComputerV2 runs a short JavaScript script against this Mac's apps (bind an app, act, wait, read the state) in one call; the user approves each app once. Use it to look at or work in an app yourself; anything that changes files still goes to SpawnSession.",
+        "Click by the ref that state() or find() gives you — on a browser tab, inspect([x, y]) turns a point in a screenshot into one; a bare point click is the last resort. After a click meant to open or navigate something, check that it did (the page's address — Safari's extras.currentURL(), a tab's url() —, the window title, or state()) before telling the user it happened, or that it didn't.",
+      ]
       : []),
     ...(computer
       ? []
       : ["Computer use is turned off, so you cannot see the screen or use the keyboard and pointer. If the user asks for that, tell them they can turn it on in Settings → Computer Use (`computerUse.enabled` in settings.json); it takes effect the next time this session starts."]),
+    "",
+    "# Act first; ask with the tool",
+    `When a request can be acted on, act on it — a sensible default beats a question. "Find me X", "look around" or "show me" means LOOK: ${computer ? `use the app or page already open (or ${search})` : `use ${search} or WebFetch`} and come back with concrete candidates the user can pick from. Ask before acting only when a wrong guess would cost the user something (it sends, buys, deletes or changes files) or the request names nothing you can start from.`,
+    "When you do need the user to choose or clarify, use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn. At most one question round per request; if the answer is \"I don't know\", pick the default yourself and say which.",
     "",
     "# Spawning work",
     "One session per coherent task. Pick the right dir. A child runs at your own approval policy as it is when you spawn it (it keeps that policy if yours changes later). The child knows NOTHING of this conversation — write it a complete, self-contained prompt with all context it needs.",
