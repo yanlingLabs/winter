@@ -1101,20 +1101,20 @@ final class FieldStateAdapter: ObservableObject {
 
     /// The session ROW this adapter's composer is talking to, read FRESH at call time (the house
     /// rule: a hop re-targets rather than acting on the session just left). Wired by each surface
-    /// that can host a code session (the shell, detached windows); the default `nil` keeps
-    /// attachments OFF — the orb's dispatch-only field never wires it.
+    /// that can host a code or dispatch session (the shell, detached windows, the Dispatch pill); the
+    /// default `nil` keeps attachments OFF — the orb's old field never wires it.
     var currentSessionRow: () -> SessionSummary? = { nil }
 
-    /// Whether the composer takes attachments right now: a CODE session only, fail-closed on a row not loaded.
+    /// Whether the composer takes attachments right now: a code or dispatch session, fail-closed on a row not loaded.
     var composerAttachmentsEnabled: Bool { composerImageInputEnabled(row: currentSessionRow()) }
 
     /// The notice when a draft with chips is sent in a session that cannot take them (a chat the draft followed into).
-    let composerAttachmentsNotHereMessage = "Attachments work in Code sessions — this chat can't take them"
+    let composerAttachmentsNotHereMessage = "Attachments work in Code and Dispatch — this chat can't take them"
 
-    /// The "+" button's tooltip when it is off — chat (or any non-code session) cannot take attachments.
-    static let composerAttachDisabledReason = "Attachments work in code sessions — chats can't take files or images"
+    /// The "+" button's tooltip when it is off — chat cannot take attachments.
+    static let composerAttachDisabledReason = "Attachments work in Code and Dispatch — chats can't take files or images"
 
-    /// What the composer's text view is handed: live only for a code session (read at paste/drop
+    /// What the composer's text view is handed: live only for a code or dispatch session (read at paste/drop
     /// time, so a row that loads after attach turns it on, and a session switch turns it off).
     var composerImageIntake: ComposerAttachmentIntake {
         ComposerAttachmentIntake(
@@ -1142,10 +1142,15 @@ final class FieldStateAdapter: ObservableObject {
     }
 
     /// The model in force for the attach-time check: the row's own (with any optimistic pick
-    /// overlaid, exactly as the pickers compute it), else the daemon's live default.
+    /// overlaid, exactly as the pickers compute it), else the daemon's live default — except for a DISPATCH
+    /// row, which runs the daemon's dispatch PIN (`pins.dispatch`), not the default, and `sync.config` does not
+    /// say which model that is: `nil` there, so the attach is let through and the daemon (which knows the pin)
+    /// refuses at submit if it must — never a false "doesn't support images" off the code default.
     var composerImageModel: String? {
-        effectiveSelection(row: currentSessionRow()?.model, optimistic: pendingModel)
-            ?? (modelCatalogue.defaultModel.isEmpty ? nil : modelCatalogue.defaultModel)
+        let row = currentSessionRow()
+        if let picked = effectiveSelection(row: row?.model, optimistic: pendingModel) { return picked }
+        if row?.mode == "dispatch" { return nil }
+        return modelCatalogue.defaultModel.isEmpty ? nil : modelCatalogue.defaultModel
     }
 
     /// Attach one to the draft and answer its id — the text view puts its chip in the text — or refuse (`nil`)
@@ -1205,18 +1210,18 @@ final class FieldStateAdapter: ObservableObject {
         return addComposerAttachment(.image(image))
     }
 
-    /// **Every code-mode submit site's one door** (`ShellSessionHost.submit`,
-    /// `DetachedWindowController.submit`): what to actually send — the typed `text` with the draft's
+    /// **Every attachment submit site's one door** (`ShellSessionHost.submit`,
+    /// `DetachedWindowController.submit`, `DispatchPillController.submit`): what to actually send — the typed `text` with the draft's
     /// attachments as placeholders and paths (`resolveComposerAttachments`): a FILE image is its own original
     /// path (nothing staged), image DATA is staged raw through `stage` (`session.stageImage` on that surface's
     /// own client and session), a FILE attachment is its own path; or `nil` when staging was refused, with the
     /// daemon's own sentence on `composerNotice`, and then NOTHING is sent. A draft with no attachment comes
     /// back as its text.
     ///
-    /// A draft carried into a session that is NOT code (a hop or an in-place switch keeps the draft) with
-    /// attachments sends NOTHING: the notice line says why (`composerAttachmentsNotHereMessage`) and the text and
-    /// chips stay, for the user to remove the chips (×) or take the draft to a code session. With no attachment
-    /// its text goes as is. A row not loaded yet is left to the daemon.
+    /// A draft carried into a session that takes no attachments — chat (a hop or an in-place switch keeps the draft)
+    /// — with attachments sends NOTHING: the notice line says why (`composerAttachmentsNotHereMessage`) and the text
+    /// and chips stay, for the user to remove the chips (×) or take the draft to a code or dispatch session. With no
+    /// attachment its text goes as is. A row not loaded yet is left to the daemon.
     func composerTextForSend(_ text: String, originalPaths: Bool = true, attachmentFiles: Bool = true,
                              stage: (ComposerImageData) async throws -> StagedImage) async -> ComposerOutgoing? {
         if let row = currentSessionRow(), !composerImageInputEnabled(row: row) {

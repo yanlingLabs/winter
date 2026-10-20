@@ -75,6 +75,28 @@ final class UsageClientTests: XCTestCase {
         XCTAssertEqual(old.totals.syntheticRecords, 0)
     }
 
+    func testThePlanAlarmsAndTheWindowKeysDecode() throws {
+        let s = WinterClient.decodeUsageSummary(try json(#"""
+        {"range":"24h","totals":{},
+         "plans":{"claudeCode":{"provider":"claude-code","source":"claude-cli","at":1000,
+                                "windows":[{"id":"weekly_scoped:Fable:2","kind":"weekly_scoped","usedPercent":80,"scope":"Fable","stale":false,
+                                            "windowKey":"weekly_scoped:fable"}]}},
+         "alarms":[{"id":"a1","provider":"claude-code","windowKey":"weekly_scoped:fable","thresholdPercent":90,"createdAt":5},
+                   {"id":"a2","provider":"codex","windowKey":"five_hour","thresholdPercent":50},
+                   {"id":"bad","provider":"codex","thresholdPercent":50}]}
+        """#))
+        XCTAssertEqual(s.claudeCodePlan?.windows.first?.windowKey, "weekly_scoped:fable")
+        XCTAssertEqual(s.alarms, [UsageAlarm(id: "a1", provider: "claude-code", windowKey: "weekly_scoped:fable", thresholdPercent: 90, createdAt: 5),
+                                  UsageAlarm(id: "a2", provider: "codex", windowKey: "five_hour", thresholdPercent: 50)],
+                       "a row with no window key is skipped")
+        // An older daemon has no alarms at all (nil — not an empty list) and no window keys.
+        let old = WinterClient.decodeUsageSummary(try json(#"{"range":"24h","plans":{"codex":{"provider":"codex","source":"codex-app-server","windows":[{"id":"primary","kind":"five_hour","usedPercent":1}]}}}"#))
+        XCTAssertNil(old.alarms)
+        XCTAssertNil(old.codexPlan?.windows.first?.windowKey)
+        XCTAssertEqual(WinterClient.decodeUsageAlarms(try json(#"[{"id":"x","provider":"antigravity","windowKey":"weekly:gemini","thresholdPercent":75}]"#)),
+                       [UsageAlarm(id: "x", provider: "antigravity", windowKey: "weekly:gemini", thresholdPercent: 75)])
+    }
+
     func testTheSeriesAndTheSubscriptionsDecode() throws {
         let series = WinterClient.decodeUsageSeries(try json(#"""
         {"range":"7d","from":0,"to":10,"bucketMs":5,"buckets":[{"start":0,"costUsd":1,"tokens":10,"bySource":{},"models":[{"source":"winter","model":"m","costUsd":1,"tokens":10}]},{"start":5,"costUsd":0,"tokens":0,"models":[]}],

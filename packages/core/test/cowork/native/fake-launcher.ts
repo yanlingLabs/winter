@@ -71,6 +71,7 @@ export class FakeSession implements CoworkLauncherSession {
   private readonly closers: (() => void)[] = [];
   private readonly down = new CoworkNativeMuxSequence();
   private upSeq = 0;
+  private runtimeUp = 0;
   /** Every conversation set the guest received (the host must send at most one). */
   readonly conversationSets: { operationId: string; nonce: string; incarnationId: string; profile: string | null; conversations: readonly unknown[] }[] = [];
   private plan: { operationId: string; nonce: string; plan: Record<string, unknown> } | null = null;
@@ -88,6 +89,12 @@ export class FakeSession implements CoworkLauncherSession {
   /** The channel ends without a word (the launcher died). */
   eof(): void { if (!this.live) return; this.live = false; for (const closer of [...this.closers]) closer(); }
 
+  /** The guest speaks on the runtime class (conversation 0), numbered from 1 per direction like the real thing. */
+  emitRuntime(stream: "out" | "err", payload: Uint8Array, end = false): void { this.runtimeUp += 1; this.deliver({ t: "mux_up", frame: { class: "runtime", seq: this.runtimeUp, conversation: 0, stream, end, payload } }); }
+  /** Anything at all on the runtime class, unnumbered by this fake (for a guest that breaks the contract). */
+  emitRuntimeFrame(frame: Extract<CoworkNativeMuxFrame, { class: "runtime" }>): void { this.deliver({ t: "mux_up", frame }); }
+  /** The runtime IN frames the daemon sent, in order. */
+  get runtimeIn(): Extract<CoworkNativeMuxFrame, { class: "runtime" }>[] { return this.received.flatMap(item => item.message.t === "mux_down" && item.message.frame.class === "runtime" ? [item.message.frame] : []); }
   private deliver(message: CoworkNativeToDaemon): void {
     if (!this.live) return;
     // Round-trip through the real wire form so the host only ever sees what the contract can carry.

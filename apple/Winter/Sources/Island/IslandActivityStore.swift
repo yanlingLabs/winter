@@ -14,6 +14,9 @@ final class IslandActivityStore: ObservableObject {
     @Published private(set) var results = IslandResultQueue()
     /// The results the queue holds, by id.
     @Published private(set) var resultItems: [String: IslandResultItem] = [:]
+    /// The fired plan alarms' notices, in line (`IslandAlarmQueue`: never lost), and every one the daemon lists, by id.
+    @Published private(set) var alarms = IslandAlarmQueue()
+    @Published private(set) var alarmItems: [String: IslandUsageAlarmItem] = [:]
     /// Every armed computer-use watch, oldest first (the Watches tab).
     @Published private(set) var watches: [IslandWatchItem] = []
     /// Computer-use sessions whose host is in front (their pill is not shown: the user sees the work there).
@@ -42,6 +45,12 @@ final class IslandActivityStore: ObservableObject {
     /// Moves the app's view to a session (a result's Open) — the Sessions tab's own resolution: its window, its exact
     /// terminal, Dispatch's view, else a new detached window. (session, its hosts, is it the Dispatch session)
     var openSession: (_ sessionId: String, _ hosts: [IslandHost], _ isDispatch: Bool) -> Void = { _, _, _ in }
+    /// Opens the island on its Usage tab (a fired plan alarm's notification).
+    var openUsageTab: () -> Void = {}
+    /// Who can see the screen right now (`IslandScreenPresence.system`; tests start the app locked through it).
+    var readScreen: () -> IslandScreenPresence = { IslandScreenPresence.system() }
+    /// `usage.alarms.ack`: a notice was dismissed, opened or shown its whole time — the daemon forgets it.
+    var ackAlarm: (_ id: String) -> Void = { _ in }
     /// `computerUse.wakes.cancel`.
     var disarm: (_ sessionId: String, _ wakeId: String) async -> Bool = { _, _ in false }
     /// Told after every change of what the activity panel may draw.
@@ -51,6 +60,10 @@ final class IslandActivityStore: ObservableObject {
 
     /// A card needing an answer owns the top (the phase-1 queue): results are held, the pill yields.
     private(set) var cardOnTop = false
+    /// The island is open: its tabs show it all, so an alarm's notice waits for it to close.
+    private(set) var islandOpen = false
+    /// Whether anyone can see the screen (locked, displays asleep, another session): away, a notice waits.
+    private(set) var screen = IslandScreenPresence()
 
     // MARK: Reading
 
@@ -58,6 +71,8 @@ final class IslandActivityStore: ObservableObject {
     /// Rung 4 somewhere: the agent's hardware pointer is in use — the island's slot and detached mirrors step aside.
     var usingRealMouse: Bool { cu.usingRealMouse }
     var currentResult: IslandResultItem? { results.current.flatMap { resultItems[$0.id] } }
+    /// The alarm notice on screen — it goes before a turn result.
+    var currentAlarm: IslandUsageAlarmItem? { alarms.current.flatMap { alarmItems[$0.id] } }
 
     // MARK: Refresh
 
@@ -132,6 +147,13 @@ final class IslandActivityStore: ObservableObject {
         }
         pruneResultItems()
 
+        // Fired plan alarms: every one the daemon still lists (it keeps them until acknowledged), however old, in the
+        // order they fired — no session, so no host to be in front of; they wait their turn (`IslandAlarmQueue`).
+        let fired = snapshot.usageAlarms.sorted { $0.at == $1.at ? $0.id < $1.id : $0.at < $1.at }
+        let items = Dictionary(fired.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        if items != alarmItems { alarmItems = items }
+        alarms.sync(fired.map(\.id), now: now)
+
         let w = snapshot.watches.sorted { $0.armedAt == $1.armedAt ? $0.wakeId < $1.wakeId : $0.armedAt < $1.armedAt }
         if w != watches { watches = w }
         disarming.formIntersection(Set(w.map(\.wakeId)))
@@ -166,30 +188,67 @@ final class IslandActivityStore: ObservableObject {
         changed()
     }
 
+    /// The island opened or closed: an alarm's notice waits while it is open (shown whole once it closes).
+    func setIslandOpen(_ open: Bool) {
+        guard open != islandOpen else { return }
+        islandOpen = open
+        changed()
+    }
+
+    /// Where the screen stands at start (the signals below are changes only): read through `readScreen` by the
+    /// controller's `start()`, once its observers are in — a launch behind a locked screen starts away.
+    func screenAtStart() {
+        let now = readScreen()
+        guard now != screen else { return }
+        screen = now
+        changed()
+    }
+
+    /// The screen was locked or unlocked, its displays slept or woke, the session resigned or came back.
+    func screenSignal(_ signal: IslandScreenPresence.Signal) {
+        let before = screen
+        screen.note(signal)
+        if screen != before { changed() }
+    }
+
     func tick() {
         let now = clock()
         cu.tick(now: now)
         results.tick(now: now)
+        // A notice on screen its whole time is acknowledged (the daemon forgets it).
+        if let done = alarms.tick(now: now) { ackAlarm(done) }
         pruneResultItems()
         changed()
     }
 
     func hoverResult(_ on: Bool) {
-        guard results.current != nil, results.hovered != on else { return }
-        results.hover(on, now: clock())
+        // The slot shows an alarm's notice before a result (`IslandActivityArbiter`'s `result`).
+        if alarms.current != nil {
+            guard alarms.hovered != on else { return }
+            alarms.hover(on, now: clock())
+        } else {
+            guard results.current != nil, results.hovered != on else { return }
+            results.hover(on, now: clock())
+        }
         changed()
     }
 
-    /// ✕ on a result.
+    /// ✕ on a result, or on an alarm's notice (acknowledged).
     func dismissResult(_ id: String) {
-        results.dismiss(id)
-        pruneResultItems()
+        if alarmItems[id] != nil {
+            alarms.finish(id, now: clock())
+            ackAlarm(id)
+        } else {
+            results.dismiss(id)
+            pruneResultItems()
+        }
         changed()
     }
 
-    /// Open on a result: the app shows the session; the card goes.
+    /// Open on a result: the app shows the session; on an alarm's notice: the island's Usage tab. The card goes.
     func openResult(_ id: String) {
         if let item = resultItems[id] { openSession(item.sessionId, item.hosts, item.session.mode == "dispatch") }
+        if alarmItems[id] != nil { openUsageTab() }
         dismissResult(id)
     }
 
@@ -233,7 +292,11 @@ final class IslandActivityStore: ObservableObject {
             mirrorOpen = false
             mirrorSessionId = nil
         }
-        let deadlines = [cu.nextDeadline, results.nextDeadline].compactMap { $0 }
+        // The notices wait while the top is not theirs — a card needing an answer, the open island, the agent's mouse —
+        // or nobody can see it (locked, asleep, another session): their 12 s count only while really seen.
+        let blocked = cardOnTop || islandOpen || cu.usingRealMouse || screen.away
+        if blocked != alarms.blocked { alarms.setBlocked(blocked, now: clock()) }
+        let deadlines = [cu.nextDeadline, results.nextDeadline, alarms.nextDeadline].compactMap { $0 }
         scheduleWake(deadlines.min())
         let sessions = cu.activeSessionIds
         if sessions != cursorSessions {

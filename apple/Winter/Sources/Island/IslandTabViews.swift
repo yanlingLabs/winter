@@ -35,7 +35,7 @@ final class IslandTabModels {
         case IslandTabRegistry.shelf.id?: if !periodic { await shelf.resolveAll() }
         case IslandTabRegistry.usage.id?: await usage.refresh()
         case IslandTabRegistry.devices.id?: await devices.refresh()
-        case IslandTabRegistry.servers.id?: await servers.refresh()
+        case IslandTabRegistry.servers.id?: await servers.refresh(resetPage: !periodic)
         default: break
         }
     }

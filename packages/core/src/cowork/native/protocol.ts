@@ -542,6 +542,8 @@ const CONVERSATION_SPEC: Spec = [["logicalSessionId", sdkId], ["authority", reco
 const conversationOf: Validator<CoworkNativeConversation> = value => {
   const item = record(value, CONVERSATION_SPEC) as unknown as CoworkNativeConversation;
   if (!item.roots.every(root => allowedView(root.guestPath, item.logicalSessionId))) return fail();
+  // The host builder always sends source === guestPath (the guest sees each root where the host admitted it); the host enforces that on its side too (with the line above, the source is then an admitted view too).
+  if (!item.roots.every(root => root.source === root.guestPath)) return fail();
   const runtime = item.runtime;
   if (runtime !== null) {
     // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree), and plan is read-only.

@@ -295,6 +295,33 @@ async function until(check: () => boolean, ms = 2000): Promise<void> {
   }
 }
 
+describe("IslandActivity — plan alarms", () => {
+  const fired = (id: string, at = 1_000_000) => ({
+    id, provider: "claude-code" as const, windowKey: "weekly", kind: "weekly", windowMinutes: 10_080, thresholdPercent: 80, usedPercent: 81,
+    resetsAt: 2_000_000, at,
+  });
+
+  test("every fired, unacknowledged alarm is listed from the usage DB at each list — however old — and a change tells the clients", async () => {
+    let stored = [fired("a1", 1)];
+    const { activity, told } = harness({ usageAlarms: () => stored, now: () => 1_000_000 + 24 * 3_600_000 });
+    expect(activity.list().usageAlarms).toEqual([fired("a1", 1)]);
+    expect(IslandActivityResult.parse({ computerUse: [], results: [], watches: [], usageAlarms: activity.list().usageAlarms }).usageAlarms).toHaveLength(1);
+    stored = [fired("a1", 1), fired("a2")];
+    activity.usageAlarmsChanged();
+    await flush();
+    expect(told()).toBe(1);
+    expect(activity.list().usageAlarms.map((a) => a.id)).toEqual(["a1", "a2"]);
+    stored = [];
+    expect(activity.list().usageAlarms).toEqual([]);
+  });
+
+  test("no usage tracking, or its read failing: none listed, the rest of the activity still answers", () => {
+    expect(new IslandActivity({ facts: () => ({}), hosts: () => [] }).list().usageAlarms).toEqual([]);
+    const failing = new IslandActivity({ facts: () => ({}), hosts: () => [], usageAlarms: () => { throw new Error("db closed"); } });
+    expect(failing.list()).toMatchObject({ usageAlarms: [], results: [], computerUse: [] });
+  });
+});
+
 describe("island.activity over the socket", () => {
   let stop: (() => void) | undefined;
   afterEach(() => { stop?.(); stop = undefined; });
@@ -321,6 +348,7 @@ describe("island.activity over the socket", () => {
     expect(parsed.computerUse.map((c) => [c.sessionId, c.title])).toEqual([[sid, "Filing it"]]);
     expect(parsed.results).toEqual([]);
     expect(parsed.watches).toEqual([]);
+    expect(parsed.usageAlarms).toEqual([]);
 
     expect(REMOTE_ALLOWED_METHODS.has(METHODS.islandActivity)).toBe(false);
     const remote = await TestClient.connect(socketPath);

@@ -23,6 +23,7 @@ import { AUTOMATION_WORKER_ARG, FileSecretStore, isDefaultWinterHome, runAutomat
 import { HELPER_PROTOCOL } from "../../packages/core/src/computer-use/protocol";
 import { runFreshSampler, type FreshSamplerParams } from "./fresh-sampler";
 import { FIXTURE_ADAPTER } from "./adapters";
+import { USAGE_INERT } from "../../packages/core/src/usage/wiring";
 
 if (process.argv[2] === AUTOMATION_WORKER_ARG) {
   runAutomationWorker();
@@ -116,6 +117,8 @@ if (import.meta.main) {
   const daemon = await startDaemon({
     home: home!,
     secrets: new FileSecretStore(join(home!, "test-secrets")),
+    // Never the user's own Codex / Claude Code / Antigravity / OpenCode, nor the background plan beat.
+    usage: USAGE_INERT,
     computerUse: {
       // The adapters group's TEST adapter for the fixture app (AX-backed extras) — this daemon only.
       adapters: [FIXTURE_ADAPTER],

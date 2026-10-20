@@ -41,6 +41,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { renderRuntimeWorkflowProfile } from "../packages/core/test/helpers/runtime-workflow-profile";
+import { USAGE_INERT_ENV } from "../packages/core/src/usage/wiring";
 
 const SCRIPTS_DIR = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(SCRIPTS_DIR, "..");
@@ -127,6 +128,9 @@ async function main(): Promise<void> {
     WINTER_CLAUDE_RESUME_SCAN_ROOT: join(scratch, "claude-resume-scan"),
     XDG_CONFIG_HOME: join(scratch, "xdg"),
     GIT_CONFIG_GLOBAL: gitConfig,
+    // Never the developer's own Codex / Claude Code / Antigravity / OpenCode, nor the background plan beat (the probe
+    // also injects `USAGE_INERT` itself).
+    ...USAGE_INERT_ENV,
   };
 
   try {
