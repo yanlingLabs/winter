@@ -48,7 +48,10 @@ class NativeCodecTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.folder = tempfile.mkdtemp(prefix="guest-native-")
-        cls.tool = build([HERE / "native_tool.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"], Path(cls.folder) / "native_tool")
+        # The contract vectors are revision 3 and the file streams exist only for an image that declares file-channel-v1, so they are judged by the gated build;
+        # the production build (no WG_FILE_CHANNEL_V1) is a revision-2 guest for stream 4 and above, and a test below holds it to that.
+        cls.tool = build([HERE / "native_tool.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c", ROOT / "common/fileflow.c"], Path(cls.folder) / "native_tool", extra=["-DWG_FILE_CHANNEL_V1"])
+        cls.production_tool = build([HERE / "native_tool.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"], Path(cls.folder) / "native_tool_production")
 
     @classmethod
     def tearDownClass(cls):
@@ -59,10 +62,12 @@ class NativeCodecTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.splitlines()
 
-    def vector_results(self):
+    def vector_results(self, tool=None):
         lines = [f'{section[:3]}:{v["name"]} {v["direction"]} {v["hex"]}' for section in ("positive", "negative") for v in VECTORS[section]]
         out = {}
-        for line in self.run_tool("vectors", stdin="\n".join(lines) + "\n"):
+        result = subprocess.run([str(tool or self.tool), "vectors"], input="\n".join(lines) + "\n", capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        for line in result.stdout.splitlines():
             name, *fields = line.split("|")
             out[name] = fields
         return out
@@ -78,6 +83,48 @@ class NativeCodecTests(unittest.TestCase):
                 self.assertEqual(fields[0], "ok")
                 self.assertEqual((int(fields[1]), int(fields[2])), ({"control": 0, "bootstrap": 1, "runtime": 2}[v["class"]], v["seq"]))
                 self.assertEqual(int(fields[3]), len(bytes.fromhex(v["hex"])) - 16)
+
+    def test_the_file_streams_exist_only_in_the_gated_build(self):
+        """Without WG_FILE_CHANNEL_V1 the guest is a revision-2 guest: stream 4 and above are bad_field in either direction, so a host that offered them would end the stream."""
+        gated, production = self.vector_results(), self.vector_results(self.production_tool)
+        file_names = [v["name"] for v in VECTORS["positive"] if "file" in v["name"]]
+        self.assertEqual(len(file_names), 4)
+        for name in file_names:
+            self.assertEqual(gated["pos:" + name][0], "ok", name)
+            self.assertEqual(production["pos:" + name][0], "bad_field", name)
+        for name in ("runtime-stream-four", "runtime-file-in-travelling-up", "runtime-file-out-travelling-down"):
+            self.assertEqual(gated["neg:" + name], ["bad_direction"], name)
+            self.assertEqual(production["neg:" + name], ["bad_field"], name)
+        for name in ("runtime-file-in-on-conversation-one", "runtime-file-out-on-conversation-one", "runtime-file-out-empty-without-end", "runtime-stream-six", "runtime-stream-zero"):
+            self.assertEqual(gated["neg:" + name], ["bad_field"], name)
+
+    def test_the_file_flow_rule_matches_every_contract_case(self):
+        """runtime-flow.json fileCases: the file bound is its own (4 requests, 16 KiB request lines, 384 KiB response lines); steps on the runtime streams
+        (in, out, err) belong to the runtime IN count, which the relay's 4 MiB queue absorbs (test_relay.py), so they are not part of this rule."""
+        flow = json.loads((ROOT / "vectors/runtime-flow.json").read_text())
+        self.assertEqual((flow["fileInFlightRequests"], flow["fileRequestBytes"], flow["fileResponseBytes"]), (4, 16384, 393216))
+        for case in flow["fileCases"]:
+            with self.subTest(case["name"]):
+                steps = [s for s in case["steps"] if s["stream"].startswith("file_")]
+                out = self.run_tool("fileflow", stdin="".join(f'{s["stream"]} {s["bytes"]} {s["newlines"]}\n' for s in steps))
+                refused = [i for i, line in enumerate(out) if line != "ok"]
+                file_refusal = case["refusedAt"] is not None and case["steps"][case["refusedAt"]]["stream"].startswith("file_")
+                if file_refusal:
+                    index = [i for i, s in enumerate(case["steps"]) if s["stream"].startswith("file_")].index(case["refusedAt"])
+                    self.assertEqual(refused, [index])
+                    self.assertEqual(out[index], case["error"])
+                else:
+                    self.assertEqual(refused, [])
+
+    def test_each_response_line_is_counted_on_its_own(self):
+        steps = "file_in 1 1\nfile_in 1 1\nfile_out 250000 1\nfile_out 250000 1\n"      # two lines of 250,000 bytes: 500,000 in all, each under 384 KiB
+        self.assertEqual(self.run_tool("fileflow", stdin=steps), ["ok"] * 4)
+        steps = "file_in 1 1\nfile_in 1 1\nfile_out 250000 0\nfile_out 250000 1\n"      # one line of 500,000 bytes
+        self.assertEqual(self.run_tool("fileflow", stdin=steps), ["ok", "ok", "ok", "oversize"])
+        steps = "file_in 10000 0\nfile_in 6384 1\nfile_in 16384 1\n"                  # the request line restarts after each newline
+        self.assertEqual(self.run_tool("fileflow", stdin=steps), ["ok", "ok", "ok"])
+        steps = "file_in 16384 1\nfile_in 16384 1\nfile_in 16384 1\n"
+        self.assertEqual(self.run_tool("fileflow", stdin=steps), ["ok", "ok", "ok"])
 
     def test_the_guests_own_control_messages_reencode_to_the_vector_bytes(self):
         results = self.vector_results()

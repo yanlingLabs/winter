@@ -224,5 +224,194 @@ class Pid1LinuxTests(unittest.TestCase):
         self.assertEqual(sorted(descriptors), [0, 1, 2, 3])
 
 
+@unittest.skipUnless(CC and LINUX, "needs Linux and a C compiler")
+class FileChannelPid1Tests(unittest.TestCase):
+    """init_linux.c built with WG_FILE_CHANNEL_V1 (an image that declares `file-channel-v1`): the two FIFOs, the supervisor's last two arguments and descriptors, the
+    hard-link sysctl, the data device and the data roots. Same driver as Pid1LinuxTests; the production build has none of this (test_hygiene.py)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.folder = Path(tempfile.mkdtemp(prefix="guest-pid1-fc-"))
+        cls.trusted = cls.folder / "trusted"
+        cls.trusted.mkdir(mode=0o700)
+        cls.workspace = cls.folder / "workspace"
+        cls.workspace.mkdir()
+        cls.sysctl = cls.folder / "protected_hardlinks"
+        cls.conversations_store = cls.folder / "conversations-store"
+        cls.conversations_run = cls.folder / "conversations-run"
+        cls.conversations_store.mkdir()
+        cls.conversations_run.mkdir()
+        cls.fake = cls.folder / "fake-supervisor"
+        result = subprocess.run([CC, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-pedantic", str(ROOT / "tests/fake_supervisor.c"), "-o", str(cls.fake)], capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr
+        sources = [ROOT / "tests/linux_init_tool.c", INIT / "boot.c", INIT / "discover.c", INIT / "ext4sb.c", INIT / "mounts.c", INIT / "skeleton.c",
+                   INIT / "trusted_config.c", INIT / "dataroots.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"]
+        cls.tool = build(sources, cls.folder / "linux-init-tool", extra=["-DWG_FILE_CHANNEL_V1", f'-DPYTHON_PATH="{cls.fake}"', f'-DTRUSTED_DIR="{cls.trusted}"',
+                                                                         f'-DWG_WORKSPACE_PATH="{cls.workspace}"', f'-DWORKSPACE_CONVERSATIONS="{cls.conversations_store}"',
+                                                                         f'-DRUN_CONVERSATIONS="{cls.conversations_run}"'])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.folder, ignore_errors=True)
+
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp(prefix="guest-pid1-fc-case-"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+
+    def run_tool(self, *args):
+        result = subprocess.run([str(self.tool), *map(str, args)], capture_output=True, text=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result.stdout
+
+    @staticmethod
+    def fields(line):
+        return dict(part.split("=", 1) for part in line.split())
+
+    # ---- the FIFOs
+
+    def test_the_two_fifos_are_nonblocking_owned_by_pid_1_single_link_and_close_on_exec(self):
+        lines = [line for line in self.run_tool("fifos").splitlines() if line.startswith("end:")]
+        self.assertEqual(len(lines), 4)
+        for index, line in enumerate(lines):
+            fields = self.fields(line.split(" ", 1)[1])
+            self.assertEqual((fields["fifo"], fields["owner"], fields["nlink"], fields["nonblock"], fields["cloexec"]), ("1", "1", "1", "1", "1"), line)
+            self.assertEqual(fields["access"], str(index % 2))          # each pipe: read end first, write end second
+
+    def fifook(self, path, flags):
+        return self.run_tool("fifook", path, flags).strip()
+
+    def test_the_supervisors_file_descriptor_check_refuses_what_is_not_a_nonblocking_single_link_fifo(self):
+        fifo = self.dir / "fifo"
+        os.mkfifo(fifo, 0o600)
+        self.assertEqual(self.fifook(fifo, os.O_RDWR | os.O_NONBLOCK), "1")
+        self.assertEqual(self.fifook(fifo, os.O_RDWR), "0")                           # blocking
+        regular = self.dir / "regular"
+        regular.write_text("x")
+        self.assertEqual(self.fifook(regular, os.O_RDWR | os.O_NONBLOCK), "0")        # not a FIFO
+        os.link(fifo, self.dir / "second-name")
+        self.assertEqual(self.fifook(fifo, os.O_RDWR | os.O_NONBLOCK), "0")           # two links
+
+    # ---- the supervisor's descriptors and last two arguments
+
+    def start(self, flags):
+        try:
+            os.unlink(self.trusted / "config.json")
+        except FileNotFoundError:
+            pass
+        text = self.run_tool("startsup", flags)
+        lines = text.splitlines()
+        self.assertEqual(lines[0], "rc=0", text)
+        self.assertEqual(lines[1], "exit:0", text)
+        facts, descriptors = {}, {}
+        for line in lines[2:]:
+            key, _, value = line.partition(":")
+            if key == "fd":
+                number, _, rest = value.partition(" ")
+                descriptors[int(number)] = self.fields(rest)
+            else:
+                facts[key] = value
+        return facts, descriptors
+
+    def check_parent(self, facts):
+        # PID 1 keeps none of the supervisor's ends: after the fork the file ends are closed here whether or not the supervisor was given them, so a left-over copy cannot keep a
+        # FIFO open after the supervisor and the relay are gone.
+        self.assertEqual(facts["parentfile"], "in=-1 out=-1 closed=1")
+        self.assertEqual(facts["fileeof"], "out=1 in_reader_gone=1")
+        self.assertEqual(facts["parent"], "in=-1 out=-1 err=-1 closed=1 added=-3")
+
+    def test_with_runtime_ports_the_file_channel_is_descriptors_7_and_8_and_the_last_two_arguments(self):
+        facts, descriptors = self.start(3)
+        self.check_parent(facts)
+        self.assertEqual(facts["argv"], "-I|-S|-B|/opt/winter/libexec/linux-supervisor.py|--trusted-config-fd|3|--runtime-ports-fds|4,5,6|--file-channel-fds|7,8")
+        self.assertEqual(sorted(descriptors), [0, 1, 2, 3, 4, 5, 6, 7, 8])
+        self.assertEqual([(descriptors[n]["kind"], int(descriptors[n]["access"]), descriptors[n]["nonblock"], descriptors[n]["cloexec"], descriptors[n]["nlink"]) for n in (7, 8)],
+                         [("fifo", 0, "1", "0", "1"), ("fifo", 1, "1", "0", "1")])           # IN is the read end, OUT the write end
+
+    def test_without_runtime_ports_the_file_channel_is_descriptors_4_and_5(self):
+        facts, descriptors = self.start(2)
+        self.check_parent(facts)
+        self.assertEqual(facts["argv"], "-I|-S|-B|/opt/winter/libexec/linux-supervisor.py|--trusted-config-fd|3|--file-channel-fds|4,5")
+        self.assertEqual(sorted(descriptors), [0, 1, 2, 3, 4, 5])
+        self.assertEqual([(descriptors[n]["kind"], int(descriptors[n]["access"]), descriptors[n]["nonblock"]) for n in (4, 5)], [("fifo", 0, "1"), ("fifo", 1, "1")])
+
+    def test_without_a_browse_uid_the_supervisor_gets_no_file_descriptors_and_no_file_arguments(self):
+        for flags, argv, count in ((1, "-I|-S|-B|/opt/winter/libexec/linux-supervisor.py|--trusted-config-fd|3|--runtime-ports-fds|4,5,6", 7),
+                                   (0, "-I|-S|-B|/opt/winter/libexec/linux-supervisor.py|--trusted-config-fd|3", 4)):
+            with self.subTest(flags=flags):
+                facts, descriptors = self.start(flags)
+                self.check_parent(facts)
+                self.assertEqual(facts["argv"], argv)
+                self.assertEqual(sorted(descriptors), list(range(count)))
+
+    def test_a_supervisor_end_that_is_not_a_nonblocking_fifo_stops_the_start_before_anything_runs(self):
+        try:
+            os.unlink(self.trusted / "config.json")
+        except FileNotFoundError:
+            pass
+        self.assertEqual(self.run_tool("startsup", 2, "blocking").splitlines()[0], "rc=-1")
+        try:
+            os.unlink(self.trusted / "config.json")
+        except FileNotFoundError:
+            pass
+        self.assertEqual(self.run_tool("startsup", 2).splitlines()[0], "rc=0")
+
+    # ---- the hard-link sysctl
+
+    def hardlinks(self, path):
+        return self.run_tool("hardlinks", path).strip()
+
+    def test_protected_hardlinks_is_written_as_1(self):
+        self.sysctl.write_text("0\n")
+        os.chmod(self.sysctl, 0o644)
+        self.assertEqual(self.hardlinks(self.sysctl), "rc=0")
+        self.assertEqual(self.sysctl.read_text(), "1\n")
+
+    def test_a_sysctl_that_cannot_be_written_or_is_a_link_is_a_failure(self):
+        self.assertEqual(self.hardlinks("/dev/full"), "rc=-1")                         # the open works and the write fails: only the result of the write says so
+        self.assertEqual(self.hardlinks("/dev/null"), "rc=0")
+        self.assertEqual(self.hardlinks(self.dir / "missing"), "rc=-1")
+        target = self.dir / "target"
+        target.write_text("0\n")
+        link = self.dir / "link"
+        os.symlink(target, link)
+        self.assertEqual(self.hardlinks(link), "rc=-1")                                # O_NOFOLLOW: a link is never followed
+        self.assertEqual(target.read_text(), "0\n")
+        if os.getuid() != 0:
+            readonly = self.dir / "readonly"
+            readonly.write_text("0\n")
+            os.chmod(readonly, 0o444)
+            self.assertEqual(self.hardlinks(readonly), "rc=-1")
+
+    # ---- the data device and the data roots
+
+    def test_the_data_device_is_the_st_dev_of_the_workspace(self):
+        out = self.fields(self.run_tool("datadev").strip())
+        self.assertEqual((out["rc"], int(out["device"])), ("0", os.stat(self.workspace).st_dev))
+
+    def test_a_workspace_that_is_missing_or_not_a_directory_has_no_device(self):
+        moved = self.folder_moved = self.workspace.with_name("workspace-away")
+        self.workspace.rename(moved)
+        try:
+            self.assertEqual(self.fields(self.run_tool("datadev").strip())["rc"], "-1")
+            self.workspace.write_text("file")
+            self.assertEqual(self.fields(self.run_tool("datadev").strip())["rc"], "-1")
+            self.workspace.unlink()
+        finally:
+            moved.rename(self.workspace)
+
+    def roots(self, browse, *sources):
+        return self.fields(self.run_tool("roots", browse, os.getgid(), *sources).strip())["rc"]
+
+    def test_the_conversation_directories_are_made_and_the_data_roots_only_for_a_workspace_with_a_browse_uid(self):
+        """op_prepare_conversation_dirs itself, with the paths of this test: the private per-conversation directories always, the data roots when there is a browse uid."""
+        self.assertEqual(self.roots(0, "/workspace/repos/off"), "0")
+        self.assertTrue((self.conversations_store / "s1").is_dir() and (self.conversations_run / "s1").is_dir())
+        self.assertFalse((self.workspace / "repos/off").exists())
+        self.assertEqual(self.roots(40001, "/workspace/repos/on"), "0")
+        mode = stat.S_IMODE(os.stat(self.workspace / "repos/on").st_mode)
+        self.assertEqual((mode, os.stat(self.workspace / "repos/on").st_gid), (0o2770, os.getgid()))
+        self.assertEqual(self.roots(40001, "/etc/passwd"), "-1")
+
+
 if __name__ == "__main__":
     unittest.main()

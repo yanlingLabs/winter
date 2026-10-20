@@ -265,6 +265,23 @@ enum wg_config_result wg_build_trusted_config(const char *boot_id, const char *b
     return WG_CONFIG_OK;
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+int wg_add_file_channel(char *config, size_t length, size_t capacity, uint32_t browse_uid, uint64_t data_device, size_t *out_length) {
+    if (browse_uid < 1000u || browse_uid > 65533u || data_device == 0 || length < 2 || config[length - 1] != '}' || config[0] != '{') return -1;
+    if (top_level_key(config, length, "fileChannel") != 0) return -1;
+    char member[96];
+    int n = snprintf(member, sizeof member, ",\"fileChannel\":{\"browseUid\":%u,\"dataDevice\":%llu}", (unsigned)browse_uid, (unsigned long long)data_device);
+    const char *text = member;
+    if (length == 2 && n > 0) { text++; n--; }   /* an empty object takes the member without the comma */
+    if (n < 0 || (size_t)n >= sizeof member || length - 1 + (size_t)n + 1 >= capacity || length - 1 + (size_t)n > WG_CONFIG_MAX_BYTES) return -1;
+    memcpy(config + length - 1, text, (size_t)n);
+    config[length - 1 + (size_t)n] = '}';
+    config[length + (size_t)n] = '\0';
+    if (out_length) *out_length = length + (size_t)n;
+    return 0;
+}
+#endif
+
 /* Test seams exist only in a build that defines WG_TEST_SEAMS (the native tests do; build.py never does, and a hygiene test pins that). In the production
  * binary the config is synced by a direct fsync(2) and there is no hook and no writable pointer. */
 #ifdef WG_TEST_SEAMS

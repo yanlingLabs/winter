@@ -5,6 +5,8 @@ import {
   coworkNativeBootstrapOrder, CoworkNativeMuxSequence, CoworkNativeProtocolError, CoworkNativeRuntimeStreams, coworkNativeConversationsAreBound, coworkNativeGuestStopVerdict, coworkNativeHostStopWaitMs, coworkNativeLauncherKillMs, COWORK_LIBKRUN_OPTIONAL_SYMBOLS, COWORK_LIBKRUN_EXIT_REASONS, COWORK_LIBKRUN_FORBIDDEN_SYMBOLS, COWORK_NATIVE_WORKER_EXIT_CODES, COWORK_NATIVE_WORKER_FAULTS, COWORK_NATIVE_WORKER_LAYOUT, coworkNativeRuntimeImageDigest, COWORK_LIBKRUN_PRODUCTION_ABI, COWORK_LIBKRUN_PRODUCTION_STRUCTS, COWORK_LIBKRUN_RETIRED_FIXTURE_SYMBOLS,
   COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES, COWORK_NATIVE_BOOTSTRAP_FAULTS, COWORK_NATIVE_GUEST_FAULTS, COWORK_NATIVE_WORKER_STATES, COWORK_NATIVE_WORKER_STATUS, COWORK_NATIVE_LIMITS, COWORK_NATIVE_MUX_CLASSES, classAInvariantsHold, coworkNativeScopeDigest, parseCoworkNativeEnvelope, parseCoworkNativeLauncherLine,
   parseCoworkNativeMuxFrame, parseCoworkNativeStopReceipt, serializeCoworkNativeEnvelope, serializeCoworkNativeLauncherLine, serializeCoworkNativeMuxFrame, serializeCoworkNativeStopReceipt,
+  COWORK_NATIVE_TEXT_VERSION, COWORK_NATIVE_BOOTSTRAP_VERSION, COWORK_NATIVE_CONTROL_VERSION, COWORK_NATIVE_REFUSAL_CODES, COWORK_NATIVE_ENVELOPE_KINDS, COWORK_NATIVE_RUNTIME_STREAMS, COWORK_NATIVE_SHARE_NOTICE_KINDS,
+  COWORK_NATIVE_SHARE_MOUNTS, COWORK_NATIVE_FILE_CHANNEL_CAPABILITY, COWORK_NATIVE_WORKER_SHARES_FLAG, parseCoworkNativeWorkerArgv, serializeCoworkNativeWorkerArgv,
   type CoworkNativeEnvelope, type CoworkNativeLibkrunExitReason, type CoworkNativeLibkrunFlushCounters, type CoworkNativeFlushDevice, type CoworkNativeWorkerStatusState, type CoworkNativeLauncherDirection, type CoworkNativeMuxDirection, type CoworkNativeOrderlyReceipt, type CoworkNativeProtocolFailure,
 } from "../../../src/cowork/native/protocol";
 
@@ -44,11 +46,11 @@ test("a launcher line over its own ceiling is oversize, whatever its type", () =
   expect(code(() => parseCoworkNativeLauncherLine(42, "to-launcher"))).toBe("malformed");
   expect(code(() => parseCoworkNativeLauncherLine(null, "to-daemon"))).toBe("malformed");
 });
-test("only the volumes line may carry descriptors, and exactly two; a launcher line never carries any toward the daemon", () => {
+test("only the volumes line (exactly two) and the shares line (one per record) may carry descriptors; a launcher line never carries any toward the daemon", () => {
   const volumes = lines.positive.find(entry => entry.name === "volumes-two-descriptors")!;
   for (const entry of lines.positive) {
     for (const rights of [0, 1, 2, 3]) {
-      const wanted = entry.t === "volumes" ? 2 : 0;
+      const wanted = entry.t === "volumes" ? 2 : entry.t === "shares" ? entry.rights : 0;
       if (rights === wanted) continue;
       expect(`${entry.name}/${rights}:${code(() => parseCoworkNativeLauncherLine(entry.line, entry.direction, rights))}`).toBe(`${entry.name}/${rights}:bad_rights`);
     }
@@ -196,8 +198,10 @@ test("drift guard: the pinned literals", () => {
     controlLineBytes: 16384, muxLineBytes: 1572864, depth: { launcher: 4, receipt: 3, control: 1, bootstrap: 8 }, headerBytes: 16,
     muxPayloadBytes: { control: 4096, bootstrap: 262144, runtime: 1048576, provider: 0 }, receiptBytes: 8192, tokenChars: 63, vcpus: 2, minMemoryMiB: 768, maxMemoryMiB: 1024,
     drainBudgetMs: 30000, drainBudgetCeilingMs: 120000, volumeRights: 2,
-    libkrunExitWatchdogMs: 20000, launcherKillMarginMs: 5000, hostStopMarginMs: 10000, conversationsBytes: 20480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096, runtimePrefixBytes: 4, runtimeConversations: 16, runtimeInFlightBytes: 1048576 });
-  expect({ ...COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES }).toEqual({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8 });
+    libkrunExitWatchdogMs: 20000, launcherKillMarginMs: 5000, hostStopMarginMs: 10000, conversationsBytes: 20480, conversationItems: 16, rootsPerConversation: 16, providerBytes: 4096, runtimePrefixBytes: 4, runtimeConversations: 16, runtimeInFlightBytes: 1048576,
+    fileInFlightRequests: 4, fileRequestBytes: 16384, fileResponseBytes: 393216, shares: 12, folderShares: 9, shareTagChars: 32, shareRecordBytes: 308, endedGuestBoots: 4, runtimeTimeoutCeilingMs: 86400000 });
+  expect({ ...COWORK_NATIVE_ENVELOPE_PAYLOAD_BYTES }).toEqual({ scope: 512, volumes: 104, drain: 28, status: 40, fault: 8, shares: 3704, share_revoke: 32, share_event: 40 });
+  expect([COWORK_NATIVE_TEXT_VERSION, COWORK_NATIVE_BOOTSTRAP_VERSION, COWORK_NATIVE_CONTROL_VERSION]).toEqual([2, 2, 1]);
   // The runtime ceiling is the existing guest runtime transport frame, not a number invented here.
   const runtime = readFileSync(join(import.meta.dir, "..", "..", "..", "src", "cowork", "guest-runtime.ts"), "utf8");
   expect(runtime).toContain(`frameBytes: ${COWORK_NATIVE_LIMITS.muxPayloadBytes.runtime / 1024} * 1024`);
@@ -235,6 +239,9 @@ test("the contract document names every production symbol, every message type an
   const doc = readFileSync(join(import.meta.dir, "..", "..", "..", "..", "..", "docs", "cowork-native-worker.md"), "utf8");
   for (const symbol of COWORK_LIBKRUN_PRODUCTION_ABI) expect(`${symbol.name}:${doc.includes(symbol.signature)}`).toBe(`${symbol.name}:true`);
   for (const type of new Set(lines.positive.map(entry => entry.t))) expect(`${type}:${doc.includes(`\`${type}\``)}`).toBe(`${type}:true`);
+  // Contract revision 3: every new bootstrap message, envelope kind, stream and fault is named in the prose too.
+  for (const name of ["shares", "shares_mounted", "share_revoke", "share_event", "share_revoked", "share_notice", "file_in", "file_out", "FILE_IN", "FILE_OUT", "browseUid", "continuation", "endedGuestBoots", "continuations", "--shares-v1", "file-channel-v1", ...COWORK_NATIVE_BOOTSTRAP_FAULTS, ...COWORK_NATIVE_SHARE_NOTICE_KINDS])
+    expect(`${name}:${doc.includes(name)}`).toBe(`${name}:true`);
   for (const cls of COWORK_NATIVE_MUX_CLASSES) expect(doc).toContain(cls);
 });
 test("the vector files are exactly the six the contract names, and nothing else lives beside them", () => {
@@ -310,7 +317,11 @@ test("every conversation negative is covered by a vector, and the set rules are 
 });
 test("the new bootstrap faults, the guest fault and the new worker states are appended, never renumbered", () => {
   expect([...COWORK_NATIVE_WORKER_STATUS]).toEqual(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "guest_halted", "exiting", "halting", "guest_fault"]);
-  expect([...COWORK_NATIVE_BOOTSTRAP_FAULTS]).toEqual(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations"]);
+  expect([...COWORK_NATIVE_BOOTSTRAP_FAULTS]).toEqual(["bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations",
+    "share_inventory", "share_mount_failed", "resume_store_missing", "fresh_store_not_empty"]);
+  expect([...COWORK_NATIVE_REFUSAL_CODES].at(-1)).toBe("shares_rejected");
+  expect([...COWORK_NATIVE_ENVELOPE_KINDS]).toEqual(["scope", "volumes", "drain", "status", "fault", "shares", "share_revoke", "share_event"]);
+  expect([...COWORK_NATIVE_RUNTIME_STREAMS]).toEqual(["in", "out", "err", "file_in", "file_out"]);
   expect([...COWORK_NATIVE_WORKER_STATES]).toEqual(["sandboxed", "volumes_accepted", "vm_running", "guest_hello", "draining", "drain_acked", "exited", "halting", "guest_fault"]);
   expect([...COWORK_NATIVE_GUEST_FAULTS]).toEqual(["unmount_failed", "supervisor_lost", "protocol_violation", "internal"]);
   for (const [name, state] of [["status-halting", 9], ["status-guest-fault", 10]] as const) expect(Buffer.from(envelopes.positive.find(entry => entry.name === name)!.hex, "hex").readUInt32LE(16)).toBe(state);
@@ -442,4 +453,102 @@ test("runtime IN flow control: at most 1 MiB of IN bytes in flight with no OUT o
 test("a conversation's uids and gid stay below nobody (65534) and 65535, and the shared gid is no member's uid", () => {
   const names = mux.negative.map(entry => entry.name);
   expect(names).toEqual(expect.arrayContaining(["conversations-uid-nobody-65534", "conversations-uid-65535", "conversations-gid-nobody", "conversations-gid-equals-a-tool-uid"]));
+});
+
+// ---------------------------------------------------------------- contract revision 3: shares, cold resume, the file channel
+import { COWORK_GUEST_FILE_LIMITS } from "../../../src/cowork/guest-file-channel";
+interface ArgvVectors { positive: { name: string; argv: string[] }[]; negative: { name: string; argv: string[] }[] }
+interface FileFlowVectors { fileRequestBytes: number; fileResponseBytes: number; fileInFlightRequests: number; fileCases: { name: string; steps: { stream: "in" | "out" | "err" | "file_in" | "file_out"; bytes: number; newlines?: number }[]; refusedAt: number | null; error: string | null }[] }
+const argvVectors = (vector<{ workerArgv: ArgvVectors }>("envelopes.json")).workerArgv;
+const fileFlows = vector<FileFlowVectors>("runtime-flow.json");
+test("the file channel's bounds are the channel's own literals, and FILE_IN has its own count", () => {
+  expect<number>(COWORK_NATIVE_LIMITS.fileRequestBytes).toBe(COWORK_GUEST_FILE_LIMITS.requestFrameBytes);
+  expect<number>(COWORK_NATIVE_LIMITS.fileResponseBytes).toBe(COWORK_GUEST_FILE_LIMITS.responseFrameBytes);
+  expect([fileFlows.fileRequestBytes, fileFlows.fileResponseBytes, fileFlows.fileInFlightRequests]).toEqual([COWORK_NATIVE_LIMITS.fileRequestBytes, COWORK_NATIVE_LIMITS.fileResponseBytes, COWORK_NATIVE_LIMITS.fileInFlightRequests]);
+  // The guest relay gives FILE_IN its own 256 KiB ring: four times the most the host may have outstanding, the same safety factor as the runtime ring.
+  expect(4 * COWORK_NATIVE_LIMITS.fileInFlightRequests * COWORK_NATIVE_LIMITS.fileRequestBytes).toBe(256 * 1024);
+  expect(COWORK_NATIVE_FILE_CHANNEL_CAPABILITY).toBe("file-channel-v1");
+});
+test("file channel flow: four outstanding requests, lines bounded, a response answers one, and neither file stream touches the runtime IN count", () => {
+  for (const entry of fileFlows.fileCases) {
+    const streams = new CoworkNativeRuntimeStreams(1);
+    let refusedAt: number | null = null, error: string | null = null;
+    for (const [index, step] of entry.steps.entries()) {
+      const data = new Uint8Array(step.bytes).fill(0x61);
+      for (let i = 0; i < (step.newlines ?? 0); i++) data[step.bytes - 1 - i] = 0x0a;
+      const failed = code(() => streams.accept({ class: "runtime", seq: index + 1, conversation: 0, stream: step.stream, end: false, payload: data }));
+      if (failed !== "accepted") { refusedAt = index; error = failed; break; }
+    }
+    expect(`${entry.name}:${refusedAt}:${error}`).toBe(`${entry.name}:${entry.refusedAt}:${entry.error}`);
+  }
+  expect(fileFlows.fileCases.length).toBeGreaterThanOrEqual(15);
+});
+test("a refused file frame changes nothing: the next legal frame is judged against the state before it", () => {
+  const streams = new CoworkNativeRuntimeStreams(1), line = (n: number) => { const b = new Uint8Array(n).fill(0x61); b[n - 1] = 0x0a; return b; };
+  const send = (stream: "file_in" | "file_out", payload: Uint8Array) => code(() => streams.accept({ class: "runtime", seq: 1, conversation: 0, stream, end: false, payload }));
+  for (let i = 0; i < 3; i++) expect(send("file_in", line(10))).toBe("accepted");
+  const two = new Uint8Array(20).fill(0x61); two[9] = 0x0a; two[19] = 0x0a;
+  expect(send("file_in", two)).toBe("oversize"); // the fifth request is in the same frame: all of it is refused
+  expect(streams.fileRequestBudget).toBe(1);
+  expect(send("file_in", line(10))).toBe("accepted");
+  expect(send("file_out", line(10))).toBe("accepted");
+  expect(streams.fileRequestBudget).toBe(1);
+});
+test("the file streams travel only on conversation 0 and only their own way; stream 4 travelling up is a direction error", () => {
+  const frame = (conversation: number, stream: number) => { const b = Buffer.alloc(16 + 6); b.write("WMX1", 0, "latin1"); b[4] = 1; b[5] = 2; b.writeUInt32LE(1, 8); b.writeUInt32LE(6, 12); b[16] = conversation; b[17] = stream; b[20] = 0x61; b[21] = 0x0a; return Uint8Array.from(b); };
+  expect(code(() => parseCoworkNativeMuxFrame(frame(0, 4), "down"))).toBe("accepted");
+  expect(code(() => parseCoworkNativeMuxFrame(frame(0, 5), "up"))).toBe("accepted");
+  expect(code(() => parseCoworkNativeMuxFrame(frame(0, 4), "up"))).toBe("bad_direction");
+  expect(code(() => parseCoworkNativeMuxFrame(frame(0, 5), "down"))).toBe("bad_direction");
+  for (const conversation of [1, 15]) for (const [stream, dir] of [[4, "down"], [5, "up"]] as const) expect(code(() => parseCoworkNativeMuxFrame(frame(conversation, stream), dir))).toBe("bad_field");
+  expect(code(() => parseCoworkNativeMuxFrame(frame(0, 6), "up"))).toBe("bad_field");
+  expect(mux.negative.find(entry => entry.name === "runtime-stream-four")!.error).toBe("bad_direction");
+});
+test("bootstrap JSON is version 2 and control JSON stays version 1; a payload one revision behind or ahead is told `version`", () => {
+  for (const entry of mux.positive.filter(item => item.class === "bootstrap")) expect(Buffer.from(entry.hex, "hex").subarray(16, 23).toString("latin1")).toBe('{"v":2,');
+  for (const entry of mux.positive.filter(item => item.class === "control")) expect(Buffer.from(entry.hex, "hex").subarray(16, 23).toString("latin1")).toBe('{"v":1,');
+  for (const name of ["bootstrap-version-one", "bootstrap-version-three"]) expect(mux.negative.find(entry => entry.name === name)!.error).toBe("version");
+});
+test("shares: the guest message and the L1 line follow one rule set (kinds, mounts, modes, tags), and every Winter share has its fixed mount", () => {
+  const message = parseCoworkNativeMuxFrame(bytes(mux.positive.find(entry => entry.name === "bootstrap-down-shares")!.hex), "down");
+  expect(message.class === "bootstrap" && message.message.t === "shares" && message.message.shares.map(share => share.kind)).toEqual(["folder", "folder", "guidance", "memory", "outputs"]);
+  if (message.class === "bootstrap" && message.message.t === "shares") for (const share of message.message.shares) if (share.kind !== "folder") expect(share.guestPath).toBe(COWORK_NATIVE_SHARE_MOUNTS[share.kind]);
+  const line = parseCoworkNativeLauncherLine(lines.positive.find(entry => entry.name === "shares-two-records")!.line, "to-launcher", 2);
+  expect(line.t === "shares" && line.shares.map(share => [share.kind, share.mode])).toEqual([["folder", "rw"], ["guidance", "ro"]]);
+  for (const rule of ["shares-nested-paths", "shares-equal-paths", "shares-same-identity", "shares-guidance-read-write", "shares-wrong-rights"]) expect(lines.negative.some(entry => entry.name === rule)).toBe(true);
+  for (const rule of ["shares-thirteen", "shares-ten-folders", "shares-two-memory", "shares-guidance-writable", "shares-memory-read-only", "shares-folder-nested-mount", "shares-duplicate-tag"]) expect(mux.negative.some(entry => entry.name === rule)).toBe(true);
+});
+test("the SHARES envelope carries one descriptor per share, fixed 308 byte slots, and the ABI flag bits; share events number their notice kinds from 1", () => {
+  const entry = envelopes.positive.find(item => item.name === "shares-two")!, parsed = parseCoworkNativeEnvelope(bytes(entry.hex), 2, "to-worker");
+  expect(parsed.kind === "shares" && parsed.shares.map(share => [share.tag, share.readOnly, share.winterShare])).toEqual([["src-0", false, false], ["winter-guidance", true, true]]);
+  expect(Buffer.from(entry.hex, "hex").readUInt32LE(16 + 8 + 48)).toBe(4); // folder rules
+  expect(Buffer.from(entry.hex, "hex").readUInt32LE(16 + 8 + 308 + 48)).toBe(1 | 2); // read-only Winter share
+  const notices = envelopes.positive.filter(item => item.kind === "share_event" && item.name.startsWith("share-event-notice-"));
+  expect(notices.map(item => Buffer.from(item.hex, "hex").readUInt32LE(16 + 36))).toEqual(COWORK_NATIVE_SHARE_NOTICE_KINDS.map((_, index) => index + 1));
+  for (const rights of [0, 1, 3]) expect(code(() => parseCoworkNativeEnvelope(bytes(entry.hex), rights, "to-worker"))).toBe("bad_rights");
+});
+test("worker argv: [path] without shares, otherwise the --shares-v1 form, strict and round-tripping", () => {
+  expect(COWORK_NATIVE_WORKER_SHARES_FLAG).toBe("--shares-v1");
+  for (const entry of argvVectors.positive) expect(serializeCoworkNativeWorkerArgv(parseCoworkNativeWorkerArgv(entry.argv))).toEqual(entry.argv);
+  for (const entry of argvVectors.negative) expect(`${entry.name}:${code(() => parseCoworkNativeWorkerArgv(entry.argv))}`).not.toBe(`${entry.name}:accepted`);
+  expect(argvVectors.negative.length).toBeGreaterThanOrEqual(15);
+});
+test("cold resume: continuation and ended boots ride in the runtime, a fresh store has no ended boot, the live boot is never ended, and runtime_ready says which ran", () => {
+  const resume = parseCoworkNativeMuxFrame(bytes(mux.positive.find(entry => entry.name === "bootstrap-down-conversations-resume")!.hex), "down");
+  expect(resume.class === "bootstrap" && resume.message.t === "conversations" && resume.message.conversations[0]!.runtime).toMatchObject({ continuation: "resume", endedGuestBoots: expect.any(Array) });
+  const ready = parseCoworkNativeMuxFrame(bytes(mux.positive.find(entry => entry.name === "bootstrap-up-runtime-ready-resumed")!.hex), "up");
+  expect(ready.class === "bootstrap" && ready.message.t === "runtime_ready" && ready.message.continuations).toEqual(["resume"]);
+  for (const rule of ["conversations-fresh-with-ended-boots", "conversations-ended-boots-include-the-live-boot", "conversations-ended-boots-repeated", "conversations-ended-boots-five", "conversations-continuation-unknown", "conversations-timeout-over-a-day", "runtime-ready-continuations-longer-than-the-set", "runtime-ready-continuation-either"])
+    expect(mux.negative.some(entry => entry.name === rule)).toBe(true);
+  expect<number>(COWORK_NATIVE_LIMITS.runtimeTimeoutCeilingMs).toBe(24 * 60 * 60 * 1000);
+});
+test("the browse uid is one per workspace, distinct from every runtime uid, tool uid and group, inside the unix id range", () => {
+  const set = parseCoworkNativeMuxFrame(bytes(mux.positive.find(entry => entry.name === "bootstrap-down-conversations-browse-uid")!.hex), "down");
+  expect(set.class === "bootstrap" && set.message.t === "conversations" && set.message.browseUid).toBe(21000);
+  for (const rule of ["browse-uid-equals-runtime-uid", "browse-uid-equals-tool-uid", "browse-uid-equals-gid", "browse-uid-nobody", "browse-uid-missing"]) expect(mux.negative.some(entry => entry.name === `conversations-${rule}`)).toBe(true);
+});
+test("bootstrap order with shares: shares only after mounted and before the set, the set only after shares_mounted", () => {
+  const byName = (name: string) => orders.cases.find(entry => entry.name === name)!.result;
+  expect(byName("full-sequence-with-shares")).toEqual({ ok: true });
+  for (const name of ["conversations-before-shares-mounted", "shares-after-conversations", "shares-before-mounted", "shares-mounted-without-shares", "shares-twice"]) expect(byName(name)).toMatchObject({ ok: false, reason: "out_of_order" });
 });
