@@ -2,7 +2,10 @@
 // interrupt reach the door's drivers (and compaction refuses typed); without one nothing changes and the drivers are never
 // asked. `session.list` carries the row's workspace reference from the host binding; remote never sees or reaches the row.
 // Also: provisioning admission through S7B's port when a host supplies it, and truthful capabilities. No guest boots here.
-import { afterEach, expect, test } from "bun:test";
+import { setDefaultTimeout, afterEach, expect, test } from "bun:test";
+
+// Whole-repo source scans (AST/regex over every package): a loaded CI runner can pass bun's 5 s default, so these files get 30 s.
+setDefaultTimeout(30_000);
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
