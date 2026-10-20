@@ -27,22 +27,24 @@ export const ASK_USER_QUESTION_TOOL = "AskUserQuestion";
  * Only `questions` is modelled: this schema's job is to VALIDATE, never to reshape. The answer is
  * returned as `{ ...input, answers }` off the ORIGINAL object, so `answers`/`annotations`/`metadata`
  * (and anything a later runtime adds) ride through untouched whether or not they appear here — the
- * "strip unknown keys" default can therefore never lose a field. `header` is `.optional()` even
- * though the descriptor marks it required, because Winter's own `QuestionSchema` has made it optional
- * since chat's simplified card shipped: a header-less question is a genuinely valid Winter question
- * (the simplified card), and refusing one here would be stricter than the surface it feeds.
+ * "strip unknown keys" default can therefore never lose a field. `header` is REQUIRED (1–12), as the
+ * runtime's own executor requires it (SDK #47): a header-less question would be asked, answered and THEN
+ * rejected by the executor, so it is refused here, up front, before anyone is asked. (Winter's wire
+ * `QuestionSchema` keeps `header` optional for chat's simplified card; this tool never produces one.)
+ * `options: null` is a free-text question like an absent or empty list, and a free-text question is never
+ * multiple-choice (`multiSelect` is forced false, as the runtime does).
  */
 export const AskUserQuestionInput = z.object({
   questions: z.array(z.object({
     question: z.string().min(1),
-    header: z.string().min(1).max(12).optional(),
+    header: z.string().min(1).max(12),
     options: z.array(z.object({
       label: z.string().min(1),
       description: z.string().optional(),
       preview: z.string().optional(),
     })).max(4).refine((options) => options.length !== 1, {
       message: "options must be omitted or empty (a free-text question) or hold 2-4 entries",
-    }).optional(),
+    }).nullable().optional(),
     multiSelect: z.boolean().optional(),
     placeholder: z.string().optional(),
   })).min(1).max(4),
@@ -161,13 +163,14 @@ export function askUserQuestionBridge(deps: AskUserQuestionDeps): AskUserQuestio
       const placeholder = clampPlaceholder(q.placeholder);
       return {
         question: q.question,
-        ...(q.header ? { header: q.header } : {}),
+        header: q.header,
         options: (q.options ?? []).map((o) => ({
           label: o.label,
           ...(o.description ? { description: o.description } : {}),
           ...(o.preview ? { preview: o.preview } : {}),
         })),
-        multiSelect: q.multiSelect ?? false,
+        // A free-text question is never multiple-choice (the runtime forces it false too).
+        multiSelect: (q.options ?? []).length > 0 && (q.multiSelect ?? false),
         ...(placeholder ? { placeholder } : {}),
       };
     });

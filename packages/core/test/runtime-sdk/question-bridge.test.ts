@@ -128,15 +128,24 @@ test("the model's own annotations survive the notes merge", async () => {
   });
 });
 
-test("multiSelect defaults to false and an absent header stays an absent KEY", async () => {
+test("a header-less question is refused UP FRONT (the runtime requires 1-12), before anyone is asked", async () => {
+  const h = bridge();
+  const { ctx } = signalOf();
+  const res = await h.ask("tu-nohdr", { questions: [{ question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }] }, ctx);
+  expect(res.behavior).toBe("deny");
+  expect((res as { message: string }).message).toContain("header");
+  expect(h.events).toEqual([]);
+});
+
+test("multiSelect defaults to false", async () => {
   const h = bridge();
   const { ctx } = signalOf();
   const pending = h.ask("tu-q1", {
-    questions: [{ question: "Go?", options: [{ label: "Yes" }, { label: "No" }] }],
+    questions: [{ question: "Go?", header: "Go", options: [{ label: "Yes" }, { label: "No" }] }],
   }, ctx);
   const q = (h.events[0] as { questions: Record<string, unknown>[] }).questions[0]!;
   expect(q.multiSelect).toBe(false);
-  expect("header" in q).toBe(false);
+  expect(q.header).toBe("Go");
   expect(q.options).toEqual([{ label: "Yes" }, { label: "No" }]);
   h.questions.respond(SESSION, "tu-q1", { "Go?": "Yes" }, "phone");
   await pending;
@@ -316,15 +325,15 @@ test("the hard-coded §5.6 schema accepts the documented shape", () => {
   expect(AskUserQuestionInput.safeParse({
     questions: [
       { question: "a?", header: "A", options: [{ label: "1" }, { label: "2" }], multiSelect: true },
-      { question: "b?", options: [{ label: "1" }, { label: "2" }, { label: "3" }, { label: "4" }] },
+      { question: "b?", header: "B", options: [{ label: "1" }, { label: "2" }, { label: "3" }, { label: "4" }] },
     ],
     answers: {},
     annotations: {},
     metadata: { source: "x" },
   }).success).toBe(true);
   // 1..4 questions, 2..4 options — the descriptor's own bounds
-  expect(AskUserQuestionInput.safeParse({ questions: new Array(5).fill({ question: "q", options: [{ label: "a" }, { label: "b" }] }) }).success).toBe(false);
-  expect(AskUserQuestionInput.safeParse({ questions: [{ question: "q", options: new Array(5).fill({ label: "a" }) }] }).success).toBe(false);
+  expect(AskUserQuestionInput.safeParse({ questions: new Array(5).fill({ question: "q", header: "H", options: [{ label: "a" }, { label: "b" }] }) }).success).toBe(false);
+  expect(AskUserQuestionInput.safeParse({ questions: [{ question: "q", header: "H", options: new Array(5).fill({ label: "a" }) }] }).success).toBe(false);
 });
 
 // -------------------------------------------------------------------------------------------
@@ -395,11 +404,25 @@ test("clampPlaceholder: short stays, blank drops, exactly-max stays whole", () =
 });
 
 test("the schema takes 0 or 2-4 options and still refuses exactly one", () => {
-  const q = (extra: Record<string, unknown>) => AskUserQuestionInput.safeParse({ questions: [{ question: "q", ...extra }] }).success;
+  const q = (extra: Record<string, unknown>) => AskUserQuestionInput.safeParse({ questions: [{ question: "q", header: "H", ...extra }] }).success;
   expect(q({})).toBe(true);
+  expect(q({ options: null })).toBe(true); // null is a free-text question too (SDK #47)
+  expect(AskUserQuestionInput.safeParse({ questions: [{ question: "q" }] }).success).toBe(false); // header required
+  expect(q({ header: "x".repeat(13) })).toBe(false);
   expect(q({ options: [] })).toBe(true);
   expect(q({ options: [{ label: "a" }] })).toBe(false);
   expect(q({ options: [{ label: "a" }, { label: "b" }] })).toBe(true);
   expect(q({ options: new Array(5).fill({ label: "a" }) })).toBe(false);
   expect(q({ placeholder: "hint" })).toBe(true);
+});
+
+test("a free-text question is never multiple-choice, and `options: null` asks as `[]` (SDK #47)", async () => {
+  const h = bridge();
+  const { ctx } = signalOf();
+  const pending = h.ask("tu-null", { questions: [{ question: "Name?", header: "Name", options: null, multiSelect: true }] }, ctx);
+  const asked = QuestionAskedEvent.parse({ ...h.events[0], seq: 1, ts: FIXED_NOW });
+  expect(asked.questions[0]!.options).toEqual([]);
+  expect(asked.questions[0]!.multiSelect).toBe(false);
+  h.questions.respond(SESSION, "tu-null", { "Name?": "Winter" }, "app");
+  await pending;
 });
