@@ -86,6 +86,49 @@ enum IslandUsagePresentation {
         }
     }
 
+    /// PURE: a window's name on a plan line, short like the plans' own ("5-hour", "Weekly", a per-model weekly window by its
+    /// model alone).
+    static func lineTitle(_ gaugeTitle: String) -> String {
+        let t = gaugeTitle.replacingOccurrences(of: " · background jobs", with: "")
+        switch t {
+        case "Background jobs' plan": return "Jobs"
+        case "Weekly window · with extra usage": return "Weekly+"
+        case "Plan window": return "Plan"
+        case "Extra usage": return "Extra"
+        default:
+            if t.hasPrefix("Weekly window · ") { return String(t.dropFirst("Weekly window · ".count)) }
+            return t.replacingOccurrences(of: " window", with: "")
+        }
+    }
+
+    /// PURE: the windows Winter's own sessions report (the Codex ones sit in the Codex slot) as a plan of its own, on the
+    /// plan block's lines in Winter's colour (user 2026-10-19, the third pass: they ARE plan windows, so they take the
+    /// plan line — no ring tiles). A window the runtime gave no figure for is not a line; with none at all, the plan says
+    /// its status in words. Nil without windows.
+    static func winterSlot(_ gauges: [IslandUsageGauge]) -> UsagePlanSlot? {
+        guard let first = gauges.first else { return nil }
+        let rings = gauges.compactMap { g -> UsagePlanRing? in
+            guard let f = g.fraction ?? (g.refused ? 1 : nil) else { return nil }
+            return UsagePlanRing(id: g.id, title: lineTitle(g.title), fraction: f, resets: g.resets, stale: false,
+                                 resetsHover: g.resets.map { $0.prefix(1).uppercased() + $0.dropFirst() })
+        }
+        let reported = first.reported.hasPrefix("reported ") ? String(first.reported.dropFirst("reported ".count)) : first.reported
+        let empty = rings.isEmpty
+            ? gauges.map { "\(lineTitle($0.title)): \($0.status.lowercased())" }.joined(separator: " · ")
+            : nil
+        return UsagePlanSlot(id: "winter", title: "Winter", rings: rings, sourceLine: "From Winter · \(reported)",
+                             emptyLine: empty, planType: nil)
+    }
+
+    /// PURE: a session's context as a plan line ("Context", how full; its model on the right) — nil without a measured
+    /// fill (then only its words show).
+    static func contextSlot(_ c: IslandUsageContext) -> UsagePlanSlot? {
+        guard let f = c.fraction else { return nil }
+        return UsagePlanSlot(id: "winter-context", title: c.title,
+                             rings: [UsagePlanRing(id: "context", title: "Context", fraction: f, resets: nil, stale: false)],
+                             sourceLine: c.model ?? "", emptyLine: nil, planType: nil)
+    }
+
     /// PURE: a runtime window's gauge id — its provider AND kind (two providers' five-hour windows are two gauges).
     static func windowId(_ w: IslandUsageWindow) -> String {
         "window-\(w.provider ?? "unknown")-\(w.rateLimitType ?? "plan")"
@@ -177,8 +220,15 @@ final class IslandUsageModel: ObservableObject {
     /// Usage and cost tracking (`docs/claude/usage.md`): the plans and the selected range's cost.
     @Published private(set) var summary: UsageSummary?
     @Published var range: UsageRange = .day { didSet { if range != oldValue { Task { await refreshSummary() } } } }
+    /// The plan alarms (their ticks); nil before an answer or from a daemon with none (the lines then take no clicks).
+    @Published private(set) var alarms: [UsageAlarm]?
 
     var fetchSummary: (UsageRange) async throws -> UsageSummary? = { _ in nil }
+    /// `usage.alarms.set` / `.remove`, each answering the whole list.
+    var setAlarm: (_ provider: String, _ windowKey: String, _ thresholdPercent: Int) async throws -> [UsageAlarm] = { _, _, _ in [] }
+    var removeAlarm: (_ id: String) async throws -> [UsageAlarm] = { _ in [] }
+    /// Bumped by every alarm edit: a summary asked for before one does not overwrite its answer.
+    private var alarmEdits = 0
     /// "Open usage": the Usage window.
     var openUsage: () -> Void = {}
 
@@ -205,8 +255,27 @@ final class IslandUsageModel: ObservableObject {
 
     func refreshSummary() async {
         let asked = range
+        let edits = alarmEdits
         guard let s = try? await fetchSummary(asked), asked == range else { return }
         summary = s
+        if edits == alarmEdits { alarms = s.alarms }
+    }
+
+    /// What a click on a plan line does (`UsageAlarmRules`) — nil while the daemon has no alarms.
+    var alarmActions: UsageAlarmActions? {
+        guard alarms != nil else { return nil }
+        return UsageAlarmActions(
+            set: { [weak self] provider, key, pct in self?.editAlarms { try await $0.setAlarm(provider, key, pct) } },
+            remove: { [weak self] id in self?.editAlarms { try await $0.removeAlarm(id) } })
+    }
+
+    private func editAlarms(_ edit: @escaping (IslandUsageModel) async throws -> [UsageAlarm]) {
+        alarmEdits += 1
+        Task { [weak self] in
+            guard let self, let list = try? await edit(self) else { return }
+            self.alarmEdits += 1
+            self.alarms = list
+        }
     }
 
     /// Test seam: set what a refresh would.
@@ -214,6 +283,7 @@ final class IslandUsageModel: ObservableObject {
                        summary: UsageSummary? = nil) {
         self.snapshot = snapshot
         self.summary = summary
+        self.alarms = summary?.alarms
         self.roles = roles
         self.sessionTitle = sessionTitle
     }
@@ -239,216 +309,398 @@ struct IslandUsageTab: View {
         let context = IslandUsagePresentation.context(snapshot.session, title: model.sessionTitle)
         let background = IslandUsagePresentation.background(snapshot.background, now: now)
         let notes = IslandUsagePresentation.notes(model.roles, now: now)
-        VStack(alignment: .leading, spacing: 12) {
-            // Usage and cost (`docs/claude/usage.md`), compact: the plans, the range's cost, the top models, the window.
-            IslandUsageCompact(model: model, now: now)
-            // Other providers' runtime-reported windows (the Codex ones are in the Codex slot above).
-            let codexIds = Set(snapshot.windows.filter { $0.provider == "codex-oauth" }.map(IslandUsagePresentation.windowId))
-            let others = gauges.filter { !codexIds.contains($0.id) }
-            if !others.isEmpty {
-                section("Other plan windows")
-                VStack(spacing: 8) {
-                    ForEach(Array(stride(from: 0, to: others.count, by: 2)), id: \.self) { i in
-                        HStack(spacing: 8) {
-                            IslandUsageGaugeTile(gauge: others[i])
-                            if i + 1 < others.count { IslandUsageGaugeTile(gauge: others[i + 1]) } else { Color.clear.frame(maxWidth: .infinity) }
-                        }
-                    }
+        // Other providers' runtime-reported windows (the Codex ones are in the Codex slot): Winter's own plan.
+        let codexIds = Set(snapshot.windows.filter { $0.provider == "codex-oauth" }.map(IslandUsagePresentation.windowId))
+        let winter = IslandUsagePresentation.winterSlot(gauges.filter { !codexIds.contains($0.id) })
+        let contextSlot = context.flatMap(IslandUsagePresentation.contextSlot)
+        VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
+            // Usage and cost (`docs/claude/usage.md`), compact: the plans (Winter's own last), the range's cost, the
+            // session's context — every line on one title column.
+            IslandUsageCompact(model: model, now: now, winter: winter, context: contextSlot) {
+                if let context {
+                    if contextSlot == nil { IslandGroupTitle(title: context.title, meta: context.model) }
+                    Text([context.contextLine, context.tokensLine].compactMap { $0 }.joined(separator: " · "))
+                        .font(Typography.tiny())
+                        .foregroundStyle(Theme.textMuted)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            if let context {
-                section("This session")
-                IslandUsageContextRow(context: context)
+            // Winter's background jobs: words, amber only while they wait out a limit.
+            VStack(alignment: .leading, spacing: 3) {
+                IslandGroupTitle(title: "Background jobs", meta: background.line,
+                                 metaColor: background.limited ? pillReviewAmber : nil)
+                Text(background.tokensLine).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1)
             }
-            section("Background jobs")
-            IslandHoverSurface { _ in
-                HStack(spacing: 10) {
-                    Image(systemName: background.limited ? "hourglass" : "checkmark.circle")
-                        .font(Typography.label(.semibold))
-                        .foregroundStyle(background.limited ? pillReviewAmber : Theme.textMuted)
-                        .frame(width: 22)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(background.line).font(Typography.label(.medium)).foregroundStyle(Color.white)
-                        Text(background.tokensLine).font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                    }
-                    Spacer(minLength: 0)
-                }
-                .padding(.horizontal, 12)
-                .frame(height: 46)
-            }
+            .padding(.horizontal, 6)
             if !notes.isEmpty {
-                section("Notes")
                 VStack(alignment: .leading, spacing: 6) {
+                    IslandGroupTitle(title: "Notes")
                     ForEach(notes) { note in
-                        VStack(alignment: .leading, spacing: 2) {
-                            HStack {
-                                Text(note.role).font(Typography.label(.medium)).foregroundStyle(Color.white)
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 8) {
+                                Text(note.role).font(Typography.tiny(.semibold)).foregroundStyle(Color.white.opacity(0.92))
                                 Spacer(minLength: 6)
                                 if let m = note.model {
-                                    Text(m).font(Typography.captionMono()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
+                                    Text(m).font(Typography.tiny()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
                                 }
                             }
-                            Text(note.text).font(Typography.caption()).foregroundStyle(Theme.textMuted)
+                            Text(note.text).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
-                        .background(RoundedRectangle(cornerRadius: IslandLayout.rowCorner, style: .continuous).fill(Color.white.opacity(0.06)))
                     }
                 }
+                .padding(.horizontal, 6)
             }
         }
         .padding(.horizontal, 14)
         .padding(.bottom, 14)
     }
-
-    private func section(_ title: String) -> some View {
-        Text(title.uppercased())
-            .font(Typography.tiny(.semibold))
-            .tracking(0.6)
-            .foregroundStyle(Theme.textMuted)
-            .padding(.horizontal, 6)
-            .padding(.top, 2)
-    }
-}
-
-struct IslandUsageGaugeTile: View {
-    let gauge: IslandUsageGauge
-
-    var body: some View {
-        IslandHoverSurface { _ in
-            HStack(spacing: 10) {
-                if let f = gauge.fraction {
-                    IslandRing(fraction: f, color: islandFillColor(f, refused: gauge.refused))
-                } else {
-                    Image(systemName: gauge.refused ? "xmark.octagon.fill" : "checkmark.seal.fill")
-                        .font(Typography.heading(.regular))
-                        .foregroundStyle(gauge.refused ? Color(nsColor: .systemRed) : Theme.accent)
-                        .frame(width: 44, height: 44)
-                }
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(gauge.title).font(Typography.label(.medium)).foregroundStyle(Color.white).lineLimit(1)
-                    Text(gauge.status).font(Typography.caption())
-                        .foregroundStyle(gauge.refused ? Color(nsColor: .systemRed) : Theme.textMuted).lineLimit(1)
-                    Text(gauge.resets ?? gauge.reported).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                }
-                Spacer(minLength: 0)
-            }
-            .padding(10)
-        }
-    }
-}
-
-struct IslandUsageContextRow: View {
-    let context: IslandUsageContext
-
-    var body: some View {
-        IslandHoverSurface { _ in
-            HStack(spacing: 12) {
-                if let f = context.fraction {
-                    IslandRing(fraction: f, color: islandFillColor(f))
-                } else {
-                    Image(systemName: "text.bubble")
-                        .font(Typography.heading(.regular))
-                        .foregroundStyle(Theme.textMuted)
-                        .frame(width: 44, height: 44)
-                }
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(context.title).font(Typography.label(.medium)).foregroundStyle(Color.white).lineLimit(1)
-                    if let line = context.contextLine {
-                        Text(line).font(Typography.caption()).foregroundStyle(Theme.textMuted)
-                    }
-                    Text(context.tokensLine).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                    if let f = context.fraction {
-                        IslandBar(fraction: f, color: islandFillColor(f)).padding(.top, 2)
-                    }
-                }
-                Spacer(minLength: 0)
-                if let model = context.model {
-                    Text(model).font(Typography.captionMono()).foregroundStyle(Theme.textMuted).lineLimit(1).truncationMode(.middle)
-                        .frame(maxWidth: 140, alignment: .trailing)
-                }
-            }
-            .padding(10)
-        }
-    }
 }
 
 /// The Usage tab's compact top (`docs/claude/usage.md`): Codex's, Claude Code's and Antigravity's plan lines, the
 /// selected range's cost with a tiny sparkline, the top models, and "Open usage" for the full window.
-struct IslandUsageCompact: View {
+struct IslandUsageCompact<Below: View>: View {
     @ObservedObject var model: IslandUsageModel
     let now: Date
+    /// Winter's own plan windows (after the apps' plans) and the session's context line (after the cost) — on the same
+    /// title column; what is said under the context.
+    var winter: UsagePlanSlot? = nil
+    var context: UsagePlanSlot? = nil
+    @ViewBuilder var below: () -> Below
 
     var body: some View {
         let summary = model.summary
-        VStack(alignment: .leading, spacing: 8) {
+        // The cost block sits on the plan block's own rhythm: the same gap above it as between two plans.
+        VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
             // Codex and its lines, then Claude Code's, then Antigravity's (user 2026-10-18) — only the apps on this Mac,
-            // one title column for every line (wider than 52 pt only when a title needs it).
+            // one title column for every line (wider than 52 pt only when a title needs it) — the cost block's lines
+            // included, so every track starts at one x.
             let slots = UsagePresentation.plans(summary).filter { UsagePresentation.showsSlot($0.reading) }
-                .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) }
-            let titleWidth = UsagePresentation.titleColumnWidth(slots.flatMap { $0.rings.map(\.title) }, compact: true)
-            VStack(alignment: .leading, spacing: 10) {
+                .map { UsagePresentation.slot(provider: $0.provider, reading: $0.reading, now: now) } + (winter.map { [$0] } ?? [])
+            let titleWidth = UsagePresentation.titleColumnWidth(
+                (slots + (context.map { [$0] } ?? [])).flatMap { $0.rings.map(\.title) } + IslandCostBlock.lineTitles, compact: true)
+            VStack(alignment: .leading, spacing: IslandCostBlock.gapAbove) {
                 ForEach(slots) { slot in
-                    UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth)
+                    UsagePlanSlotCard(slot: slot, compact: true, titleWidth: titleWidth, alarms: model.alarms ?? [],
+                                      alarmActions: model.alarmActions)
                 }
             }
-            .padding(.horizontal, 6)
-            IslandHoverSurface { _ in
-                HStack(alignment: .center, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 3) {
-                        UsageRangePicker(range: $model.range, compact: true)
-                        HStack(alignment: .firstTextBaseline, spacing: 6) {
-                            Text(UsagePresentation.cost(summary?.totals.costUsd ?? 0))
-                                .font(Typography.heading(.semibold))
-                                .foregroundStyle(Color.white)
-                            Text(costDetail(summary)).font(Typography.caption()).foregroundStyle(Theme.textMuted).lineLimit(1)
-                        }
-                    }
-                    Spacer(minLength: 0)
-                    UsageSparkline(values: summary?.spark ?? [])
-                        .frame(width: 150, height: 34)
-                }
-                .padding(10)
-            }
-            if let top = summary?.topModels, !top.isEmpty {
-                VStack(spacing: 4) {
-                    ForEach(top.prefix(3)) { row in
-                        HStack(spacing: 8) {
-                            Text(UsagePresentation.modelName(row.model)).font(Typography.captionMono()).foregroundStyle(Color.white.opacity(0.9))
-                                .lineLimit(1).truncationMode(.middle)
-                            Text(UsagePresentation.sourceTitle(row.source)).font(Typography.tiny()).foregroundStyle(Theme.textMuted)
-                            Spacer(minLength: 6)
-                            Text(row.costBasis == "unknown" ? UsagePresentation.tokens(row.totals.tokens) + " tok" : UsagePresentation.cost(row.totals.costUsd))
-                                .font(Typography.captionDigits(.semibold)).foregroundStyle(Color.white.opacity(0.85))
-                        }
-                        .padding(.horizontal, 10)
-                    }
-                }
-            }
-            HStack {
-                Spacer()
-                Button(action: model.openUsage) {
-                    HStack(spacing: 5) {
-                        Text("Open usage").font(Typography.caption(.semibold))
-                        Image(systemName: "arrow.up.right").font(Typography.tiny(.semibold))
-                    }
-                    .foregroundStyle(Color.white.opacity(0.9))
-                    .padding(.horizontal, 12)
-                    .frame(height: 26)
-                    .background(Capsule().fill(Color.white.opacity(0.1)))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .pillHoverGlow(Color.white)
+            IslandCostBlock(model: model, titleWidth: titleWidth)
+            VStack(alignment: .leading, spacing: 3) {
+                if let context { UsagePlanSlotCard(slot: context, compact: true, titleWidth: titleWidth) }
+                below()
             }
         }
+        .padding(.horizontal, 6)
+    }
+}
+
+extension IslandUsageCompact where Below == EmptyView {
+    init(model: IslandUsageModel, now: Date, winter: UsagePlanSlot? = nil, context: UsagePlanSlot? = nil) {
+        self.init(model: model, now: now, winter: winter, context: context) { EmptyView() }
+    }
+}
+
+// MARK: - The cost block (the island's visual language)
+
+/// One model's segment of the cost line.
+struct IslandCostSegment: Identifiable, Equatable {
+    let id: String
+    /// The model as named ("claude-sonnet-4.5"); "Other" for the rest.
+    let name: String
+    let source: UsageSource?
+    /// Its share of the range's whole, 0…1.
+    let fraction: Double
+    /// What it says inside itself under the pointer: "$3.42", or "1.2k tok" for an unpriced model.
+    let label: String
+    /// Its rank within its source (0 the largest): a source's later segments are its colour, lighter.
+    let rank: Int
+    /// Its name with its source when another shown model shares the name ("gpt-5 · Codex").
+    var qualifiedName: String = ""
+
+    /// Under the pointer, the name the segment says at its start (its source added when another shown model shares the
+    /// name) — beside its figure, at its end, as a plan line says its reset and its figure; nil for "Other".
+    var hoverName: String? { qualifiedName.isEmpty ? nil : qualifiedName }
+}
+
+/// One name under the cost line: a top model (as the old list showed them), its colour from its segment — an unpriced
+/// model in a priced range has none, and says its tokens ("1.2k tok") instead.
+struct IslandCostLegendItem: Identifiable, Equatable {
+    let id: String
+    let name: String
+    /// Its segment on the line (nil: no segment — drawn grey).
+    let segmentId: String?
+    /// Words shown beside the name at rest: an unpriced model's tokens.
+    let note: String?
+}
+
+enum IslandCostPresentation {
+    /// The most models drawn as their own segments; the rest is one grey "Other".
+    static let segmentLimit = 4
+
+    /// PURE: the range's cost as one line of model segments — the top models (by cost, or by tokens when nothing in the
+    /// range is priced), each its share of the whole, largest first; what the top ones leave is "Other". Models with
+    /// nothing to show are dropped.
+    static func segments(_ summary: UsageSummary?) -> [IslandCostSegment] {
+        guard let summary else { return [] }
+        let byCost = summary.totals.costUsd > 0
+        func value(_ r: UsageModelRow) -> Double { byCost ? r.totals.costUsd : r.totals.tokens }
+        let rows = summary.topModels.filter { value($0) > 0 }.sorted { value($0) > value($1) }
+        let kept = Array(rows.prefix(segmentLimit))
+        let keptSum = kept.reduce(0) { $0 + value($1) }
+        let whole = max(byCost ? summary.totals.costUsd : summary.totals.tokens, keptSum)
+        guard whole > 0 else { return [] }
+        var ranks: [UsageSource: Int] = [:]
+        // Every model shown (on the line or under it) once, by id: a name counts twice only when two models share it.
+        var seen = Set<String>()
+        let names = (kept + summary.topModels.prefix(3)).filter { seen.insert($0.id).inserted }
+            .map { UsagePresentation.modelName($0.model) }
+        var out = kept.map { r -> IslandCostSegment in
+            let rank = ranks[r.source, default: 0]
+            ranks[r.source] = rank + 1
+            let label = byCost && r.costBasis != "unknown" ? UsagePresentation.cost(r.totals.costUsd)
+                : UsagePresentation.tokens(r.totals.tokens) + " tok"
+            let name = UsagePresentation.modelName(r.model)
+            return IslandCostSegment(id: r.id, name: name, source: r.source, fraction: value(r) / whole, label: label,
+                                     rank: rank, qualifiedName: qualified(name, source: r.source, among: names))
+        }
+        let rest = whole - keptSum
+        // "Other" only when it is a visible share (rounding never adds a sliver).
+        if rest / whole >= 0.005 {
+            out.append(IslandCostSegment(id: "other", name: "Other", source: nil, fraction: rest / whole,
+                                         label: byCost ? UsagePresentation.cost(rest) : UsagePresentation.tokens(rest) + " tok",
+                                         rank: 0))
+        }
+        return out
     }
 
-    private func costDetail(_ s: UsageSummary?) -> String {
-        guard let t = s?.totals, t.tokens > 0 else { return UsagePresentation.rangeTitle(model.range).lowercased() }
+    /// PURE: a segment's colour — its source's (`UsagePlanColor`: Codex green, Claude Code clay; Winter's own accent; a
+    /// quiet grey for OpenCode, which has no colour of its own), each later model of one source lighter; "Other" grey.
+    static func color(_ segment: IslandCostSegment) -> Color {
+        let base: Color
+        switch segment.source {
+        case .codex?: base = UsagePlanColor.codex
+        case .claudeCode?: base = UsagePlanColor.claudeCode
+        case .winter?: base = Theme.accent
+        case .opencode?: base = Color.white.opacity(0.55)
+        case nil: return Color.white.opacity(0.22)
+        }
+        return base.opacity(rankOpacity(segment.rank))
+    }
+
+    /// PURE: a source's n-th model's strength: 1, 0.7, 0.5, then 0.4.
+    static func rankOpacity(_ rank: Int) -> Double { [1, 0.7, 0.5][safe: rank] ?? 0.4 }
+
+    /// PURE: the words a hovered header adds after the total — the tokens and what was cached ("1.2M tokens · 300k
+    /// cached"), else the range's name.
+    static func detail(_ summary: UsageSummary?, range: UsageRange) -> String {
+        guard let t = summary?.totals, t.tokens > 0 else { return UsagePresentation.rangeTitle(range).lowercased() }
         var parts = ["\(UsagePresentation.tokens(t.input + t.output)) tokens"]
         if t.cacheRead > 0 { parts.append("\(UsagePresentation.tokens(t.cacheRead)) cached") }
         return parts.joined(separator: " · ")
+    }
+
+    /// PURE: a model's name with its source when another of `names` is the same ("gpt-5 · Codex"), else the name.
+    static func qualified(_ name: String, source: UsageSource, among names: [String]) -> String {
+        names.filter { $0 == name }.count > 1 ? "\(name) · \(UsagePresentation.sourceTitle(source))" : name
+    }
+
+    /// PURE: the names under the line — the top 3 models in the summary's own order (the ones the old list showed),
+    /// each with its segment's colour; one with no segment (an unpriced model while the range has a cost) says its
+    /// tokens beside its name, so it never vanishes. A source is added to a name another shown model shares.
+    static func legend(_ summary: UsageSummary?) -> [IslandCostLegendItem] {
+        guard let summary else { return [] }
+        let segmentIds = Set(segments(summary).map(\.id))
+        let rows = Array(summary.topModels.filter { $0.totals.costUsd > 0 || $0.totals.tokens > 0 }.prefix(3))
+        let names = rows.map { UsagePresentation.modelName($0.model) }
+        return rows.map { r in
+            let name = qualified(UsagePresentation.modelName(r.model), source: r.source, among: names)
+            let has = segmentIds.contains(r.id)
+            return IslandCostLegendItem(id: r.id, name: name, segmentId: has ? r.id : nil,
+                                        note: has ? nil : UsagePresentation.tokens(r.totals.tokens) + " tok")
+        }
+    }
+
+    /// PURE: the header as VoiceOver says it, at rest too — "Cost $70.22, 4.8M tokens · 51M cached".
+    static func headerAccessibility(_ summary: UsageSummary?, range: UsageRange) -> String {
+        "Cost \(UsagePresentation.cost(summary?.totals.costUsd ?? 0)), \(detail(summary, range: range))"
+    }
+
+    /// PURE: the line as VoiceOver says it — "Cost by model: gpt-5-codex $3.42, claude-sonnet-4.5 $1.10".
+    static func accessibilityLine(_ segments: [IslandCostSegment]) -> String {
+        segments.isEmpty ? "No usage in this range" : "Cost by model: " + segments.map { "\($0.name) \($0.label)" }.joined(separator: ", ")
+    }
+}
+
+private extension Array {
+    subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+/// The range's cost, quiet (the island's visual language, `docs/claude/island.md`): "Cost" and its total, the range as
+/// plain words (1H 24H 7D 30D All), then two lines in the plan lines' column — **Models**, the cost split into each
+/// model's coloured share, and **Trend**, the range's sparkline as a thin stroke — and the top models' names, muted,
+/// with "Open usage". The whole block hovers as one: the header lifts and adds the tokens, the model line thickens and
+/// shows each model's cost inside its segment, the trend brightens and fills, the names brighten.
+struct IslandCostBlock: View {
+    @ObservedObject var model: IslandUsageModel
+    let titleWidth: CGFloat
+
+    /// The two lines' titles (they share the plan lines' title column).
+    static let lineTitles = ["Models", "Trend"]
+
+    /// Between two plans, and between the last plan and this block: one rhythm.
+    static let gapAbove: CGFloat = 10
+
+    var body: some View {
+        let summary = model.summary
+        let segments = IslandCostPresentation.segments(summary)
+        HoverLiftReader(id: "cost") { hovered in
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Cost").font(Typography.caption(.semibold)).foregroundStyle(Color.white)
+                        Text(UsagePresentation.cost(summary?.totals.costUsd ?? 0))
+                            .font(Typography.captionDigits(.medium))
+                            .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.8))
+                    }
+                    .hoverLiftLabel(hovered, anchor: .bottomLeading)
+                    // The grown header's room (the block grows, its lines stay put under it).
+                    .padding(.top, hovered ? 2 : 0)
+                    .padding(.trailing, hovered ? 10 : 0)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(IslandCostPresentation.headerAccessibility(summary, range: model.range))
+                    if hovered {
+                        Text(IslandCostPresentation.detail(summary, range: model.range))
+                            .font(Typography.tinyDigits())
+                            .foregroundStyle(Theme.textMuted)
+                            .lineLimit(1)
+                            .transition(.opacity)
+                    }
+                    Spacer(minLength: 8)
+                    IslandRangeWords(range: $model.range)
+                }
+                line(Self.lineTitles[0], hovered: hovered) {
+                    HoverSegmentLine(segments: segments.map {
+                        HoverSegment(id: $0.id, fraction: $0.fraction, color: IslandCostPresentation.color($0), name: $0.hoverName,
+                                     figure: $0.label)
+                    }, hovered: hovered)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(IslandCostPresentation.accessibilityLine(segments))
+                }
+                line(Self.lineTitles[1], hovered: hovered) {
+                    IslandCostTrend(values: summary?.spark ?? [], hovered: hovered)
+                }
+                HStack(spacing: 12) {
+                    ForEach(IslandCostPresentation.legend(summary)) { item in
+                        HStack(spacing: 5) {
+                            Capsule()
+                                .fill(segments.first { $0.id == item.segmentId }.map(IslandCostPresentation.color)
+                                      ?? Color.white.opacity(0.22))
+                                .frame(width: 8, height: 3)
+                            Text(item.name)
+                                .font(Typography.tiny())
+                                .foregroundStyle(hovered ? Color.white.opacity(0.85) : Theme.textMuted)
+                                .lineLimit(1)
+                                .truncationMode(.middle)
+                            if let note = item.note {
+                                Text(note).font(Typography.tinyDigits()).foregroundStyle(Theme.textMuted).lineLimit(1)
+                            }
+                        }
+                    }
+                    Spacer(minLength: 8)
+                    Button(action: model.openUsage) {
+                        HStack(spacing: 3) {
+                            Text("Open usage").font(Typography.tiny(.semibold))
+                            Image(systemName: "arrow.up.right").font(Typography.micro(.bold))
+                        }
+                        .foregroundStyle(Color.white.opacity(hovered ? 0.95 : 0.7))
+                        .frame(height: 18)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                }
+                .padding(.leading, titleWidth + UsagePlanLine.titleGap(compact: true))
+                .padding(.top, 2)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+        }
+    }
+
+    /// A line of the block: its title in the plan lines' column, the shape after it.
+    private func line<Shape: View>(_ title: String, hovered: Bool, @ViewBuilder shape: () -> Shape) -> some View {
+        HStack(spacing: UsagePlanLine.titleGap(compact: true)) {
+            Text(title)
+                .font(Typography.tiny(.medium))
+                .foregroundStyle(Color.white.opacity(hovered ? 1 : 0.85))
+                .lineLimit(1)
+                .hoverLiftLabel(hovered)
+                .frame(width: titleWidth, alignment: .leading)
+            shape()
+        }
+        .frame(height: HoverLift.hoverThickness)
+    }
+}
+
+/// The range as plain words — "1H 24H 7D 30D All", the chosen one white with a short line under it, the others muted.
+struct IslandRangeWords: View {
+    @Binding var range: UsageRange
+
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(UsageRange.allCases, id: \.self) { r in
+                Button { range = r } label: {
+                    // A plan header's height (the line under the chosen one hangs below the words, sizing nothing), so the
+                    // block's header sits on the plans' rhythm; the hit area reaches past the words.
+                    Text(UsagePresentation.rangeShort(r))
+                        .font(Typography.tiny(range == r ? .semibold : .medium))
+                        .foregroundStyle(range == r ? Color.white : Theme.textMuted)
+                        .overlay(alignment: .bottom) {
+                            Capsule().fill(Color.white).frame(height: 1.5).offset(y: 3).opacity(range == r ? 1 : 0)
+                        }
+                        .contentShape(Rectangle().inset(by: -4))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(UsagePresentation.rangeTitle(r))
+                .accessibilityAddTraits(range == r ? .isSelected : [])
+            }
+        }
+    }
+}
+
+/// The range's trend as a thin stroke in Winter's accent — under the pointer it thickens, lengthens with the lines and
+/// fills beneath. A plain path (drawn by the offscreen renderer too).
+struct IslandCostTrend: View {
+    let values: [Double]
+    var hovered = false
+
+    var body: some View {
+        GeometryReader { proxy in
+            let pts = UsagePresentation.sparkPoints(values, in: proxy.size)
+            ZStack {
+                if hovered {
+                    Path { p in
+                        guard let first = pts.first, let last = pts.last else { return }
+                        p.move(to: CGPoint(x: first.x, y: proxy.size.height))
+                        for pt in pts { p.addLine(to: pt) }
+                        p.addLine(to: CGPoint(x: last.x, y: proxy.size.height))
+                        p.closeSubpath()
+                    }
+                    .fill(LinearGradient(colors: [Theme.accent.opacity(0.3), Theme.accent.opacity(0.02)], startPoint: .top, endPoint: .bottom))
+                    .transition(.opacity)
+                }
+                Path { p in
+                    guard let first = pts.first else { return }
+                    p.move(to: first)
+                    for pt in pts.dropFirst() { p.addLine(to: pt) }
+                }
+                .stroke(Theme.accent.opacity(hovered ? 1 : 0.7),
+                        style: StrokeStyle(lineWidth: hovered ? 1.6 : 1.2, lineCap: .round, lineJoin: .round))
+            }
+        }
+        .padding(.horizontal, -HoverLift.lengthGrowth(hovered: hovered) / 2)
+        .frame(height: HoverLift.hoverThickness)
+        .accessibilityHidden(true)
     }
 }

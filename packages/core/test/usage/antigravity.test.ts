@@ -207,3 +207,22 @@ describe("the Antigravity plan", () => {
     expect(s.tracking.antigravity).toBe(true);
   });
 });
+
+describe("agy's last good reading is shown until a fresh one lands (user 2026-10-19)", () => {
+  test("a later failed /usage answers the kept reading with its own time; a restart too", async () => {
+    const ok = fakeAgy(tempDir("bin"), "ok");
+    const failing = fakeAgy(tempDir("bin2"), "no-command");
+    let exe = ok.path;
+    let now = NOW;
+    const env = service({ agyExecutable: () => exe, now: () => now, agyCliEveryMs: 60_000 });
+    const fresh = await env.svc.antigravityPlan();
+    expect(fresh.source).toBe("agy-cli");
+    exe = failing.path;
+    now += 61_000;
+    const kept = await env.svc.antigravityPlan();
+    expect([kept.source, kept.at]).toEqual(["agy-cli", fresh.at]);
+    expect(kept.windows.map((w) => w.usedPercent)).toEqual(fresh.windows.map((w) => w.usedPercent));
+    const restarted = service({ home: env.home, db: env.db, agyExecutable: () => failing.path, now: () => now });
+    expect([(await restarted.svc.antigravityPlan()).source, (await restarted.svc.antigravityPlan()).at]).toEqual(["agy-cli", fresh.at]);
+  });
+});

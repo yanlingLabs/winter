@@ -574,7 +574,7 @@ final class CommandTextView: NSTextView {
         return imageIntake
     }
 
-    /// Whether this composer takes attachments right now (a code session) — the "+" button asks the same.
+    /// Whether this composer takes attachments right now (a code or dispatch session) — the "+" button asks the same.
     var composerAttachmentsEnabled: Bool { liveIntake != nil }
 
     override func paste(_ sender: Any?) {
