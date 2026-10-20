@@ -117,15 +117,17 @@ jobs:
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Build the pinned kernel twice at the same paths
+      - name: Build the pinned kernel twice, under two different work paths that must give identical bytes
         shell: bash
         run: |
           set -euo pipefail
           kernel_work="$RUNNER_TEMP/winter-kernel-work"
+          kernel_work_b="$RUNNER_TEMP/winter-kernel-work-b"
+          test "$kernel_work" != "$kernel_work_b"
           python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-1"
           rm -rf "$kernel_work"
-          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-2"
-          rm -rf "$kernel_work"
+          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work_b" --out "$IMAGE_WORK/kernel-2"
+          rm -rf "$kernel_work_b"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: guest-kernel-${{ github.run_id }}

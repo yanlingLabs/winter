@@ -102,6 +102,15 @@ class PathIndependenceTests(unittest.TestCase):
         text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
         self.assertIn('kernel_work="$RUNNER_TEMP/winter-kernel-work"', text)
 
+    def test_the_two_kernel_builds_use_different_work_paths_and_must_still_agree_byte_for_byte(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work_b="$RUNNER_TEMP/winter-kernel-work-b"', text)
+        self.assertIn('test "$kernel_work" != "$kernel_work_b"', text)
+        self.assertIn('--work "$kernel_work" --out "$IMAGE_WORK/kernel-1"', text)
+        self.assertIn('--work "$kernel_work_b" --out "$IMAGE_WORK/kernel-2"', text)
+        import image_build_report as ibr
+        self.assertIn("the two kernel builds differ", ibr.problems({"kernel": {"reproducible": False, "pinnedBefore": "0" * 64, "ImageSha256": "0" * 64}, "image": {"reproducible": True, "imageExitStatus": [0, 0], "pinsHold": {}}}))
+
 
 class CiBuildPinTests(unittest.TestCase):
     def test_the_open_environment_values_are_pinned_and_agree_with_each_other(self):
