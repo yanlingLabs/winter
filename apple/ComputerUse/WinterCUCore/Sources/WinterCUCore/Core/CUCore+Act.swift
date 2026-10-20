@@ -1628,7 +1628,7 @@ extension CUCore {
                     // Before EVERY key: the user started working in the app meanwhile → nothing more goes out.
                     if userIsWorking(in: t.pid) {
                         CULog.act.notice("type in \(t.appName, privacy: .public): the user started working in it after \(sent, privacy: .public) of \(chars.count, privacy: .public) characters — stopped")
-                        throw CUError.refused(.userWorking, "typed \(sent) of \(chars.count) characters; then the user started working in \(t.appName), so the rest was not sent — wait and retry, or ask them")
+                        throw CUError.refused(.userWorking, "typed \(sent) of \(chars.count) characters; then the user started working in \(t.appName), so the rest was not sent — ask the user to switch away from \(t.appName) for a moment, or to say go ahead (their next message lets you act)")
                     }
                     try blips.before()
                     guard sys.appRunning(t.pid) else { throw CUError.targetLost("\(t.appName) quit while typing", reason: .appQuit) }

@@ -34,10 +34,13 @@ public protocol CoreService: AnyObject {
     func visitClose(_ params: VisitCloseParams) async throws -> VisitCloseResult
     /// A session's script started or ended (`script.active`): the engine's Focus Guardian runs only meanwhile.
     func scriptActivity(sessionId: String, active: Bool)
+    /// `work.lift` (1.22.0): the user's work mark on these apps lifts.
+    func workLift(_ params: WorkLiftParams) async throws -> WorkLiftResult
 }
 
 public extension CoreService {
     func scriptActivity(sessionId: String, active: Bool) {}
+    func workLift(_ params: WorkLiftParams) async throws -> WorkLiftResult { WorkLiftResult(lifted: []) }
 }
 
 extension CUCore: CoreService {}

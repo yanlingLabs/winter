@@ -63,6 +63,7 @@ let engineSamples: [(method: String, params: String, result: String)] = [
      #"{"imageBase64":"/9j/AA==","mime":"image/jpeg","width":1440,"height":900,"shotId":"shot-2"}"#),
     ("visit.close", #"{"sessionId":"s_1"}"#,
      #"{"visits":[{"visitId":"v1","targetId":"t1","app":"Safari","why":"act","actions":3,"ms":2400,"returned":true}]}"#),
+    ("work.lift", #"{"pids":[123],"reason":"message"}"#, #"{"lifted":[123]}"#),
     ("screen.appAt", #"{"shotId":"shot-2","point":[100,200]}"#, #"{"app":"Notes","bundleId":"com.apple.Notes","windowId":77}"#),
     ("cancel", #"{"callId":"c1"}"#, "{}"),
     ("turn.ended", #"{"sessionId":"s_1"}"#, "{}"),
@@ -141,6 +142,7 @@ final class FakeCore: CoreService, @unchecked Sendable {
     func turnEnded(_ params: TurnEndedParams) async throws -> TurnEndedResult { try await answer("turn.ended", params) }
     func sessionEnded(_ params: SessionEndedParams) async throws -> SessionEndedResult { try await answer("session.ended", params) }
     func visitClose(_ params: VisitCloseParams) async throws -> VisitCloseResult { try await answer("visit.close", params) }
+    func workLift(_ params: WorkLiftParams) async throws -> WorkLiftResult { try await answer("work.lift", params) }
 }
 
 final class Counter: @unchecked Sendable {

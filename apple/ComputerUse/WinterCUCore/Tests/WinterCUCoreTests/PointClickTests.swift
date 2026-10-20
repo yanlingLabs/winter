@@ -282,6 +282,44 @@ final class PointClickTests: XCTestCase {
         XCTAssertEqual(downs.count, 1)
     }
 
+    // MARK: the user's work mark has an exit (live 2026-10-20: a child refused user_working 4 times over 3 minutes)
+
+    private func expectUserWorking(_ body: () async throws -> Void) async -> CUError? {
+        do { try await body(); XCTFail("acted"); return nil } catch let e as CUError {
+            XCTAssertEqual(e.data?["reason"], .string("user_working"), e.message)
+            return e
+        } catch { XCTFail("\(error)"); return nil }
+    }
+
+    func testTheRefusalSaysWhatLetsTheAgentActAndTheUsersGoAheadLiftsIt() async throws {
+        world(browser: false)
+        sys.front = pid
+        core.testUserInput(pid: pid, switching: false)  // they clicked into it, in front
+        let e = await expectUserWorking { try await self.click([600, 600]) }
+        XCTAssertEqual(e?.message, "the user is working in Browser right now — ask the user to switch away from Browser for a moment, or to say go ahead (their next message lets you act)")
+        XCTAssertFalse(e?.message.contains("wait and retry") ?? true)
+        // Their message to the session: the daemon's work.lift.
+        let r = try await core.workLift(WorkLiftParams(pids: [pid, 4242], reason: "message"))
+        XCTAssertEqual(r.lifted, [pid], "only an app with a mark")
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1)
+        // Their next work in it marks it again.
+        core.testUserInput(pid: pid, switching: false)
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+    }
+
+    func testAGrantedRequestForegroundActsDespiteTheMark() async throws {
+        world(browser: false)
+        sys.front = pid
+        core.testUserInput(pid: pid, switching: false)
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+        XCTAssertTrue(core.holdForegroundNow(target).front)
+        try await click([600, 600])
+        XCTAssertEqual(downs.count, 1, "the user's yes on the card, for this run")
+        core.releaseHeldForeground(sessionId: "s")
+        _ = await expectUserWorking { try await self.click([600, 600]) }
+    }
+
     // MARK: why the make-key step declined
 
     func testTheMakeKeyStepSaysWhichGuardDeclined() {

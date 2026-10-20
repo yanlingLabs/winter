@@ -23,10 +23,13 @@ final class CUActScope {
     /// a count that moved since means they worked in it during the act — even if they have left it since (the review of
     /// round 17, M1).
     let workMarksAtStart: Int
-    init(pid: pid_t, appName: String, workMarksAtStart: Int = 0) {
+    /// The session holds the app in front by the user's consent (`requestForeground`): their work mark stops nothing.
+    let held: Bool
+    init(pid: pid_t, appName: String, workMarksAtStart: Int = 0, held: Bool = false) {
         self.pid = pid
         self.appName = appName
         self.workMarksAtStart = workMarksAtStart
+        self.held = held
     }
 
     private static let key = "WinterCUCore.actScope"
@@ -53,6 +56,7 @@ final class CUActWriteGuard: @unchecked Sendable {
         guard let scope = CUActScope.current, let core else { return true }
         if let owner, owner != scope.pid, !core.sys.isContentProcess(owner, of: scope.pid) { return true }  // another app's: a restore
         if scope.stopped != nil { return false }
+        if scope.held { return true }
         guard core.userIsWorking(in: scope.pid) || core.workMarks(scope.pid) != scope.workMarksAtStart else { return true }
         if scope.stopped == nil {
             scope.stopped = what()
@@ -144,7 +148,7 @@ struct CUActGuardedPoster: CUEventPoster {
 
 extension CUActWriteGuard {
     static var refusal: CUError {
-        CUError.refused(.userWorking, "the user started working in the app while the act ran — the rest was not sent; wait and retry, or ask them")
+        CUError.refused(.userWorking, "the user started working in the app while the act ran — the rest was not sent; ask the user to switch away from the app for a moment, or to say go ahead (their next message lets you act)")
     }
 }
 
@@ -162,7 +166,7 @@ extension CUCore {
     /// reaches `t`, and the act ends refused (`user_working`) — its own sentence kept when it said so itself (a burst's
     /// "typed N of M"), the guard's otherwise.
     func withActWriteGuard<T>(_ t: CUTarget, _ body: () throws -> T) throws -> T {
-        let scope = CUActScope(pid: t.pid, appName: t.appName, workMarksAtStart: workMarks(t.pid))
+        let scope = CUActScope(pid: t.pid, appName: t.appName, workMarksAtStart: workMarks(t.pid), held: holdsForeground(t))
         let outer = CUActScope.swap(scope)
         defer { _ = CUActScope.swap(outer) }
         let result: T
@@ -188,7 +192,7 @@ extension CUCore {
     }
 
     static func stoppedRefusal(_ t: CUTarget) -> CUError {
-        CUError.refused(.userWorking, "the user started working in \(t.appName) while the act ran, so the rest of it was not sent — wait and retry, or ask them")
+        CUError.refused(.userWorking, "the user started working in \(t.appName) while the act ran, so the rest of it was not sent — ask the user to switch away from \(t.appName) for a moment, or to say go ahead (their next message lets you act)")
     }
 
     static func isUserWorkingRefusal(_ e: CUError) -> Bool {
