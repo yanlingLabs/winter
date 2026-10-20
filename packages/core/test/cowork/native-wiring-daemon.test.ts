@@ -109,7 +109,8 @@ test("with an environment the boot runs the host's own recovery: same boot keeps
 test("source pin: the Cowork service receives the native port only when a caller injected an environment, and boot reconcile and the stop drain are wired in the daemon", async () => {
   const { readFileSync } = await import("node:fs");
   const source = readFileSync(join(import.meta.dir, "..", "..", "src", "daemon.ts"), "utf8");
-  expect(source).toContain("const coworkNativePort = opts.coworkNative?.environment ? coworkNative : undefined;");
+  expect(source).toContain("const coworkNativePort = nativeEnvironment ? coworkNative : undefined;");
+  expect(source).toContain("const nativeEnvironment = opts.coworkNative?.environment ?? (runtime ? coworkNativeProductionEnvironment(");
   expect(source).toContain("await coworkNative.reconcileAtBoot()");
   expect(source).toContain("const guestsDrained = coworkNative?.beginShutdown();");
   // the drain is awaited before the stores close: closeRest (store.close, runtime.close) runs only after it settles

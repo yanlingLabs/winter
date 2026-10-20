@@ -146,10 +146,16 @@ export function hostStorageFloorDescriptor(home: string, options?: HostStorageFe
  * Registration records paths synchronously; storage activation awaits these policy acknowledgments.
  * This refresh is logical session lifecycle, not third-party descendant-stop evidence. */
 const policyConsumers = new Set<() => Promise<void>>();
+const consumerOrigins = new Map<() => Promise<void>, string>(); // first non-src stack frame at registration: who to blame for a leak
 export function registerHostStoragePolicyConsumer(refresh: () => Promise<void>): () => void {
+  consumerOrigins.set(refresh, (new Error().stack ?? "").split("\n").slice(2).filter(l => l.includes("/test/")).slice(0, 2).map(l => l.trim()).join(" < ") || "no test frame");
   policyConsumers.add(refresh);
-  return () => { policyConsumers.delete(refresh); };
+  return () => { policyConsumers.delete(refresh); consumerOrigins.delete(refresh); };
 }
+/** How many policy consumers are registered process-wide. Test inspection only (the core test preload asserts it is 0 after each file). */
+export function hostStoragePolicyConsumerCount(): number { return policyConsumers.size; }
+/** Where each still-registered consumer was registered from (test diagnostics). */
+export function hostStoragePolicyConsumerOrigins(): string[] { return [...consumerOrigins.values()]; }
 export async function refreshHostStoragePolicies(): Promise<void> {
   await Promise.all([...policyConsumers].map(refresh => refresh()));
 }

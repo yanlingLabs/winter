@@ -60,6 +60,7 @@ import { METHODS, type SessionEvent } from "../../packages/protocol/src/index";
 import { COMPUTER_WAKE_CLIENT_NAME } from "../../packages/core/src/computer-use/wakes/types";
 import { onScreenIds, onScreenSummary, USER_CLICK_METHOD, WAKE_SCENARIOS, type WakeObservation } from "./wake";
 import { resolvePlatformPackageWinter } from "../../packages/core/src/runtime-sdk/executable";
+import { USAGE_INERT_ENV } from "../../packages/core/src/usage/wiring";
 import { buildAll, FIXTURE_MAIN, OUT_DIR, REPO_ROOT, type Built } from "./build";
 import { describeFreshnessPlan, freshnessTable } from "./freshness";
 import { measureFixtureVariant, measureSafari, measureSafariWithPrefs, SAFARI_PREFS_WARNING, type FreshDeps, type VariantResult } from "./freshness-run";
@@ -370,6 +371,9 @@ async function startLiveDaemon(built: Pick<Built, "daemon">, home: string): Prom
   Object.assign(env, {
     WINTER_HOME: home, WINTER_PROFILE: "dev", WINTER_CU_LIVE_TESTS: "1", WINTER_RUNTIME_EXECUTABLE: winter, TMPDIR: `${userTempDir()}/`,
     WINTER_LOGIN_SHELL_PATH: "off", WINTER_KEYCHAIN_SERVICE: `com.winter.core.test-cu-live-${randomBytes(6).toString("hex")}`,
+    // Never the user's own Codex / Claude Code / Antigravity / OpenCode, nor the background plan beat (the daemon entry
+    // also injects `USAGE_INERT` itself).
+    ...USAGE_INERT_ENV,
   });
   stopCheck();
   // Detached (its own process group): a terminal's ctrl+C signals the whole foreground group, and the cleanup still needs the daemon.

@@ -250,7 +250,10 @@ describe("the shared receiver hub", () => {
     const [w, x] = pair("stream"); void w;
     await new FdReceiver(x, { maxBytes: 64, maxRights: 0 }, () => {}).close(); // warms the hub: its Worker (and Bun's one leaked descriptor per Worker) and control pair exist now
     await Bun.sleep(30);
-    const before = openCount();
+    // The baseline is taken once the process-wide count has been STABLE for 250 ms: a descriptor an earlier test (or file) is still closing would otherwise be in `before` and
+    // vanish during the rounds, which reads as a mismatch below although nothing leaked (seen in CI as a drop of six).
+    let before = openCount(), stableSince = performance.now(); const deadline = stableSince + 5000;
+    while (performance.now() - stableSince < 250 && performance.now() < deadline) { await Bun.sleep(25); const now = openCount(); if (now !== before) { before = now; stableSince = performance.now(); } }
     for (let round = 0; round < 12; round++) {
       const [a, b] = socketPair("stream"), receiver = new FdReceiver(b, { maxBytes: 64, maxRights: 0 }, () => {});
       sendMessage(a, encode("x\n")); await Bun.sleep(2);
@@ -258,8 +261,10 @@ describe("the shared receiver hub", () => {
     }
     // The count is process-wide, so another test file's late cleanup can move it for a moment. A real leak is
     // permanent (one per round, twelve rounds), so wait for the count to settle, bounded, then demand equality.
-    for (let attempt = 0; attempt < 100 && openCount() !== before; attempt++) await Bun.sleep(20);
-    expect(openCount()).toBe(before);
+    // A leak only ever ADDS descriptors; the count may also FALL here when a descriptor held by some other test's garbage is finalized meanwhile (seen in CI as a drop of six, which is not a leak),
+    // so the demand is "no more than before", not equality.
+    for (let attempt = 0; attempt < 100 && openCount() > before; attempt++) await Bun.sleep(20);
+    expect(openCount()).toBeLessThanOrEqual(before);
   });
   live("many receivers at once are served independently and each ends exactly once", async () => {
     const received = new Map<number, string>(), ends = new Map<number, number>(), receivers: FdReceiver[] = [], ends2: Promise<void>[] = [];
