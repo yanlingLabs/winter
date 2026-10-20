@@ -5,8 +5,9 @@
   pins.json            sdkCommit, sdkPin.mainAt, sdkPin.supervisorSha256
   the one-run workflow env AGENT_SDK_HEAD
 
-Nothing else moves: `expectedArtifact` stays what it was and is therefore STALE after the bump (the supervisor and the owner library change the cpio). The next image build reports which
-digests changed and `image_build_report.py` publishes them for the re-pin; that is the intended flow, and the gate test (guest-image-build-gates.test.ts) fails if the workflow's
+Nothing else moves: `expectedArtifact` stays what it was and is therefore STALE after the bump (the supervisor and the owner library change the cpio). The next image build stops at
+image.py exit 3 (UNPINNED) with the digests that differ; the workflow tolerates exit 3, uploads the kernel, initramfs, receipts and digests.json as the guest-image artifact (the image whose digests get pinned), and only then
+turns the run red in the assert step. That is the intended flow, and nothing admits an image that is not pinned by digest: and the gate test (guest-image-build-gates.test.ts) fails if the workflow's
 AGENT_SDK_HEAD and pins.json ever differ. The supervisor digest is computed by the reviewer from the SDK checkout (`git show NEW:packages/runtime/src/guest/linux-supervisor.py | sha256sum`);
 image.py refuses a build whose supervisor does not hash to it.
 """
