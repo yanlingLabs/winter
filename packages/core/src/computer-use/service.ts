@@ -23,7 +23,7 @@ import { FOREGROUND_LOCK_KEY, LOCK_WAIT_MS, TargetLocks } from "./locks";
 import { ACT_PRIMITIVES, cardName, cardReason, desktopVisitActReason, newRunGrants, type AppRef, type ComputerPolicy, type DesktopVisitOutcome, type RunGrants } from "./policy";
 import { typingEstimateMs, typingFit } from "./typing-estimate";
 import {
-  HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS,
+  HELPER_WORK_LIFT_VERSION, HelperRpcError, HelperUnavailableError, WINTER_OWN_BUNDLE_IDS, helperVersionAtLeast,
   type ActAction, type ActResult, type AppAtResult, type AppleScriptResult, type AppsListResult, type DesktopVisitClosed, type FindResult, type HelperNotification,
   type ScreenWindowsResult, type ScreenshotResult, type ScriptingDictionaryResult, type SnapshotResult, type TargetBindResult, type TargetUseWindowResult, type TargetWindowsResult,
   type WaitForResult, type WaitIdleResult,
@@ -107,10 +107,9 @@ export interface ComputerV2ServiceDeps {
   site?: SiteFloorDeps;
   /** A session's working directory (a trusted project's own dangerous domains — review of round 14, LOW #7). */
   sessionCwd?(sessionId: string): string | undefined;
-  /** How another session's words name a session: its title, else its mode ("Dispatch"); undefined when unknown. */
-  sessionLabel?(sessionId: string): string | undefined;
-  /** Is this session Dispatch's coordinator (its apps are let go when its turn ends)? */
-  isDispatch?(sessionId: string): boolean;
+  /** A session's mode ("code", "dispatch", "chat"), for how another session's refusal names it — never its title (a
+   *  title is the user's words about another task, and stays out of other models' context). */
+  sessionMode?(sessionId: string): string | undefined;
   /** The Dispatch coordinator a session was spawned by (a user's message to it speaks for its children too). */
   coordinatorOf?(sessionId: string): string | undefined;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
@@ -159,6 +158,12 @@ interface SessionState {
   /** The helper reported a desktop visit of this session closing (`desktopVisited`): the next run's end claims its
    *  report with `visit.close`, even if that run makes no visit itself (one that closed after its run ended). */
   visitHint: boolean;
+  /** The main turn ended while a run of this session was still active: its apps are let go when that run ends. */
+  turnOver?: boolean;
+  /** The apps (pids) an act of this session was refused in because the user was working there (`user_working`), this
+   *  turn and the turn before: what the user's next message to the session lifts the work mark on — nothing else. */
+  workRefused: Set<number>;
+  workRefusedBefore: Set<number>;
 }
 
 /** A timer that stops counting while a card waits for a human. */
@@ -334,7 +339,7 @@ export class ComputerV2Service {
   private stateFor(sessionId: string): SessionState {
     let s = this.sessions.get(sessionId);
     if (s === undefined) {
-      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false, visitHint: false };
+      s = { hadWorker: false, chain: Promise.resolve(), targets: new Map(), images: new Map(), lastTargetShot: new Map(), pending: 0, tainted: false, visitHint: false, workRefused: new Set(), workRefusedBefore: new Set() };
       this.sessions.set(sessionId, s);
     }
     return s;
@@ -424,6 +429,8 @@ export class ComputerV2Service {
     };
     ctxRef.ctx = ctx;
     state.active = ctx;
+    // A run after the turn ended is the next turn's: what the last one left to let go is let go at that run's end.
+    state.turnOver = false;
     // `script.active` brackets every script run (the helper arms its Esc tap while any session is active):
     // told now when the helper is already connected, else at the run's first helper call — a print-only
     // script never launches the helper just to say so.
@@ -501,6 +508,12 @@ export class ComputerV2Service {
     this.deps.browsers?.runEnded(ctx.sessionId, ctx.runId);
     if (ctx.scriptActiveGen !== undefined) this.deps.helper.tell("script.active", { sessionId, active: false });
     if (state.active === ctx) state.active = undefined;
+    // The main turn ended while this run was still going: its apps are let go now (holds last a turn).
+    // (`turnEnded` sets it while this run awaited — read through a widened type, not the narrowing from the run's start.)
+    if ((state as { turnOver?: boolean }).turnOver === true && state.active === undefined) {
+      state.turnOver = false;
+      this.releaseTargets(sessionId, state, [...state.targets.values()], "turn_ended");
+    }
 
     // The taint outlives the call (the fence is per session) — unless the runtime is gone below.
     if (builder.readScreen) state.tainted = true;
@@ -934,7 +947,9 @@ export class ComputerV2Service {
       ctx, "apps.defaultOpener", { urls, ...(opener === undefined ? {} : { app: opener }) }, metric);
     this.live(ctx);
     const app: AppRef = { bundleId: who.bundleId, name: who.name };
-    this.refuseIfHeldElsewhere(ctx, app);
+    // A document may open in ANY window of the app (a URL as a tab of the front window): an app any other session holds
+    // a window of is refused before anything opens, not only one held app-wide.
+    this.refuseIfHeldElsewhere(ctx, app, undefined, true);
     await this.deps.policy.authorize(ctx.grants, app, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
     const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
@@ -959,7 +974,8 @@ export class ComputerV2Service {
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
   private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef; quiet?: boolean }, metric: PrimitiveMetric): Promise<AppHandle> {
     const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
-    this.refuseIfHeldElsewhere(ctx, known);
+    // Before anything launches or binds: an app held app-wide, or the very window named, by another session.
+    this.refuseIfHeldElsewhere(ctx, known, typeof req.window === "number" ? req.window : undefined);
     await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
     const settings = this.deps.settings();
@@ -984,6 +1000,9 @@ export class ComputerV2Service {
       if (app.bundleId.toLowerCase() !== known.bundleId.toLowerCase()) {
         throw new AutomationFailure("Refused", `${req.app.slice(0, 120)} resolved to ${app.bundleId}, not the ${known.bundleId} that was allowed — nothing was kept bound`);
       }
+      // Now the bound window is known: one another session holds (or, bound app-wide, any window of the app held) is
+      // let go again at once.
+      this.refuseIfHeldElsewhere(ctx, app, info.windowId, info.windowId === undefined);
       ctx.state.targets.set(info.targetId, info);
       ctx.bound.add(info.targetId);
       await this.ensureLock(ctx, info);
@@ -1789,9 +1808,11 @@ export class ComputerV2Service {
           // The helper's own sentence is KEPT — it says what it actually saw (the live gate: VS Code's "can't tell
           // which field has focus…" must not become a canned "that is a password field"). It may name screen
           // content, so it stays inside the fence. The canned words are only a fallback for a bare refusal.
+          // Refused because the user is working in the app: what their next message to this session lifts.
+          if (data.reason === "user_working" && t !== undefined) ctx.state.workRefused.add(t.pid);
           const said = err.message.replace(/\s+/g, " ").trim().slice(0, 400);
           if (said.length > 0) return { kind: "Refused", message: said, untrusted: true };
-          return { kind: "Refused", message: refusedWords(typeof data.reason === "string" ? data.reason : "", name) };
+          return { kind: "Refused", message: refusedWords(typeof data.reason === "string" ? data.reason : "", name, helperVersionAtLeast(this.deps.helper.version, HELPER_WORK_LIFT_VERSION)) };
         }
         case "wait_timeout": {
           ctx.builder.markScreenRead();
@@ -1900,18 +1921,21 @@ export class ComputerV2Service {
     this.sessions.delete(sessionId);
   }
 
-  /** A main-thread turn ended: the helper fades that session's mirrors. */
+  /** A main-thread turn ended: the helper fades that session's mirrors, and the session lets go of the apps it holds. */
   turnEnded(sessionId: string): void {
     this.deps.browsers?.turnEnded(sessionId);
     const state = this.sessions.get(sessionId);
     if (state === undefined) return;
     this.deps.helper.tell("turn.ended", { sessionId });
-    // Dispatch lets go of its apps at its turn's end (2026-10-20, live): an app it bound and left idle between turns was
-    // held from every other agent, and a click of the user's in it marked it "the user is working in it" for whoever came
-    // next. A code session keeps its bindings (and their protection of the user's work) until it releases them.
-    let dispatch = false;
-    try { dispatch = this.deps.isDispatch?.(sessionId) === true; } catch { dispatch = false; }
-    if (dispatch && state.active === undefined) this.releaseTargets(sessionId, state, [...state.targets.values()], "turn_ended");
+    // The user's go-ahead covers the apps refused in the turn that just ended (and any refused since).
+    state.workRefusedBefore = state.workRefused;
+    state.workRefused = new Set();
+    // Every session lets go of its apps when its main turn ends (2026-10-20, the review): between turns no agent acts, so
+    // a hold kept then only locks the others out (a code session's for up to its 30-minute idle end). Releasing never
+    // lifts the user's work mark — the helper keeps it until they leave the app or say go ahead — and a wake trigger's
+    // watch holds its own window in the helper, so it outlives the release. A run still going ends first.
+    if (state.active === undefined) this.releaseTargets(sessionId, state, [...state.targets.values()], "turn_ended");
+    else state.turnOver = true;
   }
 
   // ── holds: an app a session has bound is held from every other agent until released ─────────────────────────────
@@ -1925,27 +1949,38 @@ export class ComputerV2Service {
     this.releaseTargets(sessionId, state, [...state.targets.values()], "archived");
   }
 
-  /** Another session that holds this app (a target of it bound and not let go), if any. */
-  holderOf(bundleId: string, exceptSession: string): string | undefined {
+  /**
+   * Another session that holds this app — or this WINDOW of it — if any. A binding of one window (a target with a
+   * `windowId`) holds that window only: two sessions in two windows of one browser never block each other. A binding
+   * with no window (app-wide) holds the whole app, and an app-wide binding (`appWide`) is held by any binding of the app.
+   * `windowId` undefined asks before a bind knows its window: only an app-wide hold answers then (the bind's own window
+   * is checked once it is known).
+   */
+  holderOf(bundleId: string, exceptSession: string, windowId?: number, appWide = false): { sessionId: string; perWindow: boolean } | undefined {
     const want = bundleId.toLowerCase();
     for (const [sid, st] of this.sessions) {
       if (sid === exceptSession) continue;
-      for (const t of st.targets.values()) if (t.lost === undefined && t.bundleId.toLowerCase() === want) return sid;
+      for (const t of st.targets.values()) {
+        if (t.lost !== undefined || t.bundleId.toLowerCase() !== want) continue;
+        if (t.windowId === undefined || appWide) return { sessionId: sid, perWindow: false };
+        if (windowId !== undefined && t.windowId === windowId) return { sessionId: sid, perWindow: true };
+      }
     }
     return undefined;
   }
 
-  /** A bind (or an open) of an app another session holds: refused, naming the holder and how to get it released. */
-  private refuseIfHeldElsewhere(ctx: RunCtx, app: AppRef): void {
-    const holder = this.holderOf(app.bundleId, ctx.sessionId);
-    if (holder === undefined) return;
-    let label: string | undefined;
-    try { label = this.deps.sessionLabel?.(holder); } catch { label = undefined; }
-    throw new AutomationFailure("TargetBusy", heldMessage(app.name, holder, label));
+  /** A bind (or an open) of an app, or a window of it, another session holds: refused, naming the holder (its mode and
+   *  id — never its title) and how to get it released. */
+  private refuseIfHeldElsewhere(ctx: RunCtx, app: AppRef, windowId?: number, appWide = false): void {
+    const held = this.holderOf(app.bundleId, ctx.sessionId, windowId, appWide);
+    if (held === undefined) return;
+    let mode: string | undefined;
+    try { mode = this.deps.sessionMode?.(held.sessionId); } catch { mode = undefined; }
+    throw new AutomationFailure("TargetBusy", heldMessage(app.name, held.sessionId, mode, held.perWindow));
   }
 
   /** `apps.release(app?)`: let go of one bound app (a handle, a name or a bundle id) or, with none, every app this session
-   *  holds — other agents may use them then, and the user's work mark on them lifts. */
+   *  holds — other agents may use them then. The user's work mark on them stays. */
   private releaseApps(ctx: RunCtx, args: Record<string, unknown>): { released: string[] } {
     const live = [...ctx.state.targets.values()].filter((t) => t.lost === undefined);
     let chosen = live;
@@ -1963,11 +1998,11 @@ export class ComputerV2Service {
     return { released };
   }
 
-  /** Lets go of these targets (`lost` = `reason`): the helper releases each, and the user's work mark lifts on every app no
-   *  session holds any more. The names released, once each. */
+  /** Lets go of these targets (`lost` = `reason`): the helper releases each. The names released, once each. Releasing
+   *  NEVER lifts the user's work mark (the review of 2026-10-20: `apps.release(x); apps.open(x)` would have been a way for
+   *  a model to lift it itself) — only the user's own message does (`userSaidGoAhead`). */
   private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended" | "archived"): string[] {
     const names: string[] = [];
-    const pids = new Set<number>();
     for (const t of targets) {
       if (t.lost !== undefined) continue;
       t.lost = reason;
@@ -1975,27 +2010,40 @@ export class ComputerV2Service {
       state.lastTargetShot.delete(t.targetId);
       this.deps.helper.tell("target.release", { targetId: t.targetId });
       if (!names.includes(t.name)) names.push(t.name);
-      pids.add(t.pid);
     }
-    const stillHeld = new Set<number>();
-    for (const st of this.sessions.values()) for (const t of st.targets.values()) if (t.lost === undefined) stillHeld.add(t.pid);
-    const lift = [...pids].filter((p) => !stillHeld.has(p));
-    if (lift.length > 0) this.deps.helper.tell("work.lift", { pids: lift, reason });
     return names;
   }
 
-  /** The user wrote to `sessionId` (a human-origin message): "go ahead" — their work mark lifts on every app that session
-   *  and its Dispatch children hold. */
+  /** The user wrote to `sessionId` (a human-origin message): "go ahead" — their work mark lifts on the apps that session
+   *  (and its Dispatch children) was refused in because they were working there, in its last turn or since. Not on
+   *  every app it holds: a message about something else lets nothing else go. */
   userSaidGoAhead(sessionId: string): void {
     const pids = new Set<number>();
     for (const [id, state] of this.sessions) {
       let spoken = id === sessionId;
       if (!spoken) { try { spoken = this.deps.coordinatorOf?.(id) === sessionId; } catch { spoken = false; } }
       if (!spoken) continue;
-      for (const t of state.targets.values()) if (t.lost === undefined) pids.add(t.pid);
+      for (const p of state.workRefused) pids.add(p);
+      for (const p of state.workRefusedBefore) pids.add(p);
+      state.workRefused = new Set();
+      state.workRefusedBefore = new Set();
     }
-    if (pids.size > 0) this.deps.helper.tell("work.lift", { pids: [...pids], reason: "message" });
+    if (pids.size > 0) this.liftWork([...pids], "message");
   }
+
+  /** `work.lift` (helper 1.22.0). An older helper (a dev helper not rebuilt) answers `unsupported`: said in the log, once
+   *  per helper version — the user's go-ahead then lifts nothing, and that helper's own refusal words never promised it
+   *  would. */
+  private liftWork(pids: number[], reason: string): void {
+    this.deps.helper.tell("work.lift", { pids, reason }, (err) => {
+      if (!(err instanceof HelperRpcError) || err.code !== "unsupported") return;
+      const v = this.deps.helper.version ?? "unknown";
+      if (this.workLiftUnsupportedLogged === v) return;
+      this.workLiftUnsupportedLogged = v;
+      this.deps.log?.(`computer-use: Winter Computer Use ${v} does not know work.lift (it needs ${HELPER_WORK_LIFT_VERSION}; a dev helper not rebuilt?) — the user's go-ahead did not lift their work mark`);
+    });
+  }
+  private workLiftUnsupportedLogged: string | undefined;
 
   /** Stop one session's script and its turn, as the helper's Esc does — the browser engine's door for the
    *  extension's in-page Stop button. Only a session running a script NOW. */
@@ -2254,14 +2302,20 @@ export function openedWindowGone(err: unknown, windowId: number): boolean {
 }
 
 /** Another session holds the app: who, and how to get it released. */
-export function heldMessage(name: string, holder: string, label?: string): string {
-  return `${name} is held by session ${holder}${label === undefined || label.length === 0 ? "" : ` (${label.slice(0, 80)})`}; while it holds it, no other agent can act in it. Ask that session with SendMessage to release it (apps.release("${name}")), or ask the user.`;
+/** The refusal of an app (or a window of it) another session holds: the holder by its mode and id only — never its title
+ *  (the user's words about another task stay out of this model's context) — and how to get it released. Dispatch can't
+ *  be messaged: its hold ends with its turn. */
+export function heldMessage(name: string, holder: string, mode?: string, perWindow = false): string {
+  const what = perWindow ? `That window of ${name}` : name;
+  if (mode === "dispatch") return `${what} is held by Dispatch (${holder}) until its turn ends; no other agent can act in it until then — try again after that, or ask the user.`;
+  const who = mode === undefined || mode.length === 0 ? `another session (${holder})` : `a ${mode.slice(0, 20)} session (${holder})`;
+  return `${what} is held by ${who} until it releases it, at the latest when its turn ends; no other agent can act in it until then. Ask that session with SendMessage to release it (apps.release("${name}")), or ask the user.`;
 }
 
 export function targetLostMessage(name: string, reason: string): string {
   switch (reason) {
     case "released": return `${name} was released (apps.release) — bind it again with apps.open() if you need it`;
-    case "turn_ended": return `Dispatch let go of ${name} when its last turn ended — bind it again with apps.open()`;
+    case "turn_ended": return `this session let go of ${name} when its last turn ended (an app is held only during a turn) — bind it again with apps.open()`;
     case "archived": return `this session let go of ${name} when it was archived — bind it again with apps.open()`;
     case "app_quit": return `${name} quit — open it again with apps.open()`;
     case "window_closed": return `${name}'s window closed — call apps.open or useWindow to pick another`;
@@ -2271,7 +2325,7 @@ export function targetLostMessage(name: string, reason: string): string {
   }
 }
 
-function refusedWords(reason: string, name: string): string {
+function refusedWords(reason: string, name: string, workLift = true): string {
   switch (reason) {
     case "secure_field": return "that is a password or payment field — Winter never reads or types into one; ask the user to fill it in";
     case "focus_unknown": return `can't tell which field has focus in ${name}, so it could be a password field — pass \`into\` or click a text field first`;
@@ -2279,7 +2333,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
-    case "user_working": return `the user is working in ${name} right now — ask the user to switch away from ${name} for a moment, or to say go ahead (their next message lets you act); reading it with state(), find() or screenshot() still works`;
+    case "user_working": return `the user is working in ${name} right now — ask the user to switch away from ${name} for a moment${workLift ? ", or to say go ahead (their next message lets you act)" : ""}; reading it with state(), find() or screenshot() still works`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

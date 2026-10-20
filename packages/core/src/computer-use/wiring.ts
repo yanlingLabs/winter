@@ -468,13 +468,7 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
     },
     sessionCwd: (sessionId) => deps.store.meta(sessionId).cwd ?? undefined,
-    sessionLabel: (sessionId) => {
-      const title = deps.store.getTitle(sessionId);
-      if (title !== null && title.trim().length > 0) return `“${title.trim()}”`;
-      const mode = deps.store.meta(sessionId).mode;
-      return mode === "dispatch" ? "Dispatch" : mode === undefined ? undefined : `a ${mode} session`;
-    },
-    isDispatch: (sessionId) => deps.store.meta(sessionId).mode === "dispatch",
+    sessionMode: (sessionId) => deps.store.meta(sessionId).mode ?? undefined,
     coordinatorOf: (sessionId) => {
       const m = deps.store.meta(sessionId);
       return m.origin === "dispatch-child" ? m.parentSessionId : undefined;

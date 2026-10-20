@@ -429,14 +429,14 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
       const text = dispatchSystemPrompt({ computerOffered });
       expect(text).toContain("Quick work in the user's apps — looking, clicking, reading account pages — you do yourself.");
       expect(text).toContain("Hand big or long app work to a session when it helps — but release the apps you hold first (apps.release(), or tell the child which you hold)");
-      expect(text).toContain("When a session messages you asking you to release apps you hold, release them and reply.");
-      expect(text).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
+      expect(text).toContain("When you're asked to release apps you hold, release them and reply.");
+      expect(text).toContain("Don't put the user's account addresses or other personal details in a child's prompt unless the task needs them.");
       expect(text).not.toContain("stays with you");
     }
     const off = dispatchSystemPrompt({ computerOffered: false });
     expect(off).not.toContain("Quick work in the user's apps");
     expect(off).not.toContain("apps.release");
-    expect(off).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
+    expect(off).toContain("Don't put the user's account addresses or other personal details in a child's prompt unless the task needs them.");
   });
 
   test("the routing line: answering directly means from what it knows, not a question back", () => {
