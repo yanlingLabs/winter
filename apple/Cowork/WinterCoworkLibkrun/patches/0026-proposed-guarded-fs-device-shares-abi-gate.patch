@@ -112,10 +112,10 @@ index ee89196..564021b 100644
      pub high_water_pins: u64,
 diff --git a/src/devices/src/virtio/fs/cowork.rs b/src/devices/src/virtio/fs/cowork.rs
 new file mode 100644
-index 0000000..c90a774
+index 0000000..3f73211
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/cowork.rs
-@@ -0,0 +1,670 @@
+@@ -0,0 +1,672 @@
 +//! The guarded fs device of the Cowork shares (SH2, the device half of R6, R10, R11, R13 and R14 of the
 +//! N2 extensions design). One device serves one share: a `ConfinedFs` behind `Server::handle_confined_message`,
 +//! on libkrun's virtio-fs transport, guarded the way the guarded block device is:
@@ -153,7 +153,7 @@ index 0000000..c90a774
 +
 +use super::defs::{HPQ_INDEX, NUM_QUEUES, QUEUE_SIZE, REQ_INDEX};
 +use super::descriptor_utils::{Reader, Writer};
-+use super::macos::confined::{ConfinedConfig, ConfinedFs, RevokeSwitch, ShareFlags};
++use super::macos::confined::{ConfinedConfig, ConfinedFs, NoticeKind, RevokeSwitch, ShareFlags, ShareNotices};
 +use super::server::confined_dispatch::CONFINED_MAX_PAGES;
 +use super::server::Server;
 +use crate::reclaim_access::{Access, Device, Fault, Lease, Pin, Range};
@@ -212,16 +212,16 @@ index 0000000..c90a774
 +    a == b || below(a, b) || below(b, a)
 +}
 +
-+/// The `share_notice` kinds of 2.4 (R15), as the ABI numbers them.
-+#[repr(u32)]
-+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-+pub enum NoticeKind {
-+    Envrc = 1,
-+    VscodeTasks = 2,
-+    VscodeSettings = 3,
-+    CodeWorkspace = 4,
-+    IdeaProject = 5,
-+    GitProtected = 6,
++/// The ABI number of a `share_notice` kind (`KRUN_COWORK_SHARE_NOTICE_*`).
++pub fn notice_number(kind: NoticeKind) -> u32 {
++    match kind {
++        NoticeKind::Envrc => 1,
++        NoticeKind::VscodeTasks => 2,
++        NoticeKind::VscodeSettings => 3,
++        NoticeKind::CodeWorkspace => 4,
++        NoticeKind::IdeaProject => 5,
++        NoticeKind::GitProtected => 6,
++    }
 +}
 +
 +/// What the worker turns into an L2 status: `share_revoked{tag}` or `share_notice{tag, kind}`.
@@ -234,9 +234,9 @@ index 0000000..c90a774
 +#[derive(Default)]
 +struct EventState {
 +    queue: VecDeque<ShareEvent>,
-+    /// (tag, None) for a revocation, (tag, Some(kind)) for a notice: each is queued at most once per
-+    /// incarnation, which also bounds the queue (12 tags x 7 events).
-+    sent: HashSet<(String, Option<NoticeKind>)>,
++    /// (tag, 0) for a revocation, (tag, the notice's ABI number) for a notice: each is queued at most once
++    /// per incarnation, which also bounds the queue (12 tags x 7 events).
++    sent: HashSet<(String, u32)>,
 +}
 +
 +/// The share events of one context, drained by the worker (`krun_cowork_next_share_event_v1`).
@@ -257,7 +257,7 @@ index 0000000..c90a774
 +
 +    fn push(&self, tag: &str, kind: Option<NoticeKind>) {
 +        let mut state = self.lock();
-+        if state.sent.insert((tag.to_string(), kind)) {
++        if state.sent.insert((tag.to_string(), kind.map_or(0, notice_number))) {
 +            let tag = tag.to_string();
 +            state.queue.push_back(match kind {
 +                None => ShareEvent::Revoked { tag },
@@ -284,19 +284,6 @@ index 0000000..c90a774
 +    }
 +}
 +
-+/// The sink a share's policy hooks report `share_notice` through (R15, the next patch's hooks). One event per
-+/// tag and kind per incarnation; the worker rate-limits the statuses.
-+#[derive(Clone)]
-+pub struct NoticeSink {
-+    tag: String,
-+    events: Arc<ShareEvents>,
-+}
-+
-+impl NoticeSink {
-+    pub fn notice(&self, kind: NoticeKind) {
-+        self.events.push(&self.tag, Some(kind));
-+    }
-+}
 +
 +struct Slot {
 +    /// The share's server while no device thread holds it.
@@ -314,6 +301,8 @@ index 0000000..c90a774
 +    flags: ShareFlags,
 +    identity: (u64, u64),
 +    guest_path: CString,
++    /// The confined server's `share_notice` sink (R15); `forward_notices` moves it onto the event queue.
++    notices: ShareNotices,
 +    revoke: RevokeSwitch,
 +    events: Arc<ShareEvents>,
 +    slot: Mutex<Slot>,
@@ -339,6 +328,7 @@ index 0000000..c90a774
 +            flags,
 +            identity: fs.root_identity(),
 +            guest_path,
++            notices: fs.notices(),
 +            revoke: fs.revoke_switch(),
 +            events,
 +            slot: Mutex::new(Slot { server: Some(Server::new(fs)), wake: None, closed: false }),
@@ -367,8 +357,17 @@ index 0000000..c90a774
 +        &self.guest_path
 +    }
 +
-+    pub fn notice_sink(&self) -> NoticeSink {
-+        NoticeSink { tag: self.tag.clone(), events: self.events.clone() }
++    /// The confined server's notice sink (shared with the server).
++    pub fn notices(&self) -> ShareNotices {
++        self.notices.clone()
++    }
++
++    /// Moves the server's pending notices onto the event queue as `share_notice{tag, kind}`, once per kind.
++    /// The device thread calls it after every request; the drain calls it before it waits.
++    pub fn forward_notices(&self) {
++        for kind in self.notices.drain() {
++            self.events.push(&self.tag, Some(kind));
++        }
 +    }
 +
 +    pub fn is_revoked(&self) -> bool {
@@ -734,7 +733,10 @@ index 0000000..c90a774
 +            self.share.close_if_revoked(server);
 +            let stop = &self.stop;
 +            match service_next(&mut self.port, server, index, || stop.load(Ordering::Acquire))? {
-+                Step::Completed => completed(),
++                Step::Completed => {
++                    self.share.forward_notices();
++                    completed()
++                }
 +                Step::Empty => return Ok(false),
 +                Step::Stopped => return Ok(true),
 +            }
@@ -788,10 +790,10 @@ index 0000000..c90a774
 +mod tests;
 diff --git a/src/devices/src/virtio/fs/cowork_tests.rs b/src/devices/src/virtio/fs/cowork_tests.rs
 new file mode 100644
-index 0000000..d96e6f6
+index 0000000..8c33a82
 --- /dev/null
 +++ b/src/devices/src/virtio/fs/cowork_tests.rs
-@@ -0,0 +1,704 @@
+@@ -0,0 +1,754 @@
 +// The guarded fs device without a VM: real virtqueues of 1,024 entries in guest memory, a simulated guest
 +// driver that lays chains out as the Linux virtio-fs driver does, real FUSE requests, the reclaim `Access`,
 +// and the confined server on temporary trees under the system temp directory. No VM, no vCPU, no
@@ -1450,26 +1452,76 @@ index 0000000..d96e6f6
 +    let tree = TempTree::new();
 +    let events = ShareEvents::new();
 +    let first = share(&tree, "src-3", events.clone());
-+    let sink = first.notice_sink();
-+    sink.notice(NoticeKind::Envrc);
-+    sink.notice(NoticeKind::Envrc);
-+    sink.notice(NoticeKind::GitProtected);
++    let sink = first.notices();
++    sink.push(NoticeKind::Envrc);
++    sink.push(NoticeKind::Envrc);
++    sink.push(NoticeKind::GitProtected);
++    first.forward_notices();
 +    first.revoke();
 +    first.revoke();
-+    sink.notice(NoticeKind::GitProtected);
++    sink.push(NoticeKind::GitProtected);
++    first.forward_notices();
 +    let drained: Vec<_> = std::iter::from_fn(|| events.next(Duration::ZERO)).collect();
 +    assert_eq!(drained, vec![
 +        ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::Envrc },
 +        ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::GitProtected },
 +        ShareEvent::Revoked { tag: "src-3".into() },
 +    ]);
-+    assert_eq!([NoticeKind::Envrc, NoticeKind::VscodeTasks, NoticeKind::VscodeSettings, NoticeKind::CodeWorkspace, NoticeKind::IdeaProject, NoticeKind::GitProtected].map(|k| k as u32), [1, 2, 3, 4, 5, 6]);
-+    // A waiting drain wakes for an event from another thread.
++    assert_eq!(NoticeKind::ALL.map(notice_number), [6, 1, 2, 3, 4, 5]);
++    // The queue bounds itself whatever a sink hands it: one event per tag and kind, one revocation per tag.
++    let bounded = ShareEvents::new();
++    for _ in 0..3 {
++        bounded.push("src-9", Some(NoticeKind::Envrc));
++        bounded.push("src-9", None);
++    }
++    assert_eq!(std::iter::from_fn(|| bounded.next(Duration::ZERO)).count(), 2);
++    // A waiting drain wakes for an event forwarded from another thread.
 +    let waiter = events.clone();
 +    let wait = std::thread::spawn(move || waiter.next(Duration::from_secs(2)));
 +    std::thread::sleep(Duration::from_millis(20));
-+    sink.notice(NoticeKind::IdeaProject);
++    sink.push(NoticeKind::IdeaProject);
++    first.forward_notices();
 +    assert_eq!(wait.join().unwrap(), Some(ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::IdeaProject }));
++}
++
++/// The confined server's R15 notices reach the share-event queue through the device: an R15 refusal and a
++/// write to a watched name, served by the device's drain, each come out once.
++#[test]
++fn guarded_fs_r15_notices_drain_through_the_device_once_each() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let root = OwnedFd::from(fs::File::open(&tree.0).unwrap());
++    let flags = ShareFlags { read_only: false, winter_share: false, folder_rules: true };
++    let share = ShareControl::new("src-4", ConfinedConfig { root, flags, guest_path: CString::new("/workspace/folders/g4").unwrap() }, events.clone()).unwrap();
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, _kicks) = device_queues();
++    let mut worker = GuardedFsWorker::new(queues, mem.clone(), access, device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap();
++    let mut run = |driver: &mut Driver, opcode: Opcode, node: u64, args: &[&[u8]]| {
++        let out = driver.request(REQ_INDEX, opcode as u32, node, args, 4096);
++        assert_eq!(worker.drain(REQ_INDEX, &mut || {}), Ok(false));
++        driver.reply(out)
++    };
++    let init = InitInCompat { major: KERNEL_VERSION, minor: KERNEL_MINOR_VERSION, max_readahead: 1 << 17, flags: 0 };
++    assert_eq!(run(&mut driver, Opcode::Init, 0, &[init.as_slice()]).0, 0);
++    let mkdir = MkdirIn { mode: 0o755, umask: 0 };
++    let (error, body) = run(&mut driver, Opcode::Mkdir, ROOT_ID, &[mkdir.as_slice(), &nul(b".git")]);
++    assert_eq!(error, 0);
++    let git = EntryOut::from_slice(&body[..std::mem::size_of::<EntryOut>()]).unwrap().nodeid;
++    assert_eq!(events.next(Duration::ZERO), None, "an allowed git directory reports nothing");
++    // An R15 refusal: a hooks directory in the protected zone.
++    assert_eq!(run(&mut driver, Opcode::Mkdir, git, &[mkdir.as_slice(), &nul(b"hooks")]).0, libc::EPERM);
++    assert!(!tree.0.join(".git/hooks").exists());
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Notice { tag: "src-4".into(), kind: NoticeKind::GitProtected }));
++    // A watched name, written: allowed and reported.
++    let create = CreateIn { flags: 2, mode: 0o644, umask: 0, open_flags: 0 };
++    assert_eq!(run(&mut driver, Opcode::Create, ROOT_ID, &[create.as_slice(), &nul(b".envrc")]).0, 0);
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Notice { tag: "src-4".into(), kind: NoticeKind::Envrc }));
++    // Again: refused again, but reported once only.
++    assert_eq!(run(&mut driver, Opcode::Mkdir, git, &[mkdir.as_slice(), &nul(b"hooks")]).0, libc::EPERM);
++    assert_eq!(events.next(Duration::from_millis(20)), None, "each kind once per incarnation");
 +}
 +
 +/// The share device is built without a shared-memory region and without EVENT_IDX, and its read-only bit
@@ -1741,10 +1793,10 @@ index 3570011..72b18c7 100644
              "krun_cowork_validate_profile_v1",
 diff --git a/src/libkrun/src/cowork_production_shares_tests.rs b/src/libkrun/src/cowork_production_shares_tests.rs
 new file mode 100644
-index 0000000..1327d7e
+index 0000000..c99111d
 --- /dev/null
 +++ b/src/libkrun/src/cowork_production_shares_tests.rs
-@@ -0,0 +1,387 @@
+@@ -0,0 +1,388 @@
 +//! SH2: the host-backed shares in the production profile. `krun_cowork_add_share_v1` and its refusals, the
 +//! gate clauses that admit `r.fs` only from it, every earlier TSI, vsock and inventory refusal with shares
 +//! present, revocation and the share-event drain, and text pins on the device wiring. Pure context and
@@ -1753,8 +1805,8 @@ index 0000000..1327d7e
 +use super::*;
 +use crate::cowork_production_gate_matrix_tests::{every_device_adding_setter_is_classified, every_reviewed_inventory_clause_refuses};
 +use crate::cowork_production_profile_tests::{bare, open_fds, valid, Production};
-+use devices::virtio::fs::cowork::{NoticeKind, ShareControl, ShareEvents};
-+use devices::virtio::fs::macos::confined::{ConfinedConfig, ShareFlags};
++use devices::virtio::fs::cowork::{ShareControl, ShareEvents};
++use devices::virtio::fs::macos::confined::{ConfinedConfig, NoticeKind, ShareFlags};
 +use std::os::fd::{AsRawFd, OwnedFd};
 +use std::sync::atomic::AtomicU64;
 +
@@ -2052,9 +2104,10 @@ index 0000000..1327d7e
 +        assert_eq!(revoke(id, "src-0"), 0, "a repeat is accepted");
 +        assert_eq!(next_event(id, 10).0, 0, "and reports nothing");
 +        // A notice from a share's policy hooks, once per tag and kind.
-+        let sink = COWORK_SHARES.lock().unwrap().get(&id).unwrap().shares[1].notice_sink();
-+        sink.notice(NoticeKind::GitProtected);
-+        sink.notice(NoticeKind::GitProtected);
++        // The confined server records it (R15); the drain forwards it.
++        let sink = COWORK_SHARES.lock().unwrap().get(&id).unwrap().shares[1].notices();
++        sink.push(NoticeKind::GitProtected);
++        sink.push(NoticeKind::GitProtected);
 +        let (status, event) = next_event(id, 0);
 +        assert_eq!((status, event.kind, event.notice), (1, KRUN_COWORK_SHARE_EVENT_NOTICE, 6));
 +        assert_eq!(tag_of(&event), "src-1");
@@ -2133,7 +2186,7 @@ index 0000000..1327d7e
 +    assert!(body.contains("let Some(cowork) = &self.cowork else { return };"), "stock devices keep the no-op");
 +}
 diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
-index 7d46aa7..5f4ebd8 100644
+index 7d46aa7..493dfb2 100644
 --- a/src/libkrun/src/lib.rs
 +++ b/src/libkrun/src/lib.rs
 @@ -572,7 +572,12 @@ pub extern "C" fn krun_create_ctx() -> i32 {
@@ -2234,7 +2287,7 @@ index 7d46aa7..5f4ebd8 100644
              high_water_pins: snapshot.high_water_pins, high_water_bytes: snapshot.high_water_bytes, budget_refusals: snapshot.budget_refusals };
          0
      }
-@@ -3460,6 +3503,153 @@ pub extern "C" fn krun_cowork_validate_profile_v1(ctx_id: u32) -> i32 {
+@@ -3460,6 +3503,157 @@ pub extern "C" fn krun_cowork_validate_profile_v1(ctx_id: u32) -> i32 {
      0
  }
  
@@ -2372,11 +2425,15 @@ index 7d46aa7..5f4ebd8 100644
 +    {
 +        use devices::virtio::fs::cowork::ShareEvent;
 +        if out.is_null() || (*out).size < std::mem::size_of::<KrunCoworkShareEventV1>() as u32 || timeout_ms > KRUN_COWORK_SHARE_EVENT_MAX_WAIT_MS { return -libc::EINVAL; }
-+        let Some(events) = COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&ctx_id).map(|set| set.events.clone()) else { return -libc::ENOENT; };
++        let Some((events, shares)) = COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&ctx_id).map(|set| (set.events.clone(), set.shares.clone())) else { return -libc::ENOENT; };
++        // Notices the confined servers recorded (R15) join the queue before the wait.
++        for share in &shares {
++            share.forward_notices();
++        }
 +        let Some(event) = events.next(std::time::Duration::from_millis(timeout_ms.into())) else { return 0; };
 +        let (kind, notice, tag) = match event {
 +            ShareEvent::Revoked { tag } => (KRUN_COWORK_SHARE_EVENT_REVOKED, 0, tag),
-+            ShareEvent::Notice { tag, kind } => (KRUN_COWORK_SHARE_EVENT_NOTICE, kind as u32, tag),
++            ShareEvent::Notice { tag, kind } => (KRUN_COWORK_SHARE_EVENT_NOTICE, devices::virtio::fs::cowork::notice_number(kind), tag),
 +        };
 +        let mut value = KrunCoworkShareEventV1 { size: std::mem::size_of::<KrunCoworkShareEventV1>() as u32, kind, notice, ..Default::default() };
 +        value.tag[..tag.len()].copy_from_slice(tag.as_bytes());
@@ -2388,7 +2445,7 @@ index 7d46aa7..5f4ebd8 100644
  #[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_admission_tests {
   use super::*;
   fn disk()->BlockDeviceConfig{BlockDeviceConfig{block_id:"fixture".into(),cache_type:CacheType::Writeback,disk_image_path:"/NO-OPEN-fixture-only".into(),disk_image_format:ImageType::Raw,is_disk_read_only:false,direct_io:false,sync_mode:SyncMode::Full}}
-@@ -3767,3 +3957,5 @@ mod cowork_production_quiet_tests;
+@@ -3767,3 +3961,5 @@ mod cowork_production_quiet_tests;
  mod cowork_production_counters_tests;
  #[cfg(all(test,feature="blk",target_os="macos"))]
  mod cowork_production_exit_tests;

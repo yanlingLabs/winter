@@ -2,9 +2,8 @@
 
 Runs, with the pinned offline toolchain and one thread:
   * production features (`blk`): the whole krun-vmm unit suite (fixed by patch 0014), the krun-devices
-    suites the admitted fixture ran plus the confined virtio-fs server's FUSE-message harness (patch 0024)
-    and the guarded fs device of the shares (patch 0025), and the whole libkrun suite including the new
-    production tests;
+    suites the admitted fixture ran plus the confined virtio-fs server's FUSE-message harness (patches 0024 and 0025)
+    and the guarded fs device of the shares (patch 0026), and the whole libkrun suite including the new production tests;
   * production-only features (`blk,cowork-production-only`): the whole libkrun suite again, with the
     start admission refusing any context that is not the production profile;
   * oracle features (`blk,cowork-fixture-oracle`): the whole libkrun suite again, so the fixture
