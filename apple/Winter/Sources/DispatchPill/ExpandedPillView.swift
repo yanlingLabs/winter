@@ -89,6 +89,9 @@ struct ExpandedPillAccessoryButtons: View {
 /// swiping on past the newest turn returns to the composer.
 struct ExpandedPillTurnPreview: View {
     let preview: DispatchPillTurnPreview
+    /// The reply is taller than the pill may grow (`DispatchPillController.previewReplyScrolls`): only then is it in a
+    /// scroll view.
+    var scrolls = false
     var onReplyHeight: (CGFloat) -> Void = { _ in }
 
     var body: some View {
@@ -104,21 +107,36 @@ struct ExpandedPillTurnPreview: View {
                     .font(Typography.caption())
                     .foregroundStyle(Color.white.opacity(0.35))
             }
-            ScrollView(.vertical) {
-                Text(preview.reply)
-                    .font(Typography.composerField())
-                    .foregroundStyle(Color.white)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(width: DispatchPillMetrics.previewTextWidth, alignment: .leading)
-                    .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
-                        onReplyHeight(height)
-                    }
+            if scrolls {
+                ScrollView(.vertical) {
+                    // A legacy scroller's room on the trailing side, as the thinking pill leaves it.
+                    reply(width: DispatchPillMetrics.previewTextWidth - Self.scrollerGap)
+                        .padding(.trailing, Self.scrollerGap)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.automatic)
+                // Each turn opens at its top: a turn swiped to never inherits the last one's scroll.
+                .id(preview.position)
+            } else {
+                reply(width: DispatchPillMetrics.previewTextWidth)
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollIndicators(.automatic)
         }
         .padding(.horizontal, DispatchPillMetrics.leadingPadding)
         .padding(.vertical, DispatchPillMetrics.previewVerticalInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The trailing gap a scrolling reply leaves for a legacy (always-shown) scroller.
+    static let scrollerGap: CGFloat = 10
+
+    private func reply(width: CGFloat) -> some View {
+        Text(preview.reply)
+            .font(Typography.composerField())
+            .foregroundStyle(Color.white)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: width, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
+                onReplyHeight(height)
+            }
     }
 }

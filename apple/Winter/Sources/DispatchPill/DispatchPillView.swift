@@ -202,8 +202,9 @@ struct DispatchPillComposerBar: View {
     /// Command mode: the draft in purple, its ghost completion, Delete's opt-out, the send circle's run look.
     @ObservedObject var commandMode: DispatchPillCommandMode
     /// The plume is up: it starts once the working look is wanted AND the shape has stopped moving
-    /// (`DispatchPillController.shapeSharp`), then stays for as long as the look is wanted — a later spring (a steer's
-    /// typing pill, a card) never tears it down and up again. Down the moment the look goes.
+    /// (`DispatchPillController.shapeSharp`), then stays for as long as the look is wanted — the shape blurring again
+    /// while the pill is still working does not take it down. It goes the moment the look does (the typing pill, a
+    /// card, the picker, the turn's end), and the next start waits for the shape again.
     @State private var plumeUp = false
 
     var body: some View {
@@ -248,7 +249,7 @@ struct DispatchPillComposerBar: View {
             // A pinned turn shows ALONE — no composer. The composer stays mounted underneath,
             // invisible, so typing still lands in it (and the first keystroke leaves the turn).
             if let preview {
-                ExpandedPillTurnPreview(preview: preview,
+                ExpandedPillTurnPreview(preview: preview, scrolls: controller.previewReplyScrolls,
                                         onReplyHeight: { controller.previewReplyLaidOut(preview.reply, height: $0) })
                     .contentShape(Rectangle())
                     .onTapGesture { controller.exitPreview() }

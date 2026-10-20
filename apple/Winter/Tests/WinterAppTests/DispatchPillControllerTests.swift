@@ -116,7 +116,7 @@ final class DispatchPillControllerTests: XCTestCase {
         XCTAssertEqual(frame.minY + DispatchPillMetrics.shadowPad, visible.minY + DispatchPillMetrics.dockGap)
         XCTAssertTrue(pill.panelAcceptsKeyForTesting, "a summon takes the keyboard — it is for typing")
         XCTAssertGreaterThan(pill.keyAssertionCountForTesting, 0)
-        XCTAssertEqual(pill.monitorCountForTesting, 6, "Esc, swipe, click-outside ×2, mouse gate ×2")
+        XCTAssertEqual(pill.monitorCountForTesting, 7, "Esc, swipe, a scrolling reply's click, click-outside ×2, mouse gate ×2")
     }
 
     func testHideRemovesTheMonitorsAndOrdersOut() {

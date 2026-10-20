@@ -426,6 +426,15 @@ struct DispatchPillTurnPreview: Equatable {
     let position: String
 }
 
+/// PURE: where a click on a scrolling pinned turn counts as a click on it (canvas coordinates): the main pill, less
+/// the trailing strip its scroller sits in.
+func dispatchPillReplyClickArea(canvasSize: CGSize, mainSize: CGSize) -> CGRect {
+    let main = dispatchPillMainRect(canvasSize: canvasSize, mainSize: mainSize)
+    return CGRect(x: main.minX, y: main.minY,
+                  width: max(0, main.width - DispatchPillMetrics.leadingPadding - ExpandedPillTurnPreview.scrollerGap - 6),
+                  height: main.height)
+}
+
 /// PURE: the tallest a pinned turn gets — `previewMaxScreenShare` of the screen's visible height, never less than the
 /// typing pill's own ceiling. Past it the reply scrolls inside the pill; it is never cut.
 func dispatchPillPreviewCeiling(visibleFrame: CGRect) -> CGFloat {
@@ -448,11 +457,13 @@ let dispatchPillSessionUpdateLabel = "Update from your sessions"
 let dispatchPillPreviewPromptLimit = 90
 
 /// PURE: the preview for `exchanges[index]`, or `nil` when the index is out of range.
-func dispatchPillTurnPreview(exchanges: [Exchange], index: Int) -> DispatchPillTurnPreview? {
+/// `replyText` reads the reply as plain words (`dispatchPillReplyText`; the controller passes a memoized one).
+func dispatchPillTurnPreview(exchanges: [Exchange], index: Int,
+                             replyText: (String) -> String = dispatchPillReplyText) -> DispatchPillTurnPreview? {
     guard exchanges.indices.contains(index) else { return nil }
     let exchange = exchanges[index]
     let prompt = dispatchPillShortened(exchange.prompt, limit: dispatchPillPreviewPromptLimit)
-    let reply = dispatchPillReplyText(exchange.reply)
+    let reply = replyText(exchange.reply)
     return DispatchPillTurnPreview(
         // A turn with no prompt is Dispatch's own: the daemon woke it to report on the sessions it
         // spawned (`dispatch-wake`, which `SessionReducer` opens as a promptless exchange).
@@ -470,24 +481,104 @@ func dispatchPillShortened(_ text: String, limit: Int) -> String {
     return String(collapsed.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
 }
 
-/// PURE: the WHOLE reply as a pinned turn shows it (user, 2026-10-20: "it should show the full answer"): every line,
-/// each read as plain words — a heading's or quote's marks dropped, a bullet drawn as "•", bold markers gone — with
-/// runs of blank lines folded to one and none at either end.
+/// PURE: the WHOLE reply as a pinned turn shows it (user, 2026-10-20: "it should show the full answer"), read as plain
+/// words where that is safe and left alone where it is not:
+/// - a fenced code block (``` or ~~~) is kept VERBATIM — indentation, `#`, `**`, `- `/`+ ` and all — and only its
+///   fence lines are dropped;
+/// - a paragraph that looks like a diff (a line opening with `+`, `@@`, `+++` or `---`) is kept verbatim too;
+/// - otherwise a heading's marks go only for `#`…`######` FOLLOWED BY A SPACE at the line's start ("#1 priority"
+///   stays), a quote's `> ` goes, a `- ` or `* ` bullet is drawn as "•" (a `+ ` line is left as written), and `**`
+///   goes only as a balanced bold pair outside inline code;
+/// - runs of blank lines fold to one, none at either end.
 func dispatchPillReplyText(_ reply: String) -> String {
+    let rawLines = reply.components(separatedBy: .newlines)
+    // Diff-looking paragraphs (runs of non-blank lines outside fences), by line index.
+    var verbatim = Set<Int>()
+    var fenced = false
+    var paragraph: [Int] = []
+    func closeParagraph() {
+        let diff = paragraph.contains { i in
+            let t = rawLines[i].trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("+") || t.hasPrefix("@@") || t.hasPrefix("---")
+        }
+        if diff { verbatim.formUnion(paragraph) }
+        paragraph = []
+    }
+    for (i, raw) in rawLines.enumerated() {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        if dispatchPillIsFence(t) { closeParagraph(); fenced.toggle(); continue }
+        if fenced { continue }
+        if t.isEmpty { closeParagraph() } else { paragraph.append(i) }
+    }
+    closeParagraph()
+
     var lines: [String] = []
-    for raw in reply.components(separatedBy: .newlines) {
+    fenced = false
+    for (i, raw) in rawLines.enumerated() {
         let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        let indent = String(raw.prefix { $0 == " " || $0 == "\t" }.prefix(6)).replacingOccurrences(of: "\t", with: "  ")
-        let bullet = trimmed.hasPrefix("- ") || trimmed.hasPrefix("* ") || trimmed.hasPrefix("+ ")
-        let words = dispatchPillStrippingMarkdownLead(trimmed)
-        if words.isEmpty {
+        if dispatchPillIsFence(trimmed) { fenced.toggle(); continue }
+        if fenced || verbatim.contains(i) {
+            lines.append(String(raw.reversed().drop { $0 == " " || $0 == "\t" }.reversed()))
+            continue
+        }
+        if trimmed.isEmpty {
             if let last = lines.last, !last.isEmpty { lines.append("") }
             continue
         }
-        lines.append(bullet ? indent + "• " + words : words)
+        lines.append(dispatchPillPlainLine(raw))
     }
     while lines.last?.isEmpty == true { lines.removeLast() }
+    while lines.first?.isEmpty == true { lines.removeFirst() }
     return lines.joined(separator: "\n")
+}
+
+/// A code fence line: three or more backticks or tildes at its start.
+func dispatchPillIsFence(_ trimmed: String) -> Bool {
+    trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+}
+
+/// One prose line (outside code) as plain words: heading marks only before a space, a quote's `> `, a `- `/`* `
+/// bullet as "•" (keeping its indent), balanced `**` pairs outside inline code.
+func dispatchPillPlainLine(_ raw: String) -> String {
+    let indent = String(raw.prefix { $0 == " " || $0 == "\t" }.prefix(6)).replacingOccurrences(of: "\t", with: "  ")
+    var s = Substring(raw.trimmingCharacters(in: .whitespaces))
+    let hashes = s.prefix { $0 == "#" }
+    if (1...6).contains(hashes.count), s.dropFirst(hashes.count).first == " " {
+        s = s.dropFirst(hashes.count + 1)
+    } else if s.hasPrefix("> ") {
+        s = s.dropFirst(2)
+    } else if s == ">" {
+        s = ""
+    }
+    var bullet = false
+    if s.hasPrefix("- ") || s.hasPrefix("* ") {
+        s = s.dropFirst(2)
+        bullet = true
+    }
+    let words = dispatchPillStrippingBold(String(s).trimmingCharacters(in: .whitespaces))
+    return bullet ? indent + "• " + words : words
+}
+
+/// `**bold**` pairs dropped to their words, outside `inline code` only; an unbalanced `**` (or one in code) stays.
+func dispatchPillStrippingBold(_ line: String) -> String {
+    // Split on backticks: even segments are prose, odd ones are inline code (kept as written, ticks and all).
+    let segments = line.components(separatedBy: "`")
+    guard segments.count > 1 || line.contains("**") else { return line }
+    let codeIsClosed = segments.count % 2 == 1
+    var out: [String] = []
+    for (i, segment) in segments.enumerated() {
+        let isCode = i % 2 == 1 && (codeIsClosed || i < segments.count - 1)
+        out.append(isCode ? segment : dispatchPillStrippingBoldPairs(segment))
+    }
+    return out.joined(separator: "`")
+}
+
+private func dispatchPillStrippingBoldPairs(_ text: String) -> String {
+    guard text.contains("**") else { return text }
+    let pattern = #"\*\*(?=\S)(.+?)(?<=\S)\*\*"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+    let range = NSRange(text.startIndex..., in: text)
+    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1")
 }
 
 /// A reply's line is often a markdown heading or bullet; the preview shows its words.

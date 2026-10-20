@@ -292,6 +292,44 @@ final class DispatchPillViewTests: XCTestCase {
                        long.trimmingCharacters(in: .whitespaces), "never cut")
     }
 
+    func testAFencedCodeBlockIsKeptVerbatim() {
+        let reply = """
+        Here is the fix:
+        ```python
+        def area(r):
+            # radius in metres
+            return 3.14 * r ** 2  # **not bold**
+        - not a bullet
+        ```
+        Done.
+        """
+        XCTAssertEqual(dispatchPillReplyText(reply), """
+        Here is the fix:
+        def area(r):
+            # radius in metres
+            return 3.14 * r ** 2  # **not bold**
+        - not a bullet
+        Done.
+        """)
+    }
+
+    func testADiffIsKeptVerbatim() {
+        let fenced = "The change:\n```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n- old line\n+ new line\n```"
+        XCTAssertEqual(dispatchPillReplyText(fenced), "The change:\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n- old line\n+ new line")
+        let bare = "@@ -1 +1 @@\n- old line\n+ new line"
+        XCTAssertEqual(dispatchPillReplyText(bare), bare, "an unfenced diff is not turned into bullets")
+    }
+
+    func testOnlyRealHeadingsBulletsAndBoldPairsAreRead() {
+        XCTAssertEqual(dispatchPillReplyText("#1 priority is the build"), "#1 priority is the build")
+        XCTAssertEqual(dispatchPillReplyText("## Found it"), "Found it")
+        XCTAssertEqual(dispatchPillReplyText("#hashtag"), "#hashtag")
+        XCTAssertEqual(dispatchPillReplyText("- **bold** item\n* other"), "• bold item\n• other")
+        XCTAssertEqual(dispatchPillReplyText("pass `**kwargs` through"), "pass `**kwargs` through", "inline code kept")
+        XCTAssertEqual(dispatchPillReplyText("2 ** 8 is 256"), "2 ** 8 is 256", "an unbalanced ** stays")
+        XCTAssertEqual(dispatchPillReplyText("> quoted"), "quoted")
+    }
+
     func testShorteningCutsWithAnEllipsis() {
         let long = String(repeating: "a", count: 200)
         let cut = dispatchPillShortened(long, limit: 90)
