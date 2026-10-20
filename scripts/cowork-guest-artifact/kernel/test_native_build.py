@@ -76,6 +76,33 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(set(env) - set(PINS["environment"]), {"SOURCE_DATE_EPOCH", "KBUILD_BUILD_TIMESTAMP", "HOME"})
 
 
+class PathIndependenceTests(unittest.TestCase):
+    """The kernel must not carry the runner's work path: run 39471145301 differed from run 39406043639 only by the random work folder."""
+    WORK = "/home/runner/work/_temp/winter-kernel-work"
+
+    def test_the_build_passes_file_debug_and_macro_prefix_maps_for_the_work_folder_to_c_and_assembly(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        for key in ("KCFLAGS", "KAFLAGS"):
+            self.assertEqual(env[key].split(), [f"-ffile-prefix-map={self.WORK}=.", f"-fdebug-prefix-map={self.WORK}=.", f"-fmacro-prefix-map={self.WORK}=."])
+
+    def test_the_identity_values_are_fixed_and_the_pinned_ones_are_unchanged(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        self.assertEqual((env["KBUILD_BUILD_USER"], env["KBUILD_BUILD_HOST"]), ("cowork-fixture", "isolated"))
+        self.assertEqual(env["KBUILD_BUILD_TIMESTAMP"], nb.CI["kbuildBuildTimestamp"])
+        self.assertEqual(env["SOURCE_DATE_EPOCH"], nb.CI["sourceDateEpoch"])
+        for key, value in PINS["environment"].items():
+            if key != "PATH":
+                self.assertEqual(env[key], value)
+
+    def test_the_build_function_hands_its_own_work_folder_to_the_environment(self):
+        import inspect
+        self.assertIn("build_environment(str(llvm_bin), work)", inspect.getsource(nb.build))
+
+    def test_the_workflow_builds_at_one_fixed_work_path(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work="$RUNNER_TEMP/winter-kernel-work"', text)
+
+
 class CiBuildPinTests(unittest.TestCase):
     def test_the_open_environment_values_are_pinned_and_agree_with_each_other(self):
         ci = nb.CI
