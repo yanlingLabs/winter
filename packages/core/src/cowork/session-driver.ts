@@ -78,14 +78,13 @@ export interface CoworkSessionDriverDeps {
  * acknowledged `ready` under the incarnation's CURRENT epoch. At most 12 (the contract's share limit), no repeats. Any
  * refusal throws typed and the host faults the boot; sources already acknowledged stay so for this incarnation only.
  */
-export function coworkAcknowledgeMountedShares(records: Pick<CoworkRepository, "refreshEpoch" | "source" | "acknowledgeSource">, context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void {
+export function coworkAcknowledgeMountedShares(records: Pick<CoworkRepository, "refreshEpoch" | "acknowledgeMountedShares">, context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void {
   if (!Array.isArray(mounted) || mounted.length < 1 || mounted.length > 12 || new Set(mounted.map(share => share?.sourceId)).size !== mounted.length) throw new CoworkError("invalid_request");
   for (const share of mounted) {
     if (!share || typeof share.sourceId !== "string" || !Number.isSafeInteger(share.revision) || share.revision < 1) throw new CoworkError("invalid_request");
-    const source = records.source(context.workspaceId, share.sourceId);
-    if (source.kind !== "folder" || source.desired !== "present" || source.state !== "preparing" || source.revision !== share.revision) throw new CoworkError("stale_acknowledgment");
-    records.acknowledgeSource(records.refreshEpoch(context.workspaceId, context.incarnationId, context.leaseEpoch), share.sourceId, share.revision, "ready");
   }
+  // All or nothing: the repository validates every entry, then acknowledges them in one transaction.
+  records.acknowledgeMountedShares(records.refreshEpoch(context.workspaceId, context.incarnationId, context.leaseEpoch), mounted.map(share => ({ sourceId: share.sourceId, revision: share.revision })));
 }
 
 const unsupported = (): never => { throw new CoworkError("unsupported_topology"); };
@@ -164,6 +163,8 @@ export function createCoworkSessionDrivers(deps: CoworkSessionDriverDeps): Cowor
       let admitted: Admitted | undefined, refusal: unknown;
       const conversations = (context: CoworkGuestConversationContext) => {
         try {
+          // A refused `shares_mounted` faulted this boot: no set follows it.
+          if (refusal !== undefined) throw refusal;
           if (admitted !== undefined) throw new CoworkError("recovery_required");
           if (context.workspaceId !== binding.workspaceId) throw new CoworkError("authority_denied");
           // D3b: either location; the source facts are compared only for a source conversation.

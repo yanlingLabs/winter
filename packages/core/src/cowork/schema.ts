@@ -388,12 +388,15 @@ export function migrateCoworkExportBindingSchema(db: Database): void {
  *    recorded backend) start as `started`, never `none`, so a later resume can never be told "fresh" over a real store.
  *  - `cowork_workspaces`: the data volume's `store_volume_uuid` (kept and re-sent; CR4 step 9) and the per-workspace
  *    `browse_uid` (4b.3).
+ *  - RULE for N3 (the allocator): a guest uid (runtime, tool or browse) is ONLY ever allocated through `cowork_guest_uids`,
+ *    in the same transaction that writes it to `cowork_conversations`/`cowork_workspaces`; no column is ever set to a uid
+ *    that has no row there, and no row is deleted before `released_at` (the trigger below).
  *  - `cowork_guest_uids`: the allocation table. One row per (workspace, uid), never reused while its owner's files may
  *    remain: a row is deleted only once `released_at` is set, and `released_at` needs `retired_at`.
  *  - `cowork_guest_boots`: the host's durable record of each guest boot at `hello`, and its end proof (the D1 evidence)
  *    after release; `endedGuestBoots` is built only from rows with a proof.
  *  - `cowork_peer_inbox` (PEER-INBOX's table; its columns come through DOOR's migration): `offer_count`,
- *    `acked_hold_token`, `commit_confirmed_at` and `commit_outcome` (4.5; set together).
+ *    `acked_hold_token`, `commit_confirmed_at` and `commit_outcome` (4.5; `commit_confirmed_at` and `commit_outcome` are set together, enforced by a CHECK).
  * Idempotent. */
 export function migrateCoworkResumeSchema(db: Database): void {
   const conversations = columnsOf(db, "cowork_conversations");
@@ -411,7 +414,7 @@ export function migrateCoworkResumeSchema(db: Database): void {
   if (!peer.includes("offer_count")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN offer_count INTEGER NOT NULL DEFAULT 0 CHECK (offer_count >= 0)");
   if (!peer.includes("acked_hold_token")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN acked_hold_token TEXT CHECK (acked_hold_token IS NULL OR (length(acked_hold_token) = 64 AND acked_hold_token NOT GLOB '*[^0-9a-f]*'))");
   if (!peer.includes("commit_confirmed_at")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN commit_confirmed_at REAL");
-  if (!peer.includes("commit_outcome")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN commit_outcome TEXT CHECK (commit_outcome IS NULL OR commit_outcome IN ('folded','queued','started','already','lost'))");
+  if (!peer.includes("commit_outcome")) db.exec("ALTER TABLE cowork_peer_inbox ADD COLUMN commit_outcome TEXT CHECK (commit_outcome IS NULL OR commit_outcome IN ('folded','queued','started','already','lost')) CHECK ((commit_confirmed_at IS NULL) = (commit_outcome IS NULL))");
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS cowork_conversations_runtime_uid ON cowork_conversations(workspace_id, runtime_uid) WHERE runtime_uid IS NOT NULL;
     CREATE UNIQUE INDEX IF NOT EXISTS cowork_conversations_tool_uid ON cowork_conversations(workspace_id, tool_uid) WHERE tool_uid IS NOT NULL;
@@ -431,7 +434,7 @@ export function migrateCoworkResumeSchema(db: Database): void {
     CREATE TABLE IF NOT EXISTS cowork_guest_boots (
       workspace_id TEXT NOT NULL REFERENCES cowork_workspaces(workspace_id),
       incarnation_id TEXT NOT NULL, lease_epoch INTEGER NOT NULL CHECK (lease_epoch > 0),
-      guest_boot_id TEXT NOT NULL UNIQUE CHECK (length(guest_boot_id) = 36),
+      guest_boot_id TEXT NOT NULL UNIQUE CHECK (length(guest_boot_id) = 36 AND guest_boot_id GLOB '[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f]-[0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]'),
       recorded_at TEXT NOT NULL,
       ended_proof TEXT CHECK (ended_proof IS NULL OR ended_proof IN ('orderly-receipt','new-boot','owner-recover')),
       ended_at TEXT,
