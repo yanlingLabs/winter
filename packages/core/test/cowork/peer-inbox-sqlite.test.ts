@@ -546,13 +546,28 @@ test("doctor restore-backup over garbage bytes restores and keeps the copy, with
   const home = tempHome();
   const { rs } = opened(home);
   const backup = rs.backup(); const dest = rs.path; rs.close();
-  writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database `), Buffer.alloc(8_192, 7)]));
+  // The damaged file still carries the inbox table's name in its schema text, so it MAY hold owed bodies: the warning shows.
+  writeFileSync(dest, Buffer.concat([Buffer.from(`${MARKER} not a database CREATE TABLE cowork_peer_inbox `), Buffer.alloc(8_192, 7)]));
   rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
   const original = readFileSync(dest);
   const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
   expectKeptUnscrubbed(result, original, home);
   const reopened = openRuntimeStateDb(home); cleanup.push(() => reopened.close());
   expect(reopened.integrity().ok).toBe(true);
+});
+
+test("doctor restore-backup shows no peer-message warning for an unreadable copy that cannot hold an inbox table, but still keeps the raw copy", async () => {
+  const home = tempHome();
+  const { rs } = opened(home);
+  const backup = rs.backup(); const dest = rs.path; rs.close();
+  writeFileSync(dest, Buffer.concat([Buffer.from("not a database at all "), Buffer.alloc(8_192, 7)])); // no table name anywhere in the bytes
+  rmSync(`${dest}-wal`, { force: true }); rmSync(`${dest}-shm`, { force: true });
+  const original = readFileSync(dest);
+  const result = await repairRuntimeState(home, { kind: "restore-backup", backupPath: backup });
+  expect(result.applied).toBe(true);
+  expect(result.warning).toBeUndefined(); expect(result.detail).not.toContain("WARNING"); expect(result.detail).not.toContain("peer messages");
+  const snapshot = /the replaced file is at (\S+db)/.exec(result.detail)![1]!;
+  expect(readFileSync(snapshot)).toEqual(original); // evidence untouched
 });
 
 test("a failing rename of the scrubbed copy leaves the raw copy byte-identical, removes only the working copy, warns, and the restore still runs", async () => {

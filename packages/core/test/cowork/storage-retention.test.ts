@@ -193,6 +193,11 @@ test("no Cowork source file removes, renames-over or truncates anything beyond t
     // The approved WINTER.md write: renameat replaces the instruction file's directory entry atomically
     // (a content-bound, user-approved edit); it never removes workspace data.
     /^instruction-fs\.ts:\d+: .*renameat/,
+    // The production native environment's coordination files (S7B part 1), all in the Coordination directory and none in a workspace: the
+    // installation id's and the stores' own temp files, the atomic replace of a launch-journal entry, and the retirement of a launcher
+    // receipt or journal entry of one scope. No workspace data, image or output is touched.
+    /^host-env\/coordination\.ts:\d+: .*unlinkSync\(temporary\)/,
+    /^host-env\/stores\.ts:\d+: .*(renameSync\(temporary|unlinkSync\(temporary\)|unlinkSync\(join\(directory, name\)\))/,
   ];
   const unexpected = found.filter(line => !audited.some(pattern => pattern.test(line)));
   expect(unexpected).toEqual([]);

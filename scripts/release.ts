@@ -123,6 +123,8 @@ import { winterSourceOf } from "../packages/core/src/runtime-sdk/bundle-layout";
 import { REQUIRED_WINTER_AGENT_SDK } from "../packages/core/src/runtime-sdk/versions";
 import { buildWinter } from "./build-winter";
 import { resolveInstalledWinterPackage } from "./stage-runtimes";
+import { buildCoworkNative } from "./build-cowork-native";
+import { COWORK_NATIVE, COWORK_NATIVE_EMBED_RELATIVE, checkCoworkNativeBundle, checkCoworkNativeOmitted, checkSignedNative, coworkNativeReleasePlan, coworkRequirement, readCoworkBundleFacts } from "./cowork-native-lib";
 import { createHash } from "node:crypto";
 
 const TEAM_ID = "37N77U9RSZ";
@@ -464,6 +466,20 @@ const OUT = join(ROOT, "out", "release", DRY_RUN ? `${version}-dryrun` : version
 rmSync(OUT, { recursive: true, force: true });
 mkdirSync(OUT, { recursive: true });
 const dd = join(OUT, "dd");
+
+// N2 (Cowork native worker): the launcher and the VM worker are built UNSIGNED into dist/cowork-native, where project.yml's "Embed Cowork native" phase
+// (scripts/embed-cowork-native.sh) reads them. The worker links S4's stripped libkrun archive, which this repository does not build or download, so the release makes an
+// EXPLICIT choice (coworkNativeReleasePlan): the inputs (COWORK_LIBKRUN_INCLUDE = the directory holding libkrun.h, COWORK_LIBKRUN_ARCHIVE = the archive; build.py refuses unless both hash to
+// apple/Cowork/WinterCoworkHVFWorker/pins.json) or COWORK_NATIVE=omit, which ships no WinterCowork helpers and no pins file. Neither fails closed here, before anything is built.
+// Shipping the pair activates nothing (the daemon still refuses Cowork sessions).
+const nativePlan = coworkNativeReleasePlan(process.env);
+if (nativePlan.mode === "refuse") fail(nativePlan.message);
+if (nativePlan.mode === "build") {
+  console.log("Building the Cowork native pair (launcher: swift build; worker: build.py against the pinned libkrun archive)...");
+  buildCoworkNative({ out: join(ROOT, "dist", "cowork-native"), include: nativePlan.include, archive: nativePlan.archive });
+} else {
+  console.log("Cowork native pair: OMITTED by COWORK_NATIVE=omit (no WinterCowork helpers, no pins file in this release).");
+}
 
 console.log("Generating Xcode project (xcodegen)...");
 sh(`xcodegen generate`, APPLE_DIR);
@@ -891,6 +907,49 @@ assertSigned(browserHostPath, "winter-browser-host");
   if (failures.length > 0) fail(`winter-browser-host is not signed the way the daemon and Chrome need:\n  ${failures.join("\n  ")}`);
   console.log(`winter-browser-host verified: ${BROWSER_HOST.dist.identifier}, designated => ${stated}, hardened runtime, no entitlements, no test hooks.`);
 }
+// --- Cowork native pair (N2) -------------------------------------------------------------------------
+// Winter.app/Contents/Helpers/WinterCowork/{winter-cowork-launcher,winter-cowork-worker}, embedded by project.yml's "Embed Cowork native" phase
+// (scripts/embed-cowork-native.sh). The daemon spawns the launcher by path and checks it against EXACTLY its stated requirement before reading a byte, and the launcher
+// does the same for the worker, so a release proves: each binary's Developer ID team and secure timestamp (assertSigned); its identifier; the hardened runtime;
+// EXACTLY the stated designated requirement (and that the signature satisfies it); the entitlements (worker: the hypervisor key alone, launcher: none);
+// platform dylibs only; no test hook; and, through the pin manifest, that the directory holds exactly the two binaries, that their CDHashes are the manifest's, and
+// that the libkrun archive/header and the worker and guest artifact pin files they were built against are the ones in THIS checkout.
+// `checkSignedNative` and `checkCoworkNativeBundle` are the same checks `dev:cowork-native` and `verify:cowork-native` run.
+if (nativePlan.mode === "omit") {
+  // An omitted release carries neither the helpers nor the pins file; a leftover from an earlier build is a failure, not a convenience.
+  const omitted = checkCoworkNativeOmitted({
+    helpersDirectoryExists: existsSync(join(app, COWORK_NATIVE_EMBED_RELATIVE)),
+    manifestText: existsSync(join(app, "Contents", "Resources", "cowork-native-pins.json")) ? readFileSync(join(app, "Contents", "Resources", "cowork-native-pins.json"), "utf8") : null,
+  });
+  if (omitted.length > 0) fail(`the release omits the Cowork native pair but the bundle carries it:\n  ${omitted.join("\n  ")}`);
+  console.log("Cowork native pair omitted as asked: no WinterCowork helpers and no pins file in the bundle.");
+} else {
+  const contents = join(app, "Contents");
+  const pairDir = join(app, COWORK_NATIVE_EMBED_RELATIVE);
+  const failures: string[] = [];
+  for (const role of ["launcher", "worker"] as const) {
+    const binary = join(pairDir, COWORK_NATIVE[role].name);
+    assertSigned(binary, COWORK_NATIVE[role].name);
+    failures.push(...checkSignedNative(role, TEAM_ID, {
+      codesignDvv: probe(`codesign -dvv "${binary}" 2>&1`).stdout,
+      codesignDr: probe(`codesign -d -r- "${binary}" 2>&1`).stdout,
+      entitlementsXml: probe(`codesign -d --entitlements - --xml "${binary}" 2>/dev/null`).stdout,
+      otoolL: probe(`otool -L "${binary}"`).stdout,
+      executable: readFileSync(binary),
+    }));
+    const stated = coworkRequirement(COWORK_NATIVE[role].identifier, TEAM_ID);
+    const satisfied = probe(`codesign --verify --strict -R='${stated}' "${binary}" 2>&1`);
+    if (!satisfied.ok) failures.push(`${COWORK_NATIVE[role].name}: the signature does not satisfy its own stated requirement: ${satisfied.stdout.trim()}`);
+  }
+  failures.push(...checkCoworkNativeBundle(readCoworkBundleFacts({
+    appContents: contents, repo: ROOT,
+    listDirectory: (path) => (existsSync(path) ? readdirSync(path) : []),
+    readText: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+    codesignDvvv: (path) => probe(`codesign -dvvv "${path}" 2>&1`).stdout,
+  })));
+  if (failures.length > 0) fail(`the Cowork native pair is not what this checkout builds:\n  ${failures.join("\n  ")}`);
+  console.log(`Cowork native pair verified: ${COWORK_NATIVE.launcher.identifier} (no entitlements) and ${COWORK_NATIVE.worker.identifier} (the hypervisor entitlement only), stated requirements, hardened runtime, pins match this checkout.`);
+}
 // --- Winter Headless (ComputerV2 Phase 4) ----------------------------------------------------
 // Winter's private, invisible browser: a background-only app the daemon SPAWNS by path (never through LaunchServices)
 // and checks against EXACTLY its stated requirement before it sends anything. Embedded at
@@ -980,6 +1039,11 @@ const HARDENING_PINS: { path: string; label: string; expect: string[] }[] = [
   // which is not in the cs.* family; checkSignedHelper above pins exactly that one.
   { path: computerHelperApp, label: "Winter Computer Use", expect: [] },
   { path: browserHostPath, label: "winter-browser-host", expect: [] },
+  // N2 — the Cowork native pair: no cs.* relaxation on either (the worker's one entitlement is the hypervisor key, not in the cs.* family; checkSignedNative above pins both exactly).
+  ...(nativePlan.mode === "omit" ? [] : [
+    { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.launcher.name), label: "winter-cowork-launcher", expect: [] as string[] },
+    { path: join(app, COWORK_NATIVE_EMBED_RELATIVE, COWORK_NATIVE.worker.name), label: "winter-cowork-worker", expect: [] as string[] },
+  ]),
   // ComputerV2 Phase 4 — Winter Headless: no entitlements at all (checkSignedHeadless above pins that whole).
   { path: headlessApp, label: "Winter Headless", expect: [] },
   // Winter Phase 8d (P8d-2) — `winter` is re-signed at embed time under Winter's own team identity
