@@ -4,6 +4,7 @@
 import { afterEach, expect, test } from "bun:test";
 import type { ApprovalPolicy } from "@yanlinglabs/winter-protocol";
 import {
+  coworkPlanScratchPath,
   COWORK_GUEST_IDENTITIES, COWORK_GUEST_RUNTIME_MODES, coworkConversationFor, coworkGuestCwdFor, coworkGuestPermissionModeFor, coworkGuestPolicyFor,
   coworkGuestToolClassesFor, coworkGuestToolsFromClasses, type CoworkConversationSetInput,
 } from "../../src/cowork/conversation-set";
@@ -32,7 +33,7 @@ function fixture(opts: Parameters<typeof doorFixture>[0] = {}): DoorFixture { co
 
 /** Through the native wire exactly as the host sends it at `mounted`, and back: what the guest would receive. */
 function onTheWire(set: CoworkGuestConversationSet, incarnationId: string): CoworkGuestConversationSet {
-  const message = { t: "conversations", operationId: "operation", nonce: "ab".repeat(16), incarnationId, profile: set.profile, conversations: set.conversations } as const;
+  const message = { t: "conversations", operationId: "operation", nonce: "ab".repeat(16), incarnationId, profile: set.profile, browseUid: null, conversations: set.conversations } as const;
   const frame = parseCoworkNativeMuxFrame(serializeCoworkNativeMuxFrame({ class: "bootstrap", seq: 1, message }, "down"), "down");
   if (frame.class !== "bootstrap" || frame.message.t !== "conversations") throw new Error("shape");
   return { profile: frame.message.profile, conversations: frame.message.conversations };
@@ -158,4 +159,21 @@ test("the set is refused for a binding that is not active, in another workspace,
   expect(() => coworkConversationFor({ ...input, binding: { ...(input.binding as ConversationBinding), state: "archived" } })).toThrow("authority_denied");
   expect(() => coworkConversationFor({ ...input, context: { ...input.context, workspaceId: "workspace_other" } })).toThrow("authority_denied");
   expect(() => coworkConversationFor({ ...input, offered: ["Read", "Write"] })).toThrow("invalid_request");
+});
+
+test("plan view: under plan with an epoch the set carries the own writable plan scratch beside the read-only roots; the native wire refuses it today", () => {
+  const plan = fixture({ policy: "plan" }), input = inputFor(plan);
+  const item = coworkConversationFor({ ...input, planScratchEpoch: 3 }).conversations[0]!;
+  expect(item.roots).toEqual([
+    { id: plan.sourceId, guestPath: "/workspace/folders/grant", source: "/workspace/folders/grant", readOnly: true },
+    { id: "plan-scratch", guestPath: "/workspace/plan/conversation/3", source: "/workspace/plan/conversation/3", readOnly: false },
+  ]);
+  // The cross-lane gap: the contract's allowed views and plan's read-only rule do not admit it (S7B + the supervisor).
+  expect(() => onTheWire({ profile: "host-query-v1", conversations: [item] }, "incarnation")).toThrow();
+  expect(coworkConversationFor(input).conversations[0]!.roots).toHaveLength(1);
+  for (const epoch of [-1, 1.5, Number.NaN]) expect(() => coworkConversationFor({ ...input, planScratchEpoch: epoch })).toThrow("invalid_request");
+  // Outside plan the epoch is ignored: no plan scratch is ever mounted writable beside a writable source.
+  const ask = fixture({ policy: "ask" });
+  expect(coworkConversationFor({ ...inputFor(ask), planScratchEpoch: 3 }).conversations[0]!.roots).toHaveLength(1);
+  expect(coworkPlanScratchPath("s_0123456789ab", 0)).toBe("/workspace/plan/s_0123456789ab/0");
 });

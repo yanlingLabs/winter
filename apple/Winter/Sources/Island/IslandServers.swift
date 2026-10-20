@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -52,6 +53,9 @@ struct ServerProcess: Equatable {
     var cwd: String?
     /// Listening TCP ports (each once: v4 and v6 listeners on one port are one).
     var tcpPorts: [UInt16] = []
+    /// Where each port answers on loopback (`IslandLoopback`); a port bound only to another address has none and is
+    /// never probed.
+    var loopback: [UInt16: IslandLoopback] = [:]
     /// The process's argv (an interpreter's only).
     var arguments: [String]?
 
@@ -419,6 +423,9 @@ enum IslandServers {
         return words.isEmpty ? nil : words.joined(separator: " · ")
     }
 
+    /// "1 server", "2 servers".
+    static func serversWord(_ count: Int) -> String { count == 1 ? "1 server" : "\(count) servers" }
+
     /// ":3000 :8080" — the TCP ports in order, each once.
     static func portsLine(_ ports: [UInt16]) -> String {
         Array(Set(ports)).sorted().map { ":\($0)" }.joined(separator: " ")
@@ -438,6 +445,64 @@ enum IslandServers {
         let days = hours / 24
         let restHours = hours % 24
         return restHours == 0 ? "up \(days) d" : "up \(days) d \(restHours) h"
+    }
+
+    // MARK: The row (the island's visual language: a logo, a name, a live dot; its links and ports in words under the pointer)
+
+    /// PURE: a server's live dot through Stop's phases — green while it runs, amber while Stop waits for its second click,
+    /// hollow while it is stopping, red while a force quit is offered or asked.
+    static func mark(_ phase: IslandServerStopPhase?) -> IslandStatusMark {
+        switch phase {
+        case nil: return .dot(Color(nsColor: .systemGreen))
+        case .confirming?: return .dot(pillReviewAmber)
+        case .stopping?, .killing?: return .ring(Color.white.opacity(0.45))
+        case .forceOffered?, .confirmingForce?: return .dot(Color(nsColor: .systemRed))
+        }
+    }
+
+    /// PURE: the ports a row names under its links — every TCP port its shown links do not already carry.
+    static func plainPorts(_ ports: [UInt16], links: [IslandServerLink]) -> [UInt16] {
+        let linked = Set(links.map(\.port))
+        return Array(Set(ports)).sorted().filter { !linked.contains($0) }
+    }
+
+    /// PURE: a server's state as words — its uptime, or Stop's ("Stopping…", "Still running").
+    static func statusWords(_ row: IslandServerRow, phase: IslandServerStopPhase?, now: Date) -> String {
+        switch phase {
+        case .stopping?, .killing?: return "Stopping…"
+        case .forceOffered?, .confirmingForce?: return "Still running"
+        default: return uptime(since: row.startedAt, now: now)
+        }
+    }
+
+    /// PURE: a server row as VoiceOver says it, at rest — its name, ports and state, and its whole folder (what the row
+    /// shows only under the pointer).
+    static func accessibilityLabel(_ row: IslandServerRow, phase: IslandServerStopPhase?, now: Date) -> String {
+        var parts = [row.name, "\(row.portsLine) · \(statusWords(row, phase: phase, now: now))"]
+        if let detail = detailLine(row, hovered: true) { parts.append(detail) }
+        return parts.joined(separator: ", ")
+    }
+
+    /// PURE: Stop as a VoiceOver action through its phases — the button's own words ("Stop waifus", "Click again to stop
+    /// waifus", "Force quit waifus", "Click again to force quit waifus"); none while it is stopping. The action is the
+    /// button's: the same two clicks, the same guards.
+    static func stopActionName(_ phase: IslandServerStopPhase?, name: String) -> String? {
+        switch phase {
+        case nil: return "Stop \(name)"
+        case .confirming?: return "Click again to stop \(name)"
+        case .stopping?, .killing?: return nil
+        case .forceOffered?: return "Force quit \(name)"
+        case .confirmingForce?: return "Click again to force quit \(name)"
+        }
+    }
+
+    /// PURE: a bundle row's muted words beside its name — "2 servers" at rest (a single server with several links: its
+    /// folder); under the pointer its count, its whole folder and its package.
+    static func bundleWords(_ bundle: IslandServerBundle, hovered: Bool) -> String? {
+        let count = bundle.isBundle ? serversWord(bundle.rows.count) : nil
+        let folder = bundle.rows.first.flatMap { detailLine($0, hovered: hovered) }
+        let words = hovered || count == nil ? [count, folder].compactMap { $0 } : [count].compactMap { $0 }
+        return words.isEmpty ? nil : words.joined(separator: " · ")
     }
 
     // MARK: Rows
@@ -515,17 +580,67 @@ enum IslandServers {
             let ordered = [top] + members.filter { $0.pid != topPid }.sorted { $0.pid < $1.pid }
             let start = Date(timeIntervalSince1970: TimeInterval(top.identity.startSeconds)
                              + TimeInterval(top.identity.startMicros) / 1_000_000)
+            var loopback: [UInt16: IslandLoopback] = [:]
+            for member in ordered {
+                for (port, family) in member.loopback where loopback[port] != .v4 { loopback[port] = family }
+            }
+            let name = displayName(top)
+            let root = packageRoot(top)
             return IslandServerRow(
                 id: "\(top.pid)-\(top.identity.startSeconds)-\(top.identity.startMicros)",
-                name: displayName(top),
+                name: name,
                 tcpPorts: Array(Set(ordered.flatMap(\.tcpPorts))).sorted(),
                 startedAt: start,
                 folder: top.cwd.flatMap(folderName),
                 folderPath: top.cwd.map { abbreviated($0, home: home) },
                 package: packageName(top),
-                members: ordered.map(\.identity))
+                members: ordered.map(\.identity),
+                loopback: loopback,
+                cwd: top.cwd,
+                packageRoot: root,
+                bundleKey: bundleKey(name: name, packageRoot: root, cwd: top.cwd))
         }
         .sorted { $0.startedAt != $1.startedAt ? $0.startedAt > $1.startedAt : $0.id < $1.id }
+    }
+
+    // MARK: Bundles
+
+    /// The project a server belongs to (user 2026-10-18: one project's servers are one row): the npm package it runs
+    /// from — by its folder on disk when that is the project's own (inside its cwd: two projects' `vite`s stay two);
+    /// a package from elsewhere (a global `http-server`, an npx one in `~/.npm/_npx`) is shared by every project that
+    /// runs it, so it bundles only with the same cwd —, else its folder and command (the first word of its name:
+    /// `waifus remote` and `waifus start` in one folder).
+    static func bundleKey(name: String, packageRoot: String?, cwd: String?) -> String {
+        if let packageRoot {
+            if let cwd, packageRoot.hasPrefix(cwd.hasSuffix("/") ? cwd : cwd + "/") { return "package:\(packageRoot)" }
+            return "package:\(packageRoot)\u{0}\(cwd ?? "")"
+        }
+        let command = name.split(separator: " ").first.map(String.init) ?? name
+        guard let cwd else { return "name:\(command)" }
+        return "folder:\(cwd)\u{0}\(command)"
+    }
+
+    /// The folder of the npm package an interpreter's script is in (`…/node_modules/@scope/name`); nil outside one.
+    static func packageRoot(_ p: ServerProcess) -> String? {
+        guard interpreter(executableName(p)) != nil, let args = p.arguments else { return nil }
+        for script in args.dropFirst() {
+            let parts = script.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
+            guard let at = parts.lastIndex(of: "node_modules"), at + 1 < parts.count, parts[at + 1] != ".bin" else { continue }
+            let end = parts[at + 1].hasPrefix("@") && at + 2 < parts.count ? at + 2 : at + 1
+            return parts[...end].joined(separator: "/")
+        }
+        return nil
+    }
+
+    /// The rows by project, newest first: a bundle of one is a plain row.
+    static func bundles(_ rows: [IslandServerRow]) -> [IslandServerBundle] {
+        var order: [String] = []
+        var byKey: [String: [IslandServerRow]] = [:]
+        for row in rows {
+            if byKey[row.bundleKey] == nil { order.append(row.bundleKey) }
+            byKey[row.bundleKey, default: []].append(row)
+        }
+        return order.map { IslandServerBundle(key: $0, rows: byKey[$0] ?? []) }
     }
 
     // MARK: Signalling
@@ -565,8 +680,39 @@ struct IslandServerRow: Identifiable, Equatable {
     var package: String? = nil
     /// The top process first, then its listening workers.
     let members: [ServerProcessIdentity]
+    /// Where each port answers on loopback (none: never probed).
+    var loopback: [UInt16: IslandLoopback] = [:]
+    /// The top process's folder, and its npm package's — where the icon ladder looks.
+    var cwd: String? = nil
+    var packageRoot: String? = nil
+    /// Its project (`IslandServers.bundleKey`).
+    var bundleKey: String = ""
 
     var portsLine: String { IslandServers.portsLine(tcpPorts) }
+}
+
+/// One project's servers (`IslandServers.bundles`): one row in the list — a bundle of several drills into its own page.
+struct IslandServerBundle: Identifiable, Equatable {
+    let key: String
+    /// Newest first.
+    let rows: [IslandServerRow]
+
+    var id: String { key }
+    var isBundle: Bool { rows.count > 1 }
+    /// The id its "Stop all" is armed under.
+    var stopId: String { "bundle:\(key)" }
+    var members: [ServerProcessIdentity] { rows.flatMap(\.members) }
+    var tcpPorts: [UInt16] { Array(Set(rows.flatMap(\.tcpPorts))).sorted() }
+
+    /// The command its servers share ("waifus" for `waifus remote` and `waifus start`), else its package's or folder's
+    /// name; a bundle of one is its server's name.
+    var name: String {
+        guard isBundle, let first = rows.first else { return rows.first?.name ?? "" }
+        let words = rows.map { $0.name.split(separator: " ").first.map(String.init) ?? $0.name }
+        if Set(words).count == 1 { return words[0] }
+        if let root = first.packageRoot { return (root as NSString).lastPathComponent }
+        return first.folder ?? first.name
+    }
 }
 
 // MARK: - Stop (pure)
@@ -652,7 +798,7 @@ struct LibprocServerProcessSource: ServerProcessSource {
             guard let info = Self.bsdInfo(pid), info.pbi_uid == user, Self.isRunning(status: info.pbi_status) else { continue }
             var p = ServerProcess(identity: Self.identity(info, pid: pid), ppid: Int32(bitPattern: info.pbi_ppid),
                                   pgid: Int32(bitPattern: info.pbi_pgid), command: Self.command(info))
-            p.tcpPorts = Self.listeningPorts(pid)
+            (p.tcpPorts, p.loopback) = Self.listeningPorts(pid)
             if p.listens {
                 p.path = Self.path(pid)
                 p.cwd = Self.cwd(pid)
@@ -700,15 +846,16 @@ struct LibprocServerProcessSource: ServerProcessSource {
     }
 
     /// The TCP ports the process listens on (`TSI_S_LISTEN` only — a connected socket is not a server), each once: v4
-    /// and v6 listeners on one port are one.
-    private static func listeningPorts(_ pid: Int32) -> [UInt16] {
+    /// and v6 listeners on one port are one; and where each answers on loopback (`IslandLoopback.of`).
+    private static func listeningPorts(_ pid: Int32) -> ([UInt16], [UInt16: IslandLoopback]) {
         let bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, nil, 0)
-        guard bytes > 0 else { return [] }
+        guard bytes > 0 else { return ([], [:]) }
         let stride = MemoryLayout<proc_fdinfo>.stride
         var fds = [proc_fdinfo](repeating: proc_fdinfo(), count: Int(bytes) / stride + 16)
         let used = fds.withUnsafeMutableBytes { proc_pidinfo(pid, PROC_PIDLISTFDS, 0, $0.baseAddress, Int32($0.count)) }
-        guard used > 0 else { return [] }
+        guard used > 0 else { return ([], [:]) }
         var ports: [UInt16] = []
+        var loopback: [UInt16: IslandLoopback] = [:]
         let size = Int32(MemoryLayout<socket_fdinfo>.size)
         for fd in fds.prefix(Int(used) / stride) where fd.proc_fdtype == UInt32(PROX_FDTYPE_SOCKET) {
             var socket = socket_fdinfo()
@@ -717,10 +864,20 @@ struct LibprocServerProcessSource: ServerProcessSource {
             let info = socket.psi.soi_proto.pri_tcp
             guard info.tcpsi_state == TSI_S_LISTEN else { continue }
             // `insi_lport` is in network byte order.
-            let port = UInt16(bigEndian: UInt16(truncatingIfNeeded: info.tcpsi_ini.insi_lport))
+            let ini = info.tcpsi_ini
+            let port = UInt16(bigEndian: UInt16(truncatingIfNeeded: ini.insi_lport))
             if !ports.contains(port) { ports.append(port) }
+            let family: IslandLoopback?
+            if ini.insi_vflag & UInt8(INI_IPV4) != 0 {
+                family = IslandLoopback.of(v4: UInt32(bigEndian: ini.insi_laddr.ina_46.i46a_addr4.s_addr))
+            } else if ini.insi_vflag & UInt8(INI_IPV6) != 0 {
+                family = IslandLoopback.of(v6: withUnsafeBytes(of: ini.insi_laddr.ina_6) { Array($0) })
+            } else {
+                family = nil
+            }
+            if let family, loopback[port] != .v4 { loopback[port] = family }
         }
-        return ports
+        return (ports, loopback)
     }
 
     private static func path(_ pid: Int32) -> String {
@@ -784,15 +941,25 @@ struct LibprocServerProcessSource: ServerProcessSource {
 // MARK: - The model
 
 /// The Servers tab's state: the rows from a scan (on open and on the open island's beat while this tab shows — never
-/// in the background), and each row's Stop.
+/// in the background), their links and icons (probed on loopback, once per server and port, after a scan), the page
+/// of the bundle drilled into, and each Stop.
 @MainActor
 final class IslandServersModel: ObservableObject {
     @Published private(set) var rows: [IslandServerRow] = []
     @Published private(set) var loaded = false
     @Published private(set) var stops: [String: IslandServerStopPhase] = [:]
+    /// What each server's ports said (`IslandServers.probeKey`), kept while the server runs — each probed once.
+    @Published private(set) var http: [String: IslandHTTPProbe] = [:]
+    /// Each project's icon (`IslandServerBundle.key`).
+    @Published private(set) var icons: [String: NSImage] = [:]
+    /// The bundle whose page shows (nil: the list).
+    @Published private(set) var openBundle: String?
 
     var source: ServerProcessSource = LibprocServerProcessSource()
     var signaller: ServerSignaller = LiveServerSignaller()
+    var prober: IslandServerProber = IslandLiveServerProber()
+    /// A link's click: the user's default browser.
+    var openURL: (URL) -> Void = { NSWorkspace.shared.open($0) }
     var now: () -> Date = { Date() }
     /// Runs the closure after the delay: ONE wake-up per row's armed confirm or stop, nothing while none is (the tests
     /// fire them by hand).
@@ -806,51 +973,163 @@ final class IslandServersModel: ObservableObject {
     var ownPid: Int32 = getpid()
     var parentPid: Int32 = getppid()
     var home: String = NSHomeDirectory()
-    /// Each row's one armed wake-up (its deadline): a newer one supersedes it, a second for the same is not armed.
+    /// Each Stop's one armed wake-up (its deadline): a newer one supersedes it, a second for the same is not armed.
     private var wakes: [String: Date] = [:]
+    /// What each armed Stop signals: a server's processes, or a bundle's ("Stop all").
+    private var targets: [String: [ServerProcessIdentity]] = [:]
+    /// Which HTTP ports each project's icon was last looked for with: a new one (a page that came up) looks again.
+    private var iconTried: [String: String] = [:]
+    /// Ports that took the connection but answered late: how often, and when to ask again (`IslandServers.retryAfter`).
+    private var retries: [String: (attempts: Int, next: Date)] = [:]
+    /// A probe pass in flight (a refresh while one runs does not start another).
+    private var probing = false
 
-    /// A scan, off the main thread.
-    func refresh() async {
+    var bundles: [IslandServerBundle] { IslandServers.bundles(rows) }
+
+    func bundle(_ key: String) -> IslandServerBundle? { bundles.first { $0.key == key } }
+
+    /// A scan, off the main thread, then the probes. `resetPage` (the island opened, or the tab was switched to): back to
+    /// the list — the 5 s beat never moves the user off a page.
+    func refresh(resetPage: Bool = false) async {
+        if resetPage { openBundle = nil }
         let source = source
         let processes = await Task.detached(priority: .userInitiated) { source.processes() }.value
         apply(processes)
+        await probe()
     }
 
-    /// The rows from a scan; a gone row's Stop goes with it (a row still there keeps its Stop, mid-confirm included).
+    /// The rows from a scan; a gone row's Stop, probes and page go with it (a row still there keeps its Stop, mid-confirm
+    /// included). Never probes (the offscreen gallery applies a made-up list).
     func apply(_ processes: [ServerProcess]) {
         rows = IslandServers.rows(processes, user: user, ownPid: ownPid, home: home)
-        let ids = Set(rows.map(\.id))
+        let ids = Set(rows.map(\.id)).union(bundles.map(\.stopId))
         stops = stops.filter { ids.contains($0.key) }
         wakes = wakes.filter { ids.contains($0.key) }
+        targets = targets.filter { ids.contains($0.key) }
+        let ports = Set(rows.flatMap { row in row.tcpPorts.map { IslandServers.probeKey(row, $0) } })
+        http = http.filter { ports.contains($0.key) }
+        retries = retries.filter { ports.contains($0.key) }
+        if let open = openBundle, bundle(open) == nil { openBundle = nil }
         loaded = true
     }
 
+    // MARK: Links and icons
+
+    /// Probes each server's loopback ports with no answer yet (at most `IslandServerProbes.limit` at once; a late one
+    /// again only once its backoff is over), then looks for the icon of each project whose HTTP ports changed. Off the
+    /// main thread; only from `refresh`.
+    func probe() async {
+        guard !probing else { return }
+        probing = true
+        defer { probing = false }
+        let time = now()
+        let pending: [(key: String, host: IslandLoopback, port: UInt16, ports: Set<UInt16>)] = rows.flatMap { row in
+            row.tcpPorts.compactMap { port in
+                let key = IslandServers.probeKey(row, port)
+                guard let host = row.loopback[port], http[key] == nil else { return nil }
+                if let retry = retries[key], retry.next > time { return nil }
+                return (key, host, port, Set(row.tcpPorts))
+            }
+        }
+        let prober = prober
+        let results = await IslandServerProbes.run(pending.map { job in { prober.probe(job.host, port: job.port, ports: job.ports) } })
+        for (job, result) in zip(pending, results) {
+            if result.late {
+                // Not an answer (a dev server still compiling its first page): asked again later.
+                let attempts = (retries[job.key]?.attempts ?? 0) + 1
+                retries[job.key] = (attempts, now().addingTimeInterval(IslandServers.retryAfter(attempt: attempts)))
+            } else {
+                http[job.key] = result
+                retries[job.key] = nil
+            }
+        }
+
+        var lookups: [(key: String, signature: String, pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)],
+                       folders: [String])] = []
+        for bundle in bundles {
+            var pages: [(probe: IslandHTTPProbe, host: IslandLoopback, port: UInt16)] = []
+            for row in bundle.rows {
+                for link in IslandServers.links(row, http: http) {
+                    if let probe = http[IslandServers.probeKey(row, link.port)] { pages.append((probe, link.host, link.port)) }
+                }
+            }
+            pages.sort { $0.probe.isHTML != $1.probe.isHTML ? $0.probe.isHTML : $0.port < $1.port }
+            let signature = pages.map { "\($0.port)\($0.probe.isHTML ? "h" : "")" }.joined(separator: ",")
+            guard iconTried[bundle.key] != signature else { continue }
+            var folders: [String] = []
+            for row in bundle.rows {
+                for folder in [row.cwd, row.packageRoot].compactMap({ $0 }) where !folders.contains(folder) { folders.append(folder) }
+            }
+            lookups.append((bundle.key, signature, pages, folders))
+        }
+        let found = await IslandServerProbes.run(lookups.map { job in { prober.icon(pages: job.pages, folders: job.folders) } })
+        for (job, image) in zip(lookups, found) {
+            iconTried[job.key] = job.signature
+            // Already a small thumbnail, decoded off the main thread: only wrapped here.
+            if let image { icons[job.key] = NSImage(cgImage: image, size: .zero) }
+        }
+    }
+
+    /// A server's links, the page first.
+    func links(_ row: IslandServerRow) -> [IslandServerLink] { IslandServers.links(row, http: http) }
+
+    /// A bundle's one link on its row: a page first, else its first HTTP port.
+    func link(_ bundle: IslandServerBundle) -> IslandServerLink? {
+        bundle.rows.flatMap(links).sorted { $0.isHTML != $1.isHTML ? $0.isHTML : $0.port < $1.port }.first
+    }
+
+    /// Whether a bundle's row opens a page: several servers, or one with several links.
+    func drills(_ bundle: IslandServerBundle) -> Bool {
+        bundle.isBundle || bundle.rows.contains { links($0).count > 1 }
+    }
+
+    func open(_ link: IslandServerLink) { openURL(link.url) }
+
+    // MARK: The page
+
+    /// Drills into a bundle's page.
+    func open(_ bundle: IslandServerBundle) { openBundle = bundle.key }
+
+    /// Back to the list.
+    func back() { openBundle = nil }
+
+    // MARK: Stop
+
     /// A click on a row's Stop / Stop? / Force quit / Force quit?.
-    func tap(_ row: IslandServerRow) {
-        let (next, action) = IslandServerStopMachine.tap(stops[row.id], now: now())
+    func tap(_ row: IslandServerRow) { tap(id: row.id, members: row.members) }
+
+    /// A click on a bundle's "Stop all" — the same two clicks and guards, for every one of its servers.
+    func tapAll(_ bundle: IslandServerBundle) { tap(id: bundle.stopId, members: bundle.members) }
+
+    private func tap(id: String, members: [ServerProcessIdentity]) {
+        let (next, action) = IslandServerStopMachine.tap(stops[id], now: now())
         var phase = next
         if let action {
-            let sent = IslandServers.signal(action == .terminate ? SIGTERM : SIGKILL, row.members, user: user, ownPid: ownPid,
+            targets[id] = members
+            let sent = IslandServers.signal(action == .terminate ? SIGTERM : SIGKILL, members, user: user, ownPid: ownPid,
                                             parentPid: parentPid, source: source, signaller: signaller)
             // Nothing left to signal (it went, or its pid is someone else's now): the row goes at the next scan.
             if sent == 0 { phase = nil }
         }
-        stops[row.id] = phase
-        arm(row.id)
+        stops[id] = phase
+        arm(id)
     }
 
-    /// Re-judges every row's Stop against the clock (a lapsed confirm, a server still up after SIGTERM).
+    /// Re-judges every Stop against the clock (a lapsed confirm, a server still up after SIGTERM).
     func settle() {
         let time = now()
-        for row in rows {
-            guard let phase = stops[row.id] else { continue }
-            let alive = IslandServers.anyAlive(row.members, source: source)
-            stops[row.id] = IslandServerStopMachine.settle(phase, now: time, alive: alive)
-            if !alive, stops[row.id] == nil { rows.removeAll { $0.id == row.id } }
+        for (id, phase) in stops {
+            let members = targets[id] ?? rows.first { $0.id == id }?.members ?? bundles.first { $0.stopId == id }?.members ?? []
+            let alive = IslandServers.anyAlive(members, source: source)
+            stops[id] = IslandServerStopMachine.settle(phase, now: time, alive: alive)
+            guard !alive, stops[id] == nil else { continue }
+            let gone = Set(members)
+            rows.removeAll { $0.id == id || Set($0.members).isSubset(of: gone) }
+            if let open = openBundle, bundle(open) == nil { openBundle = nil }
         }
     }
 
-    /// The row's next wake-up — once per deadline; one that a newer deadline replaced does nothing when it fires.
+    /// The Stop's next wake-up — once per deadline; one that a newer deadline replaced does nothing when it fires.
     private func arm(_ id: String) {
         guard let deadline = IslandServerStopMachine.deadline(stops[id]) else {
             wakes[id] = nil
@@ -866,11 +1145,16 @@ final class IslandServersModel: ObservableObject {
         }
     }
 
-    /// Test seam.
+    /// Test seams.
     func setForTesting(_ rows: [IslandServerRow]) {
         self.rows = rows
         loaded = true
     }
+
+    func setProbesForTesting(_ http: [String: IslandHTTPProbe]) { self.http = http }
+
+    /// Test and gallery seam: Stop's phases as they would be — set directly, never by a click (nothing is signalled).
+    func setStopsForTesting(_ stops: [String: IslandServerStopPhase]) { self.stops = stops }
 }
 
 // MARK: - The view
@@ -885,113 +1169,286 @@ struct IslandServersTab: View {
             IslandEmptyTab(symbol: "server.rack", line: "Looking for servers…")
         } else if model.rows.isEmpty {
             IslandEmptyTab(symbol: "server.rack", line: "No servers running")
+        } else if let key = model.openBundle, let bundle = model.bundle(key) {
+            IslandTabScroll(scrolls: scrolls) { IslandServersPage(model: model, bundle: bundle, now: now()) }
         } else {
-            IslandTabScroll(scrolls: scrolls) { rows }
+            IslandTabScroll(scrolls: scrolls) { list }
         }
     }
 
-    private var rows: some View {
+    private var list: some View {
         let time = now()
-        return VStack(alignment: .leading, spacing: IslandLayout.rowGap) {
-            ForEach(model.rows) { row in
-                IslandServerRowView(row: row, phase: model.stops[row.id], now: time) { model.tap(row) }
+        return VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
+            ForEach(model.bundles) { bundle in
+                if model.drills(bundle) {
+                    IslandServerBundleRowView(model: model, bundle: bundle, now: time)
+                } else if let row = bundle.rows.first {
+                    IslandServerRowView(row: row, phase: model.stops[row.id], now: time, icon: model.icons[bundle.key],
+                                        links: Array(model.links(row).prefix(1)), onLink: model.open) { model.tap(row) }
+                }
             }
         }
-        .padding(.horizontal, IslandLayout.listInset)
+        .padding(.horizontal, IslandQuietRow.inset)
+        .padding(.top, 2)
         .padding(.bottom, IslandLayout.listInset)
     }
 }
 
+/// A bundle's page, inside the Servers tab: back (‹, in the rows' mark column), its name, how many servers and "Stop
+/// all", then each of its servers as a row — its own Stop and every link.
+struct IslandServersPage: View {
+    @ObservedObject var model: IslandServersModel
+    let bundle: IslandServerBundle
+    let now: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: IslandQuietRow.rowGap) {
+            HStack(spacing: IslandQuietRow.markGap) {
+                // The island's "previous": back to the list.
+                Button { model.back() } label: {
+                    Image(systemName: "chevron.left")
+                        .font(Typography.caption(.bold))
+                        .foregroundStyle(Color.white)
+                        .frame(width: IslandQuietRow.markWidth, height: IslandRowSmall.height + 4)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(IslandPressStyle())
+                .accessibilityLabel("Back to servers")
+                Text(bundle.name)
+                    .font(IslandQuietRow.titleFont)
+                    .foregroundStyle(Color.white)
+                    .lineLimit(1)
+                Text(IslandServers.serversWord(bundle.rows.count))
+                    .font(IslandQuietRow.wordsFont)
+                    .foregroundStyle(Theme.textMuted)
+                Spacer(minLength: 8)
+                IslandServerStopButton(phase: model.stops[bundle.stopId], name: "every \(bundle.name) server",
+                                       idleTitle: "Stop all") { model.tapAll(bundle) }
+            }
+            .padding(.bottom, 2)
+            ForEach(bundle.rows) { row in
+                IslandServerRowView(row: row, phase: model.stops[row.id], now: now, icon: model.icons[bundle.key],
+                                    links: model.links(row), onLink: model.open) { model.tap(row) }
+            }
+        }
+        .padding(.horizontal, IslandQuietRow.inset)
+        .padding(.bottom, IslandLayout.listInset)
+    }
+}
+
+/// A bundle's row in the list (several servers, or one with several links), in the island's language: its logo stacked
+/// as many times as it has servers (a project's servers share its one logo), its name and "2 servers" (muted), a live
+/// dot and a chevron. Under the pointer the name lifts, its whole folder shows, and its ports, its one link and its
+/// uptime appear under it in words. A click opens its page.
+struct IslandServerBundleRowView: View {
+    @ObservedObject var model: IslandServersModel
+    let bundle: IslandServerBundle
+    let now: Date
+
+    var body: some View {
+        HoverLiftReader(id: "server:\(bundle.key)") { hovered in
+            IslandLiftRow(title: bundle.name, side: IslandServers.bundleWords(bundle, hovered: hovered), hovered: hovered) {
+                IslandServerIconStack(image: model.icons[bundle.key], count: bundle.rows.count)
+            } trailing: {
+                HStack(spacing: 10) {
+                    IslandStatusMarkView(mark: IslandServers.mark(nil))
+                    Image(systemName: "chevron.right")
+                        .font(Typography.tiny(.bold))
+                        .foregroundStyle(hovered ? Color.white : Theme.textMuted)
+                }
+            } below: {
+                if hovered {
+                    let links = model.link(bundle).map { [$0] } ?? []
+                    IslandServerDetails(links: links, ports: IslandServers.plainPorts(bundle.tcpPorts, links: links),
+                                        status: IslandServers.uptime(since: oldest, now: now), onLink: model.open) { EmptyView() }
+                        .transition(.opacity)
+                }
+            }
+        }
+        .onTapGesture { model.open(bundle) }
+        // One element for VoiceOver, which never hovers: its words, and its link as an action (shown under the pointer).
+        .accessibilityElement(children: .ignore)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityLabel("\(bundle.name), \(secondLine)")
+        .accessibilityAction { model.open(bundle) }
+        .accessibilityAction(named: "Show its servers") { model.open(bundle) }
+        .accessibilityActions {
+            if let link = model.link(bundle) { Button("Open \(link.label)") { model.open(link) } }
+        }
+    }
+
+    /// The bundle's oldest start: the project's uptime.
+    private var oldest: Date { bundle.rows.map(\.startedAt).min() ?? now }
+
+    private var secondLine: String {
+        let ports = IslandServers.portsLine(bundle.tcpPorts)
+        if bundle.isBundle { return "\(IslandServers.serversWord(bundle.rows.count)) · \(ports)" }
+        guard let row = bundle.rows.first else { return ports }
+        return "\(ports) · \(IslandServers.uptime(since: row.startedAt, now: now))"
+    }
+}
+
+/// A server as a row in the island's language: its logo (else a small glyph), its name and folder (muted) and a small
+/// live dot. Under the pointer the name lifts, the whole folder shows, and under it its links and ports in words
+/// (a link opens the page), its uptime in words, and Stop — in the row's flow after the links. Once Stop is pressed the
+/// details and Stop stay on screen through every phase whatever the pointer does. Stop's two clicks, its force quit and
+/// every guard are `IslandServerStopMachine`'s and `IslandServersModel`'s, untouched.
 struct IslandServerRowView: View {
     let row: IslandServerRow
     let phase: IslandServerStopPhase?
     let now: Date
+    var icon: NSImage?
+    /// Its links shown (the list: the page's one; a bundle's page: all).
+    var links: [IslandServerLink] = []
+    var onLink: (IslandServerLink) -> Void = { _ in }
     let onStop: () -> Void
 
     var body: some View {
-        IslandHoverSurface { hovered in
-            HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "server.rack")
-                    .font(Typography.label(.semibold))
-                    .foregroundStyle(islandToneColor(.ok))
-                    .frame(width: 30, height: 30)
-                    .background(Circle().fill(Color.white.opacity(0.08)))
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(row.name)
-                        .font(Typography.composerField())
-                        .foregroundStyle(Color.white)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Text("\(row.portsLine) · \(statusLine)")
-                        .font(Typography.captionDigits(.medium))
-                        .foregroundStyle(phase == nil ? Theme.textMuted : pillReviewAmber)
-                        .lineLimit(1)
-                    if let line = IslandServers.detailLine(row, hovered: hovered) {
-                        // The folder and the package; the whole folder under the pointer (the island's panels are
-                        // never key, so a tooltip may not show).
-                        Text(line)
-                            .font(Typography.caption())
-                            .foregroundStyle(Theme.textMuted)
-                            .lineLimit(1)
-                            .truncationMode(.head)
-                            .help(IslandServers.detailLine(row, hovered: true) ?? line)
+        HoverLiftReader(id: "server:\(row.id)") { hovered in
+            let actions = IslandQuietRow.showsActions(hovered: hovered, busy: phase != nil)
+            IslandLiftRow(title: row.name, side: IslandServers.detailLine(row, hovered: hovered), hovered: hovered) {
+                IslandServerIcon(image: icon)
+            } trailing: {
+                IslandStatusMarkView(mark: IslandServers.mark(phase))
+            } below: {
+                if actions {
+                    IslandServerDetails(links: links, ports: IslandServers.plainPorts(row.tcpPorts, links: links),
+                                        status: IslandServers.statusWords(row, phase: phase, now: now), onLink: onLink) {
+                        IslandServerStopButton(phase: phase, name: row.name, action: onStop)
                     }
+                    .transition(.opacity)
                 }
-                Spacer(minLength: 8)
-                IslandServerStopButton(phase: phase, name: row.name, action: onStop)
             }
-            .padding(12)
+            .animation(HoverLift.animation, value: phase)
         }
-    }
-
-    private var statusLine: String {
-        switch phase {
-        case .stopping?, .killing?: return "Stopping…"
-        case .forceOffered?, .confirmingForce?: return "Still running"
-        default: return IslandServers.uptime(since: row.startedAt, now: now)
+        // One element for VoiceOver, which never hovers: its words, and Stop (the same two clicks) and every link as
+        // its actions, whatever is shown.
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(IslandServers.accessibilityLabel(row, phase: phase, now: now))
+        .accessibilityActions {
+            if let stop = IslandServers.stopActionName(phase, name: row.name) { Button(stop, action: onStop) }
+            ForEach(links) { link in Button("Open \(link.label)") { onLink(link) } }
         }
     }
 }
 
-/// Stop's button through its phases: the white stop circle; "Stop?" (amber) waiting for the second click; "Stopping…"
-/// (dimmed); "Force quit", then "Force quit?" (red).
+/// What a server row reveals under its name: its links (a page first) and its other ports in words, its uptime
+/// (or Stop's state) in words, and — at its end, in the row's flow after the links — Stop.
+struct IslandServerDetails<Stop: View>: View {
+    let links: [IslandServerLink]
+    let ports: [UInt16]
+    let status: String
+    let onLink: (IslandServerLink) -> Void
+    @ViewBuilder let stop: () -> Stop
+
+    var body: some View {
+        HStack(spacing: 6) {
+            ForEach(links) { link in IslandServerLinkButton(link: link) { onLink(link) } }
+            ForEach(ports, id: \.self) { port in
+                Text(":\(port)").font(Typography.tinyDigits(.medium)).foregroundStyle(Theme.textMuted).lineLimit(1)
+            }
+            Text(status)
+                .font(Typography.tinyDigits())
+                .foregroundStyle(Theme.textMuted)
+                .lineLimit(1)
+                .padding(.leading, 2)
+            Spacer(minLength: 8)
+            stop()
+        }
+        .frame(minHeight: IslandRowSmall.height + 4)
+    }
+}
+
+/// A row's mark: the server's own logo (its page's, its project's) with rounded corners, else the server glyph, muted.
+struct IslandServerIcon: View {
+    let image: NSImage?
+    var size: CGFloat = 16
+
+    var body: some View {
+        if let image {
+            Image(nsImage: image)
+                .resizable()
+                .interpolation(.high)
+                .aspectRatio(contentMode: .fit)
+                .frame(width: size, height: size)
+                .clipShape(RoundedRectangle(cornerRadius: size * 0.24, style: .continuous))
+                .accessibilityHidden(true)
+        } else {
+            Image(systemName: "server.rack")
+                .font(Typography.caption(.semibold))
+                .foregroundStyle(Theme.textMuted)
+                .frame(width: size, height: size)
+                .accessibilityHidden(true)
+        }
+    }
+}
+
+/// A project's servers as its logo stacked — one layer per server (up to three), the ones behind peeking out above and
+/// to the right, fainter: the members share the project's one logo, so the stack says how many, not whose.
+struct IslandServerIconStack: View {
+    let image: NSImage?
+    let count: Int
+
+    static let size: CGFloat = 14
+    static let step: CGFloat = 2.5
+
+    var body: some View {
+        let layers = max(1, min(count, 3))
+        ZStack(alignment: .bottomLeading) {
+            ForEach(Array((0..<layers).reversed()), id: \.self) { i in
+                IslandServerIcon(image: image, size: Self.size)
+                    .background(RoundedRectangle(cornerRadius: Self.size * 0.24, style: .continuous).fill(Color.black))
+                    .opacity(i == 0 ? 1 : (i == 1 ? 0.55 : 0.3))
+                    .offset(x: CGFloat(i) * Self.step, y: -CGFloat(i) * Self.step)
+            }
+        }
+        .frame(width: Self.size + Self.step * 2, height: Self.size + Self.step * 2, alignment: .bottomLeading)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A link to a server's page — "localhost:3888 ↗" as words, the usage block's "Open usage ↗" — opened in the default
+/// browser.
+struct IslandServerLinkButton: View {
+    let link: IslandServerLink
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            IslandLinkWords(text: link.label)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(IslandPressStyle())
+        .help("Open \(link.url.absoluteString)")
+        .accessibilityLabel("Open \(link.label)")
+    }
+}
+
+/// Stop through its phases, as words: "Stop" (or a bundle's "Stop all"); "Stop?" (amber) waiting for the second click;
+/// "Stopping…" (muted); "Force quit", then "Force quit?" (red).
 struct IslandServerStopButton: View {
     let phase: IslandServerStopPhase?
     let name: String
+    /// At rest, these words instead of "Stop" ("Stop all").
+    var idleTitle: String? = nil
     let action: () -> Void
 
     var body: some View {
         switch phase {
         case nil:
-            IslandAnswerButton(role: .refuse, symbol: "stop.fill", action: action)
+            IslandRowActionButton(title: idleTitle ?? "Stop", action: action)
                 .accessibilityLabel("Stop \(name)")
         case .confirming?:
-            capsule("Stop?", fill: pillReviewAmber, text: Color.black)
+            IslandRowActionButton(title: idleTitle.map { "\($0)?" } ?? "Stop?", tone: .confirm, action: action)
                 .accessibilityLabel("Click again to stop \(name)")
         case .stopping?, .killing?:
-            capsule("Stopping…", fill: Color.white.opacity(0.1), text: Color.white, enabled: false)
+            IslandRowActionButton(title: "Stopping…", tone: .busy, enabled: false, action: action)
         case .forceOffered?:
-            capsule("Force quit", fill: Color.white.opacity(0.1), text: Color.white)
+            IslandRowActionButton(title: "Force quit", action: action)
                 .accessibilityLabel("Force quit \(name)")
         case .confirmingForce?:
-            capsule("Force quit?", fill: Color(nsColor: .systemRed), text: Color.white)
+            IslandRowActionButton(title: "Force quit?", tone: .danger, action: action)
                 .accessibilityLabel("Click again to force quit \(name)")
         }
-    }
-
-    private func capsule(_ title: String, fill: Color, text: Color, enabled: Bool = true) -> some View {
-        Button(action: action) {
-            Text(title)
-                .font(Typography.caption(.semibold))
-                .foregroundStyle(text)
-                .padding(.horizontal, 12)
-                .frame(height: IslandCircleButtonStyle.size)
-                .background(Capsule().fill(fill))
-                .contentShape(Capsule())
-                .pillHoverGlow(fill)
-        }
-        .buttonStyle(IslandPressStyle())
-        .disabled(!enabled)
-        .opacity(enabled ? 1 : 0.6)
     }
 }

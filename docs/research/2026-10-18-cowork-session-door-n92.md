@@ -72,3 +72,17 @@ DOOR owns every migration. Neither migration has a production writer or reader y
 - PEER-INBOX (`cowork/peer-inbox-sqlite.ts`): the ledger methods over the new columns (`offer` increments `offer_count`, `ack` stores `acked_hold_token` atomically, `confirmCommitted(receiptId, outcome)` sets `commit_confirmed_at` and `commit_outcome` together, plus `deliveredUnconfirmed` and the prune guard).
 - S7B: write `cowork_guest_boots` at `hello` and its end proof after release, and write and re-send `store_volume_uuid`.
 - DOOR (N3) owns the uid allocator and the `store_state` transitions.
+
+## Review fold (a3f8bf13 on #111 and #114)
+
+**N2:**
+- **MED: a mixed report.** `CoworkRepository.acknowledgeMountedShares` checks every entry first and then acknowledges all of them in ONE transaction. A report with any bad entry leaves every source `preparing`, publishes nothing and concludes no operation.
+- **LOW: the gaps found in review.** The over-12 limit and the workspace check now have tests. `conversations` refuses with the first refusal once a `sharesMounted` report has been refused, even if the host ignored that refusal.
+- **Mutations (guards):** 4/5 killed. The survivor removes the transaction while keeping the validate-first loop. It is equivalent: validation runs before any write, and every entry shares one epoch.
+
+**N1:**
+- `cowork_peer_inbox.commit_outcome` carries `CHECK ((commit_confirmed_at IS NULL) = (commit_outcome IS NULL))`.
+- `guest_boot_id` must be a lowercase UUID, the native `GUEST_BOOT` grammar.
+- The rule for N3 is recorded in the schema doc: a guest uid is allocated ONLY through `cowork_guest_uids`, in the same transaction that writes it to a conversation or workspace.
+
+**CLI (from dc).** The usage no longer names `winter workspace session create|list`, which is unreachable until a daemon carries a door (pinned). The parser stays.

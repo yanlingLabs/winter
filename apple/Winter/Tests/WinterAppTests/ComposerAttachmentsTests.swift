@@ -222,12 +222,12 @@ final class ComposerAttachmentsTests: XCTestCase {
         XCTAssertTrue(a.composerAttachments.isEmpty)
     }
 
-    func testThePlusIsLiveOnlyInACodeSession() {
-        for (mode, live) in [("code", true), ("chat", false), ("dispatch", false)] {
+    func testThePlusIsLiveInCodeAndDispatchSessionsOnly() {
+        for (mode, live) in [("code", true), ("chat", false), ("dispatch", true)] {
             let a = adapter(mode: mode)
             let control = a.composerAttachmentsControl
             XCTAssertEqual(control.isEnabled, live, mode)
-            XCTAssertEqual(control.disabledReason, "Attachments work in code sessions — chats can't take files or images")
+            XCTAssertEqual(control.disabledReason, "Attachments work in Code and Dispatch — chats can't take files or images")
         }
         XCTAssertEqual(composerStripSurfaceHeight(10), newChatComposerHeight + 10, "chips never grow the composer")
     }

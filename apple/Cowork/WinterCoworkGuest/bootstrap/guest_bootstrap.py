@@ -61,7 +61,8 @@ TOKEN = re.compile(r"[A-Za-z0-9_-]{1,160}\Z")
 UUID = re.compile(r"[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}\Z")
 NONCE = re.compile(r"[a-f0-9]{32}\Z")
 MESSAGE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,62}\Z")
-FAULT_CODES = ("bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations")
+FAULT_CODES = ("bad_plan", "probe_failed", "format_failed", "replay_failed", "mount_failed", "internal", "bad_conversations", "supervisor_failed", "second_conversations",
+               "share_inventory", "share_mount_failed", "resume_store_missing", "fresh_store_not_empty")
 DANGEROUS_KEYS = ("__proto__", "constructor", "prototype")
 
 # ext4 superblock feature bits that the pinned contract allows (compat, incompat, ro_compat) and the one transient bit.

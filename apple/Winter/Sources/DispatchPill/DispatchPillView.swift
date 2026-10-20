@@ -347,7 +347,10 @@ struct DispatchPillComposerBar: View {
                         onAcceptGhost: { [commandMode] text, word in commandMode.acceptGhost(text: text, word: word) },
                         onNonTabKey: { [commandMode] in commandMode.endCycle() },
                         onDeleteBackwardAtEnd: { controller.handleDeleteBackwardAtEnd() },
-                        onHorizontalKey: { controller.handleHorizontalKey(left: $0) }
+                        onHorizontalKey: { controller.handleHorizontalKey(left: $0) },
+                        // Image and file attachments (2026-10-19): a pasted or dropped screenshot or file is a chip in
+                        // the text, as in a code window — live while the bound session is code or dispatch.
+                        imageIntake: adapter.composerImageIntake
                     )
                 }
                 .frame(width: controller.composerFieldWidth, height: controller.composerFieldHeight)

@@ -21,6 +21,7 @@ import { Database } from "bun:sqlite";
 import { join } from "node:path";
 import { FileSecretStore } from "../auth/secret-store";
 import { startDaemon } from "../daemon";
+import { USAGE_INERT } from "../usage/wiring";
 import { runtimeStateOnline } from "./wiring";
 
 export type RuntimeStateProbeResult =
@@ -42,7 +43,8 @@ export async function runRuntimeStateProbe(input: { home: string | undefined }):
     // `agentProvider: null` — the agent loop is irrelevant here and wiring a provider would need a
     // credential. Everything on the runtime-spine path (bootstrap → lock → SessionStore →
     // startRuntimeState → recovery → backfill → retention) runs exactly as it does in production.
-    const daemon = await startDaemon({ home, secrets, agentProvider: null });
+    // Never the user's own Codex / Claude Code / Antigravity / OpenCode, nor the background plan beat.
+    const daemon = await startDaemon({ home, secrets, agentProvider: null, usage: USAGE_INERT });
     let dbPath: string;
     let online: boolean;
     const runtimeSdk = daemon.runtimeSdk !== undefined;

@@ -203,6 +203,11 @@ test("no Cowork source file removes, renames-over or truncates anything beyond t
     // A restore that failed BEFORE its first exchange removes only its own `.restore-<exportId>` staging folder, which holds
     // copies from the bundle and no live data. After the first exchange nothing is removed (the staging folder holds the old images).
     /^restore-bundle\.ts:\d+: .*rmSync\(staging/,
+    // The production native environment's coordination files (S7B part 1), all in the Coordination directory and none in a workspace: the
+    // installation id's and the stores' own temp files, the atomic replace of a launch-journal entry, and the retirement of a launcher
+    // receipt or journal entry of one scope. No workspace data, image or output is touched.
+    /^host-env\/coordination\.ts:\d+: .*unlinkSync\(temporary\)/,
+    /^host-env\/stores\.ts:\d+: .*(renameSync\(temporary|unlinkSync\(temporary\)|unlinkSync\(join\(directory, name\)\))/,
   ];
   const unexpected = found.filter(line => !audited.some(pattern => pattern.test(line)));
   expect(unexpected).toEqual([]);

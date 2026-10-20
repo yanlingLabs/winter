@@ -305,11 +305,16 @@ class Package(unittest.TestCase):
         pins = json.loads((TESTS / "fixtures" / "PINS.json").read_text())
         self.assertEqual(sorted(pins["files"]), ["bootstrap-order.json", "envelopes.json", "guest-stop.json", "launcher-lines.json", "mux-frames.json", "runtime-flow.json", "runtime-image.json", "stop-receipts.json"])
         self.assertEqual(pins["source"]["head"], "6c1f04e807df3a10579d6f14a15e39652bd1c7a6")
+        # Contract revision 3: the three files the worker relays blind or never reads are re-copied from that commit; the rest stay at source.head (SH3 moves them).
+        revision3 = pins["sourceRevision3"]
+        self.assertRegex(revision3["head"], r"^[0-9a-f]{40}$")
+        self.assertEqual(sorted(revision3["files"]), ["bootstrap-order.json", "mux-frames.json", "runtime-flow.json"])
+        self.assertEqual(revision3["directory"], pins["source"]["directory"])
         for name, expected in pins["files"].items():
             self.assertEqual(hashlib.sha256((TESTS / "fixtures" / name).read_bytes()).hexdigest(), expected, name)
         self.assertEqual(pins["source"]["lastCommitTouchingTheseFiles"], pins["source"]["head"])
         self.assertEqual(len(pins["relayBlind"]["vectors"]), len(set(pins["relayBlind"]["vectors"])))
-        self.assertEqual(len(pins["relayBlind"]["vectors"]), 84)
+        self.assertEqual(len(pins["relayBlind"]["vectors"]), 124)
         self.assertFalse([name for name in pins["relayBlind"]["vectors"] if name.startswith("control-")], "control frames are the worker's own: none of them is passed through")
 
     def test_every_test_source_is_run_and_none_touches_the_sandbox_or_a_vm(self):

@@ -150,6 +150,7 @@ test("migration 21: a guest boot is recorded once, and its end carries both a pr
   expect(() => addBoot(db.db, workspaceId, "inc-1", "21111111-2222-4333-8444-555555555555")).toThrow(); // one boot per incarnation
   expect(() => addBoot(db.db, workspaceId, "inc-3", "31111111-2222-4333-8444-555555555555", 0)).toThrow(); // a lease epoch is positive
   expect(() => addBoot(db.db, workspaceId, "inc-4", "short")).toThrow();
+  for (const bad of [BOOT.toUpperCase(), BOOT.replaceAll("-", "_"), `x${BOOT.slice(1)}`, "-".repeat(36)]) expect(() => addBoot(db.db, workspaceId, "inc-6", bad)).toThrow();
   expect(() => addBoot(db.db, "ws_missing", "inc-5", "51111111-2222-4333-8444-555555555555")).toThrow();
   const end = (proof: string | null, at: string | null) => db.db.run("UPDATE cowork_guest_boots SET ended_proof=?, ended_at=? WHERE incarnation_id='inc-1'", [proof, at]);
   expect(() => end("orderly-receipt", null)).toThrow();
@@ -168,7 +169,9 @@ test("migration 21: the held-input inbox columns default to nothing offered, not
   set("offer_count=3");
   for (const bad of ["A".repeat(64), "a".repeat(63), "z".repeat(64)]) expect(() => set("acked_hold_token=?", bad)).toThrow();
   set("acked_hold_token=?", HEX);
-  expect(() => set("commit_outcome='delivered'")).toThrow();
+  expect(() => set("commit_outcome='delivered', commit_confirmed_at=1")).toThrow();
+  expect(() => set("commit_outcome='folded'")).toThrow(); // an outcome needs its confirmation time
+  expect(() => set("commit_confirmed_at=1")).toThrow(); // and a confirmation its outcome
   for (const outcome of ["folded", "queued", "started", "already", "lost"]) set("commit_outcome=?, commit_confirmed_at=1", outcome);
 });
 
