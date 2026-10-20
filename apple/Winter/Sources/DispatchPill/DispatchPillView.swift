@@ -204,11 +204,15 @@ struct DispatchPillComposerBar: View {
 
     var body: some View {
         let expanded = controller.presentation == .expanded
-        let running = adapter.turnRunning
+        // The session's turn, or a sent message's turn on its way (`awaitingTurnStart`): Enter goes from the typing
+        // pill straight to the working one, never through the idle pill.
+        let running = controller.showsTurnRunning
         let draft = adapter.composerDraft
         // An ask waiting on the user: the pill IS its card (`DispatchPillCardQueue`).
         let card = controller.cardShowsOnPill ? controller.frontCard : nil
-        let working = !expanded && running && card == nil
+        let look = dispatchPillBarLook(expanded: expanded, running: running, draft: draft, cardShown: card != nil,
+                                       verbText: adapter.verbText)
+        let working = look.working
         let preview = expanded && card == nil ? controller.turnPreview : nil
         let picker = controller.permissionsPickerOpen && card == nil
         let covered = preview != nil || picker || card != nil
@@ -216,6 +220,7 @@ struct DispatchPillComposerBar: View {
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
+                        placeholder: look.placeholder,
                         hidesComposer: working || covered || controller.contentFadingOut,
                         showsAccessories: showsAccessories)
                 .animation(.easeOut(duration: 0.2)) { $0.opacity(covered ? 0 : 1) }
@@ -266,14 +271,14 @@ struct DispatchPillComposerBar: View {
         }
     }
 
-    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool,
+    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool, placeholder: String?,
                              hidesComposer: Bool, showsAccessories: Bool) -> some View {
         VStack(spacing: 0) {
             HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
                 // Animations here are SCOPED (the body form, transitions carrying their own), never
                 // `.animation(_:value:)` on a container: that would also ease the container's layout,
                 // which the spring already drives frame by frame — the two would fight.
-                field(draft: draft, expanded: expanded, running: running, hidden: hidesComposer,
+                field(draft: draft, expanded: expanded, placeholder: placeholder, hidden: hidesComposer,
                       showsAccessories: showsAccessories)
                     .animation(.easeOut(duration: 0.25)) { $0.opacity(working ? 0 : 1) }
                     .allowsHitTesting(!working)
@@ -305,14 +310,14 @@ struct DispatchPillComposerBar: View {
     /// The text field, at a FIXED width (`composerFieldWidth`) in a flexible, clipped slot — the slot
     /// follows the animated shape, the text inside never re-wraps mid-animation. ↗ and ⋯ float over
     /// its trailing end, outside the clip so their blur is not cut off.
-    private func field(draft: String, expanded: Bool, running: Bool, hidden: Bool,
+    private func field(draft: String, expanded: Bool, placeholder: String?, hidden: Bool,
                        showsAccessories: Bool) -> some View {
         Color.clear
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .bottomLeading) {
                 ZStack(alignment: .topLeading) {
-                    if draft.isEmpty {
-                        Text(running ? adapter.verbText : "Type here")
+                    if let placeholder {
+                        Text(placeholder)
                             .font(Typography.composerField())
                             .foregroundStyle(expanded ? Color.white.opacity(0.5) : Theme.textPlaceholder)
                             .lineLimit(1)
@@ -377,6 +382,28 @@ struct DispatchPillComposerBar: View {
                 }
             }
     }
+}
+
+/// What the pill's bar shows, as one value: the working look (the plume, the composer hidden), the trailing circle's
+/// role, and the placeholder line (nil: none drawn).
+struct DispatchPillBarLook: Equatable {
+    let working: Bool
+    let circle: ComposerSendButtonRole
+    let placeholder: String?
+}
+
+/// PURE: the bar's look. `running` is `DispatchPillController.showsTurnRunning` — the session's turn, or a sent
+/// message's turn on its way — so Enter goes from the typing pill straight to the working one. No placeholder under
+/// the plume: the field is fading out there, and one popping in at full strength (the cleared draft's) and changing
+/// words as the turn starts read as flashes (user, 2026-10-20).
+func dispatchPillBarLook(expanded: Bool, running: Bool, draft: String, cardShown: Bool,
+                         verbText: String) -> DispatchPillBarLook {
+    let working = !expanded && running && !cardShown
+    let canSend = !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let placeholder: String? = draft.isEmpty && !working ? (running ? verbText : "Type here") : nil
+    return DispatchPillBarLook(working: working,
+                               circle: composerSendButtonRole(isRunning: running, sendBlockedReason: canSend ? nil : ""),
+                               placeholder: placeholder)
 }
 
 /// A pinned turn's height for `reply`, measured at the composer's own face (the size every line of
