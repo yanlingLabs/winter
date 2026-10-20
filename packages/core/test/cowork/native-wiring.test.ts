@@ -553,3 +553,34 @@ test("close also runs when no guest was live at shutdown, and a close that throw
   expect(idle.beginShutdown()).toBeUndefined(); // never built: nothing to close
   expect(closes).toBe(1);
 });
+
+// ---------------------------------------------------------------------------------------------------- S7B part 3: the provisioning port through the wiring
+test("provisioningPort: absent without an environment (production), and lazy with one: nothing is built until the port is asked", async () => {
+  const h = createHarness();
+  expect(createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home }).provisioningPort()).toBeUndefined();
+  let builds = 0;
+  const wiring = createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home, environment: () => { builds += 1; return envFor(h); } });
+  const port = wiring.provisioningPort()!;
+  expect(port).toBeDefined(); expect(builds).toBe(0);
+  expect(port.available()).toBe(false); // this environment carries no provisioning port
+  expect(() => port.admit({ kind: "local-user", id: "u" } as never)).toThrow(expect.objectContaining({ code: "unsupported_topology" }));
+  await expect(port.provision(h.workspaceId, "op")).rejects.toMatchObject({ code: "unsupported_topology" }); // uncertain, never a definite failure
+  expect(builds).toBe(1); // built once, shared by every ask
+});
+test("provisioningPort: delegates to the environment's port; a throw is a failure with a code; an environment that cannot be built is unavailable and retried", async () => {
+  const h = createHarness();
+  const calls: string[] = [];
+  let mode: "ok" | "throws" = "ok";
+  const inner = { available: () => true, admit: () => { calls.push("admit"); }, provision: async (workspaceId: string, operationId: string) => { calls.push(`provision:${workspaceId}:${operationId}`); if (mode === "throws") throw new Error("boom"); return { status: "applied" as const }; } };
+  const port = createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home, environment: () => envFor(h, { provisioningPort: inner }) }).provisioningPort()!;
+  expect(port.available()).toBe(true);
+  port.admit({ kind: "local-user", id: "u" } as never);
+  expect(await port.provision("w", "o1")).toEqual({ status: "applied" });
+  mode = "throws";
+  expect(await port.provision("w", "o2")).toEqual({ status: "failed", reason: "provision_failed" });
+  expect(calls).toEqual(["admit", "provision:w:o1", "provision:w:o2"]);
+  let attempts = 0;
+  const flaky = createCoworkNativeWiring({ db: h.db, records: h.records, home: h.home, environment: () => { attempts += 1; if (attempts === 1) throw new Error("not yet"); return envFor(h, { provisioningPort: inner }); } }).provisioningPort()!;
+  expect(flaky.available()).toBe(false);
+  expect(flaky.available()).toBe(true);
+});

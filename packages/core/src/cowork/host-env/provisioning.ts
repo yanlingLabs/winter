@@ -4,22 +4,20 @@ import { CoworkError } from "../types";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "../volume-backup";
 import { CoworkVolumes, type CoworkVolumeAuthority, type CoworkVolumeError } from "../volumes";
 
+import type { CoworkGuestRuntimeOffer, CoworkProvisioningPort } from "../session-ports";
+import type { CoworkNativeGuestRecords } from "../native/guest-records";
+import { ensureSharedDirectories } from "./guest-dirs";
+
 /*
- * The guest offer and the provisioning port (N2 S7B part 1, items 7 and 8). The SHAPES below are DOOR's (docs/research/2026-10-18-cowork-session-door-design.md
- * sections 7.6 and 7.7). They are declared here, in this module's own words, until DOOR's D1 (`cowork/session-ports.ts`) merges; then the declarations are
- * deleted and these functions are typed by theirs (structurally identical, so it is an import swap).
+ * The guest offer and the provisioning port (N2 S7B part 1, items 7 and 8; part 3 types them by the session door's own ports). The shapes are DOOR's
+ * (`cowork/session-ports.ts`, imported here), so what this module returns is exactly what the door's service calls.
  *
- * NOTHING in the daemon builds either today. The offer is derived from the VERIFIED image the host will launch (the digest pin and the facts that image's manifest
- * proves), never from a constant: an image that is not verified, or that does not prove the confined posture, offers nothing, so no tool that needs the guest
- * compartment is ever named.
+ * NOTHING in the daemon builds either unless the production native environment exists (the activation seam is off). The offer is derived from the VERIFIED image the
+ * host will launch (the digest pin and the facts that image's manifest proves), never from a constant: an image that is not verified, or that does not prove the
+ * confined posture, offers nothing, so no tool that needs the guest compartment is ever named.
  */
 
-export interface CoworkGuestRuntimeOffer {
-  readonly profile: "host-query-v1";
-  /** DOOR types this as its readiness-key union; the only key this slice can offer is a member of it. */
-  readonly readiness: readonly "guest-compartment"[];
-  readonly runtimeCapability: { readonly protocolVersion: 1; readonly capabilities: readonly string[]; readonly supportsConfinedGuestExecution: boolean };
-}
+export type { CoworkGuestRuntimeOffer, CoworkProvisioningPort };
 /** What the installed, signature-verified runtime image proves about itself. The reader that produces it (the image lane's manifest check) is injected; this module trusts nothing else. */
 export interface CoworkVerifiedGuestImage {
   readonly baseImageDigest: string;
@@ -34,12 +32,6 @@ export function coworkGuestRuntimeOffer(image: CoworkVerifiedGuestImage | null):
   if (!image || capability?.protocolVersion !== 1 || capability.supportsConfinedGuestExecution !== true || !Array.isArray(capability.capabilities) || !capability.capabilities.includes(COWORK_CONFINED_POSTURE_CAPABILITY)) return null;
   const capabilities = [...new Set(capability.capabilities.filter((name): name is string => typeof name === "string"))].sort();
   return { profile: "host-query-v1", readiness: ["guest-compartment"], runtimeCapability: { protocolVersion: 1, capabilities, supportsConfinedGuestExecution: true } };
-}
-
-export interface CoworkProvisioningPort {
-  available(): boolean;
-  admit(principal: CoworkPrincipal): void;
-  provision(workspaceId: string, operationId: string): Promise<{ status: "applied" | "failed"; reason?: string }>;
 }
 
 /**
@@ -62,6 +54,8 @@ export interface CoworkProvisioningOptions {
   /** Records the pin (the lifecycle authority behind it is the caller's). Idempotent for the same digests, a mismatch throws. */
   readonly pin: (workspaceId: string, digests: { baseImageDigest: string; runtimeImageDigest: string }) => unknown;
   readonly backup?: CoworkVolumeBackup;
+  /** Keeps the data volume's filesystem UUID per workspace (write-once; CR4 step 9). Absent: not kept here (the first start keeps it). */
+  readonly guestRecords?: Pick<CoworkNativeGuestRecords, "recordStoreVolumeUuid">;
   readonly capacities?: { data: number; environment: number };
 }
 
@@ -81,10 +75,14 @@ export function createCoworkProvisioningPort(options: CoworkProvisioningOptions)
         if (existing.length !== 2 || existing.some(volume => volume.state !== "allocated")) {
           volumes.allocate({ workspaceId, proof: {}, owner: { ...PROVISION_OWNER, runtimeImageDigest: image.runtimeImageDigest } }, capacities);
         }
+        // The shared directories the host-backed shares are served from (guidance, memory, outputs), made once, owned by this user, never through a symlink.
+        ensureSharedDirectories(options.home, workspaceId);
+        const data = volumes.records(workspaceId).find(volume => volume.purpose === "data");
+        if (options.guestRecords !== undefined && data?.filesystemUUID != null && options.guestRecords.recordStoreVolumeUuid(workspaceId, data.filesystemUUID) === "mismatch") return { status: "failed", reason: "store_volume_mismatch" };
         options.pin(workspaceId, { baseImageDigest: image.baseImageDigest, runtimeImageDigest: image.runtimeImageDigest });
         return { status: "applied" };
       } catch (error) {
-        const code = (error as Partial<CoworkVolumeError>)?.code;
+        const code = (error as { code?: unknown })?.code;
         return { status: "failed", reason: typeof code === "string" ? code : "provision_failed" };
       }
     },

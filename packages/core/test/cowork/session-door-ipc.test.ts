@@ -228,10 +228,13 @@ function portNameWrites(names: readonly string[] = ["provisioning", "execution"]
   return found.sort();
 }
 
-test("pins (structural): no src module supplies a host's provisioning or execution port (the composition that does is the D6 flip)", () => {
+test("pins (structural): no src module supplies a host's execution port, and the one place that supplies provisioning is the daemon, behind an injected environment (production has none)", () => {
   // Declared in service.ts's host interface, reported in its capabilities, typed on the wire; the schedule status's own
   // `execution` field is a different value. Any other write of either name, in any syntax, fails here.
   expect(portNameWrites()).toEqual([
+    // S7B (part 3): the daemon composes the provisioning port ONLY where an environment was injected (`coworkNativePort`, undefined in production: the activation seam
+    // answers undefined), and only when the host has none. The behavioural pin below and native/anti-wiring's seam pin cover the other half.
+    "core/src/daemon.ts PropertyAssignment provisioning: coworkProvisioning",
     "core/src/cowork/schedules.ts PropertyAssignment execution: \"unavailable\" as const",
     "core/src/cowork/service.ts PropertyAssignment execution: this.host.execution?.() === true",
     "core/src/cowork/service.ts PropertyAssignment provisioning: this.host.provisioning?.available() === true",

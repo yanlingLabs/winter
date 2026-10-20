@@ -1,11 +1,14 @@
 import type { AdmissionOwner, CoworkAdmissionLedger } from "./admission";
 import type { CoworkGuestStartPort } from "./service";
 import { CoworkImagePins, type CoworkImageDigests } from "./images";
+import { CoworkError } from "./types";
 import type { CoworkRepository } from "./repository";
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { CoworkVolumes } from "./volumes";
 import type { CoworkVolumeBackup } from "./volume-backup";
 import { CoworkNativeAuthority } from "./native/authority";
+import type { CoworkNativeGuestRecords } from "./native/guest-records";
+import type { CoworkProvisioningPort } from "./session-ports";
 import { CoworkNativeHost, type CoworkLauncherPort, type CoworkNativeHostDeps, type CoworkNativeImagePins, type CoworkNativeRunning, type CoworkNativeStartRequest } from "./native/host";
 import { CoworkNativePower } from "./native/power";
 import { COWORK_NATIVE_LIMITS, coworkNativeHostStopWaitMs } from "./native/protocol";
@@ -55,6 +58,13 @@ export interface CoworkNativeEnvironment {
   /** Called at shutdown, after the guests were drained: timers stopped, the ledger closed. */
   readonly close?: () => void;
   readonly journal?: CoworkNativeLaunchJournalPort;
+  /** The host's durable guest records (the boot at `hello`, its end proof, the data volume's UUID). Absent: nothing is recorded and no boot is attested as ended. */
+  readonly guestRecords?: CoworkNativeGuestRecords;
+  /** The outputs directory preparer and the share directory opener (see `native/host.ts`). Absent: nothing is created, and a start that asks for shares is refused. */
+  readonly outputs?: { ensure(workspaceId: string, logicalSessionId: string): void };
+  /** The provisioning port of this environment (the door's shape). Reached only through `provisioningPort()` below, and only when an environment was injected. */
+  readonly provisioningPort?: CoworkProvisioningPort;
+  readonly shareDirectories?: { open(hostPath: string): { readonly fd: number; readonly device: string; readonly inode: string; close(): void } };
   /** Timers, clocks, checkpoints and the conversation source: everything of the host's own that is not one of the structural ports above. */
   readonly hostOptions?: Partial<Omit<CoworkNativeHostDeps, "records" | "volumes" | "admission" | "authority" | "power" | "recovery" | "registry" | "hostBoot" | "launcher" | "images" | "journal" | "daemon">>;
 }
@@ -118,25 +128,49 @@ export class CoworkNativeWiring implements CoworkGuestStartPort {
   /** True once the host has been built (never at construction). */
   get built(): boolean { return this.hostInstance !== undefined; }
 
+  /** The environment, built once (by the first thing that needs it: a provisioning question or a start). Throws `native_unavailable` when there is none, and a failed build is retried at the next ask. */
+  private environment(): CoworkNativeEnvironment {
+    if (this.environmentInstance) return this.environmentInstance;
+    const make = this.options.environment;
+    if (!make) throw new CoworkNativeUnavailableError("native_unavailable");
+    try { this.environmentInstance = make(); } catch { throw new CoworkNativeUnavailableError("native_unavailable"); }
+    return this.environmentInstance;
+  }
+
+  /** The door's provisioning port over this wiring's environment, or undefined when no environment was injected (production). Lazy: nothing is built until the port is asked;
+   *  until the environment exists and says so, `available()` is false and `admit` refuses `unsupported_topology`. */
+  provisioningPort(): CoworkProvisioningPort | undefined {
+    if (!this.options.environment) return undefined;
+    const port = (): CoworkProvisioningPort | undefined => { try { return this.environment().provisioningPort; } catch { return undefined; } };
+    return {
+      available: () => { try { return port()?.available() === true; } catch { return false; } },
+      admit: principal => { const inner = port(); if (inner === undefined) throw new CoworkError("unsupported_topology"); inner.admit(principal); },
+      provision: async (workspaceId, operationId) => {
+        const inner = port();
+        // No port in the environment is NOT a definite failure (a `failed` answer concludes a never-booted creation for good): it throws, which the service treats as
+        // uncertain and retries at the next resume. Only the port itself may say `failed`.
+        if (inner === undefined) throw new CoworkError("unsupported_topology");
+        try { return await inner.provision(workspaceId, operationId); } catch { return { status: "failed", reason: "provision_failed" }; }
+      },
+    };
+  }
+
   /** Build the host from the environment, once. Throws `native_unavailable` when there is none. */
   private host(): CoworkNativeHost {
     if (this.hostInstance) return this.hostInstance;
-    const make = this.options.environment;
-    if (!make) throw new CoworkNativeUnavailableError("native_unavailable");
-    let environment: CoworkNativeEnvironment;
-    try { environment = make(); } catch { throw new CoworkNativeUnavailableError("native_unavailable"); }
-    this.environmentInstance = environment;
+    const environment = this.environment();
     const { db, records, home } = this.options;
     const registry = new CoworkNativeStopRegistry();
     const authority = new CoworkNativeAuthority({ records, hostBoot: environment.hostBoot, registry });
     const volumes = new CoworkVolumes(db, home, authority.volumes, environment.backup, undefined, authority.filesystem);
     const power = new CoworkNativePower(db);
     const recovery = new CoworkNativeRecovery({ records, volumes, admission: environment.admission, power, registry, hostBoot: environment.hostBoot, receiptKey: () => this.receiptKey,
-      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guards: typeof environment.guards === "function" ? environment.guards({ volumes }) : environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
+      receipts: environment.receipts, ownerRecover: environment.ownerRecover, guestRecords: environment.guestRecords, guards: typeof environment.guards === "function" ? environment.guards({ volumes }) : environment.guards, journal: environment.journal, now: environment.hostOptions?.now });
     const images = bindCoworkImagePins(this.options.imagePins ?? readOnlyImagePins(db));
     this.drainBudgetMs = environment.hostOptions?.timeouts?.drainBudgetMs ?? COWORK_NATIVE_LIMITS.drainBudgetMs;
     this.hostInstance = new CoworkNativeHost({ ...environment.hostOptions, records, volumes, admission: environment.admission, authority, power, recovery, registry, hostBoot: environment.hostBoot,
-      launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon });
+      launcher: environment.launcher, images, receiptKey: () => this.receiptKey, journal: environment.journal, daemon: environment.daemon,
+      ...(environment.guestRecords ? { guestRecords: environment.guestRecords } : {}), ...(environment.outputs ? { outputs: environment.outputs } : {}), ...(environment.shareDirectories ? { shareDirectories: environment.shareDirectories } : {}) });
     try { environment.bindHost?.({ activeWorkspaces: () => this.hostInstance!.activeWorkspaces(), stop: (workspaceId, reason) => this.hostInstance!.stop(workspaceId, reason) }); } catch { /* an environment that cannot bind has no pressure halt; the guard then reports unconfirmed */ }
     return this.hostInstance;
   }

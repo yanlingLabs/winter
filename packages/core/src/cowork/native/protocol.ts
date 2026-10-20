@@ -430,7 +430,7 @@ export type CoworkNativeMuxFrame =
  */
 export const COWORK_NATIVE_POLICIES = Object.freeze(["auto", "plan", "ask", "accept-edits", "dont-ask", "bypass"] as const);
 export const COWORK_NATIVE_RUNTIME_PROFILES = Object.freeze(["host-query-v1", "host-query-guided-v1"] as const);
-export const COWORK_NATIVE_TOOL_CLASSES = Object.freeze(["read", "write", "execute"] as const);
+export const COWORK_NATIVE_TOOL_CLASSES = Object.freeze(["read", "write", "execute", "coordinate"] as const);
 export type CoworkNativeRuntimeProfile = typeof COWORK_NATIVE_RUNTIME_PROFILES[number];
 export interface CoworkNativeConversationAuthority {
   readonly workspaceId: string; readonly sessionId: string; readonly incarnationId: string; readonly leaseEpoch: number;
@@ -479,8 +479,11 @@ function allowedView(path: string, sessionId: string): boolean {
   return (parts.length >= 3 && (parts[1] === "folders" || parts[1] === "repos"))
     || (parts.length === 3 && parts[1] === ".winter" && parts[2] === "memory")
     || (parts.length === 4 && parts[1] === ".winter" && parts[2] === "scratch" && parts[3] === sessionId)
-    || (parts.length === 3 && parts[1] === "outputs" && parts[2] === sessionId);
+    || (parts.length === 3 && parts[1] === "outputs" && parts[2] === sessionId)
+    // The plan view (contract 12.5): this conversation's own scratch for the plan epoch, `/workspace/plan/<logicalSessionId>/<epoch>`, epoch a canonical non-negative decimal.
+    || (parts.length === 4 && parts[1] === "plan" && parts[2] === sessionId && /^(0|[1-9][0-9]{0,8})$/.test(parts[3]!));
 }
+const isPlanView = (path: string): boolean => path.startsWith("/workspace/plan/");
 const rootsOf: Validator<readonly CoworkNativeConversationRoot[]> = value => {
   if (!Array.isArray(value) || value.length < 1 || value.length > COWORK_NATIVE_LIMITS.rootsPerConversation) return fail();
   const roots = value.map(root => record(root, ROOT_SPEC) as unknown as CoworkNativeConversationRoot);
@@ -544,10 +547,15 @@ const conversationOf: Validator<CoworkNativeConversation> = value => {
   if (!item.roots.every(root => allowedView(root.guestPath, item.logicalSessionId))) return fail();
   // The host builder always sends source === guestPath (the guest sees each root where the host admitted it); the host enforces that on its side too (with the line above, the source is then an admitted view too).
   if (!item.roots.every(root => root.source === root.guestPath)) return fail();
+  // The plan view exists only under the plan policy, at most once, and is the ONE writable root there (it is read-write by definition, never read-only).
+  const planViews = item.roots.filter(root => isPlanView(root.guestPath));
+  if (planViews.length > 1 || planViews.some(root => item.policy !== "plan" || root.readOnly)) return fail();
+  // Contract 12.3a: under the plan policy the plan view is the ONLY writable root, for every conversation (host-query or tools-only).
+  if (item.policy === "plan" && item.roots.some(root => !root.readOnly && !isPlanView(root.guestPath))) return fail();
   const runtime = item.runtime;
   if (runtime !== null) {
-    // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree), and plan is read-only.
-    if (item.roots.some(root => root.guestPath === "/workspace/.winter" || root.guestPath.startsWith("/workspace/.winter/") || (item.policy === "plan" && !root.readOnly))) return fail();
+    // `host_query_config`: a host-query conversation sees folders, repos and outputs only (never the `.winter` tree).
+    if (item.roots.some(root => root.guestPath === "/workspace/.winter" || root.guestPath.startsWith("/workspace/.winter/"))) return fail();
     const scope = runtime.provider.scope as Record<string, unknown>, selection = runtime.provider.selection as Record<string, unknown>;
     // `_configure_runtime`: the provider scope must be this conversation's own, and the selected model the one that runs.
     if (scope.workspaceId !== item.authority.workspaceId || scope.sessionId !== item.logicalSessionId || scope.backendSessionId !== item.authority.sessionId

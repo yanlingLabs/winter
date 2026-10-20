@@ -325,3 +325,78 @@ test("sticky exclusion parses bounded plist strings across equivalent binary enc
   const notString = Buffer.from(valid); notString[8] = 0x4f;
   for (const value of [Buffer.alloc(0), valid.subarray(0, valid.length - 1), malformed, notString, Buffer.alloc(BACKUP_EXCLUSION_MAX_BYTES + 1), Buffer.from(`<plist><string>${text}</string></plist>`)]) expect(isStickyBackupExclusion(value)).toBe(false);
 });
+
+// ---------------------------------------------------------------------------------------------------- restore claim (content-out volume needs)
+const restoring = () => { const f = fixture(); allocate(f); return f; };
+const ownerRows = (f: ReturnType<typeof fixture>) => f.store.records(f.request.workspaceId).map(v => v.owner?.controllerInstanceId ?? null);
+test("a restore claim is exclusive and durable: claim, open and prepareFilesystems refuse from the first moment, and a new process still sees it", () => {
+  const f = restoring();
+  const claim = f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof });
+  expect(ownerRows(f)).toEqual(["restore-r1", "restore-r1"]);
+  refusal(() => f.store.claim(f.request), "volume_busy");
+  refusal(() => f.store.open(f.request, "data"), "volume_busy");
+  refusal(() => f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r2", proof }), "volume_busy"); // a second restore
+  expect(f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof })).toMatchObject({ restoreId: "r1" }); // the same restore retries
+  const again = new CoworkVolumes(f.db, f.home, authority, f.backup); // another process over the same database
+  refusal(() => again.claim(f.request), "volume_busy");
+  expect(again.records(f.request.workspaceId).every(v => v.owner?.controllerInstanceId === "restore-r1")).toBe(true);
+  f.store.endRestore(claim);
+  expect(ownerRows(f)).toEqual([null, null]);
+  expect(f.store.claim(f.request).length).toBe(2); // free again
+});
+test("a restore cannot claim a workspace a native incarnation owns, an unallocated one, or while a handle is open", () => {
+  const f = restoring();
+  f.store.claim(f.request);
+  refusal(() => f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof }), "volume_busy");
+  const g = restoring();
+  const handle = g.store.claim(g.request) && g.store.open(g.request, "data");
+  g.db.db.run("UPDATE cowork_volumes SET owner_json=NULL WHERE workspace_id=?", [g.request.workspaceId]);
+  refusal(() => g.store.beginRestore({ workspaceId: g.request.workspaceId, restoreId: "r1", proof }), "volume_busy");
+  handle.close();
+  const h = fixture(); h.store.plan(h.request, capacities);
+  refusal(() => h.store.beginRestore({ workspaceId: h.request.workspaceId, restoreId: "r1", proof }), "recovery_required");
+  refusal(() => restoring().store.beginRestore({ workspaceId: "nope", restoreId: "r1", proof }), "not_found");
+  refusal(() => restoring().store.beginRestore({ workspaceId: "w", restoreId: "r1", proof: "wrong" }), "not_found");
+});
+test("the restore reads through a read-only, identity-pinned descriptor, and only while it holds the claim", () => {
+  const f = restoring();
+  refusal(() => f.store.openForRestoreRead({ workspaceId: f.request.workspaceId, restoreId: "r1", proof }, "data"), "volume_busy"); // no claim yet
+  const claim = f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof });
+  const opened = f.store.openForRestoreRead(claim, "data");
+  expect(() => writeSync(opened.fd, Buffer.from("x"))).toThrow(); // O_RDONLY: the write is refused by the kernel
+  expect(opened.volume.purpose).toBe("data");
+  opened.close();
+  refusal(() => f.store.openForRestoreRead({ ...claim, restoreId: "r2" }, "data"), "volume_busy"); // another restore's claim object
+  f.store.endRestore(claim);
+  refusal(() => f.store.openForRestoreRead(claim, "data"), "volume_busy"); // after the end
+});
+test("an image the restore replaced stays claimed until its identity is re-recorded, and a wrong belief about the old identity is refused", () => {
+  const f = restoring();
+  const claim = f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof });
+  const before = f.store.records(f.request.workspaceId).find(v => v.purpose === "data")!.identity!;
+  // the restorer puts a new image of the same size in place (exclusion is applied to the new file as the restorer must)
+  const path = f.image("data.ext4"), replacement = `${path}.restored`;
+  writeFileSync(replacement, ""); ftruncateSync(openSync(replacement, "r+"), RAW_VOLUME_MIN_BYTES); chmodSync(replacement, 0o600);
+  renameSync(replacement, path);
+  const fd = openSync(path, "r"); const st = fstatSync(fd, { bigint: true }); closeSync(fd);
+  f.excluded.add(`${st.dev}:${st.ino}`);
+  const next = { device: String(st.dev), inode: String(st.ino), uid: Number(st.uid), mode: Number(st.mode & 0o7777n) };
+  refusal(() => f.store.endRestore(claim), "recovery_required"); // the record still names the old file: still claimed (visible and safe)
+  expect(ownerRows(f)).toEqual(["restore-r1", "restore-r1"]);
+  refusal(() => f.store.reidentifyRestored(claim, { purpose: "data", expected: { ...before, inode: "1" }, next, proof }), "recovery_required"); // believed the wrong old identity
+  refusal(() => f.store.reidentifyRestored(claim, { purpose: "data", expected: before, next: { ...next, inode: "1" }, proof }), "recovery_required"); // the file is not what was claimed
+  expect(f.store.records(f.request.workspaceId).find(v => v.purpose === "data")!.identity).toEqual(before); // nothing changed by the refusals
+  f.store.reidentifyRestored(claim, { purpose: "data", expected: before, next, proof });
+  f.store.endRestore(claim);
+  expect(f.store.records(f.request.workspaceId).find(v => v.purpose === "data")!.identity).toEqual(next);
+  expect(ownerRows(f)).toEqual([null, null]);
+});
+test("reidentifyRestored needs the claim, the right size and a held restore", () => {
+  const f = restoring();
+  const claim = { workspaceId: f.request.workspaceId, restoreId: "r1", proof };
+  const identityNow = f.store.records(f.request.workspaceId).find(v => v.purpose === "data")!.identity!;
+  refusal(() => f.store.reidentifyRestored(claim, { purpose: "data", expected: identityNow, next: identityNow, proof }), "volume_busy"); // no claim
+  const held = f.store.beginRestore({ workspaceId: f.request.workspaceId, restoreId: "r1", proof });
+  ftruncateSync(openSync(f.image(), "r+"), RAW_VOLUME_MIN_BYTES * 2);
+  refusal(() => f.store.reidentifyRestored(held, { purpose: "data", expected: identityNow, next: identityNow, proof }), "recovery_required"); // wrong size
+});
