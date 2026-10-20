@@ -194,11 +194,6 @@ final class DispatchPillController: ObservableObject {
     /// rapid flashes after Enter (user, 2026-10-20). Held from the send's answer until the turn shows as running,
     /// ends (`completedTurns`), or `turnStartGrace` passes with neither.
     @Published private(set) var awaitingTurnStart = false
-    /// The main pill's shape is at (or within a blur's breadth of) its target: nothing inside it is blurred by the
-    /// morph (`dispatchPillMorphBlur` is 0). The working plume starts only then (`DispatchPillComposerBar`) — started
-    /// mid-compress it was laid out again on every frame of the spring, every puff re-flown for the new width, under
-    /// the shape's blur, and read as flashes while the pill compressed (user, 2026-10-20).
-    @Published private(set) var shapeSharp = true
     private var awaitingTurnStartGeneration = 0
     /// `completedTurns` when the hold began: a turn ending since (an error before it ever ran) ends the hold too.
     private var completedTurnsAtAwait = 0
@@ -1103,9 +1098,16 @@ final class DispatchPillController: ObservableObject {
         return max(1, composer - DispatchPillMetrics.composerVerticalPadding)
     }
 
-    /// The width the working plume is laid out at: the shape's TARGET width, so it is never laid out again while the
-    /// shape springs (`DispatchPillComposerBar`).
-    var plumeLayoutWidth: CGFloat { morph.target.width }
+    /// The working plume is drawn: the compact pill over a running turn (or a sent message's turn on its way,
+    /// `showsTurnRunning`), with no card and no mode picker on it. True from the instant Enter compresses the pill —
+    /// the plume starts with the compress (user, 2026-10-20: "the plume may start as soon as I press Enter").
+    var plumeVisible: Bool {
+        presentation == .compact && showsTurnRunning && !(cardShowsOnPill && frontCard != nil) && !permissionsPickerOpen
+    }
+
+    /// The plume's view stays mounted (hidden when not `plumeVisible`) for as long as a turn runs and the pill is not
+    /// full screen: opening the typing pill for a steer and sending it never starts a new plume.
+    var plumeMounted: Bool { presentation != .fullScreen && showsTurnRunning }
 
     /// The pinned turn's height, or nil when no turn is pinned (the composer shows): its WHOLE reply, up to
     /// `dispatchPillPreviewCeiling` (past it the reply scrolls inside the pill).
@@ -1594,7 +1596,6 @@ final class DispatchPillController: ObservableObject {
             updateHoverScale()
             reconcileCanvas()
             if isVisible { startSpring() } else { snapToTarget() }
-            syncShapeSharp()
         } else {
             reconcileCanvas()
         }
@@ -1677,6 +1678,10 @@ final class DispatchPillController: ObservableObject {
         canvas.size = size
         let frame = dispatchPillPanelFrame(canvasSize: size, visibleFrame: lockedVisibleFrame)
         panel.setFrame(frame, display: false)
+        // Laid out AT ONCE for the new frame: the content is centred in a canvas whose width just changed, and left to
+        // the next pass it sat off by half that change (122 pt at the compress's settle) for a moment while the panel
+        // had already moved — the whole pill, plume included, jumped sideways and back.
+        hosting?.layoutSubtreeIfNeeded()
     }
 
     // MARK: - Blur while the shape changes (the AppKit composer's half)
@@ -1698,13 +1703,7 @@ final class DispatchPillController: ObservableObject {
         applyComposerBlur()
     }
 
-    private func syncShapeSharp() {
-        let sharp = dispatchPillMorphBlur(size: morph.size, target: morph.target) == 0
-        if sharp != shapeSharp { shapeSharp = sharp }
-    }
-
     private func applyComposerBlur() {
-        syncShapeSharp()
         guard let composerView else { return }
         // A content swap back to the pill reveals the composer like the rest of the content: hidden, then fading and
         // sharpening in near the shape's end (an alpha matrix — SwiftUI's opacity does not reach this AppKit view).
@@ -1744,7 +1743,7 @@ final class DispatchPillController: ObservableObject {
         guard springTimer == nil else { return }
         lastSpringTick = CACurrentMediaTime()
         // `.common` modes, as the pill's other timers: a menu or a drag tracking elsewhere in the app must not hold the
-        // spring (and with it `shapeSharp`, so the plume) back.
+        // spring back.
         let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.springTick() }
         }

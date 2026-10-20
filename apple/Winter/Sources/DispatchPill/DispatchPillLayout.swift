@@ -95,6 +95,8 @@ enum DispatchPillMetrics {
     static let maxMorphBlur: CGFloat = 8
     /// Points of remaining spring travel per point of blur.
     static let morphBlurFalloff: CGFloat = 12
+    /// The working plume's fade-in: quick — it starts with Enter's compress.
+    static let plumeFadeIn: Double = 0.12
     /// A content swap (pill ↔ card): the share of the shape's travel during which the new content stays hidden —
     /// it fades and sharpens in over the last 38 %.
     static let contentRevealStart: CGFloat = 0.62

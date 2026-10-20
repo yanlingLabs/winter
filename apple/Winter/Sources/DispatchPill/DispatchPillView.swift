@@ -63,6 +63,8 @@ struct DispatchPillView: View {
                 } else {
                     DispatchPillComposerBar(controller: controller, adapter: adapter, commandMode: controller.commandMode)
                 }
+            } underlay: {
+                DispatchPillPlumeUnderlay(controller: controller, adapter: adapter)
             }
         }
         // A slight grow under the pointer — the whole stack, anchored at the pill's bottom edge, so the floating
@@ -100,10 +102,22 @@ struct DispatchPillView: View {
 /// While the shape changes, everything inside is blurred by how far the spring still has to travel
 /// (`dispatchPillMorphBlur`), sharpening as it settles — so content never reads as snapping into
 /// place ahead of, or behind, the shape around it.
-struct DispatchPillShell<Content: View>: View {
+struct DispatchPillShell<Content: View, Underlay: View>: View {
     @ObservedObject var morph: DispatchPillMorphModel
     var tracksAnimatedWidth = true
     @ViewBuilder let content: Content
+    /// Drawn UNDER the content, inside the shape and clipped by it at every frame, but never blurred by the morph: the
+    /// working plume (`DispatchPillPlumeUnderlay`), which lays itself out once at its final place and lets the
+    /// shrinking shape reveal it.
+    @ViewBuilder let underlay: Underlay
+
+    init(morph: DispatchPillMorphModel, tracksAnimatedWidth: Bool = true, @ViewBuilder content: () -> Content,
+         @ViewBuilder underlay: () -> Underlay) {
+        self.morph = morph
+        self.tracksAnimatedWidth = tracksAnimatedWidth
+        self.content = content()
+        self.underlay = underlay()
+    }
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: dispatchPillCornerRadius(height: morph.size.height),
@@ -120,10 +134,49 @@ struct DispatchPillShell<Content: View>: View {
                               dispatchPillContentBlur(visibility: visibility)))
             // Clipped to the morphing shape itself at every frame — nothing inside ever draws past its edge.
             .clipShape(shape)
+            // Under the (blurred) content and over the black: the plume, clipped by the shape, never blurred. It fades
+            // with a content swap like the rest (`visibility`), but sharp.
+            .background {
+                underlay
+                    .frame(width: morph.size.width, height: morph.size.height, alignment: .bottom)
+                    .opacity(visibility)
+                    .clipShape(shape)
+            }
             .background(shape.fill(Color.black))
             .overlay(shape.strokeBorder(Color.white.opacity(0.09), lineWidth: 1))
             .compositingGroup()
             .shadow(color: .black.opacity(0.45), radius: 14, y: 4)
+    }
+}
+
+/// The working plume, under the pill's content (`DispatchPillShell.underlay`). Laid out ONCE, at the compact pill's
+/// size and where the compact pill will be — centred, its nozzle where the compact stop button comes to rest — so the
+/// spring never lays it out again: the shape shrinks around it and its clip reveals it, and every puff stays where it
+/// is on screen. Not blurred by the morph (the shell blurs only its content). Mounted for as long as a turn runs
+/// (`plumeMounted`) and shown only on the compact working pill (`plumeVisible`), so the typing pill over a steer
+/// hides it and sending the steer shows the same plume again. It starts with Enter's compress and fades in quickly.
+struct DispatchPillPlumeUnderlay: View {
+    @ObservedObject var controller: DispatchPillController
+    @ObservedObject var adapter: FieldStateAdapter
+
+    var body: some View {
+        let visible = controller.plumeVisible
+        ZStack(alignment: .bottom) {
+            if controller.plumeMounted {
+                CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
+                    .frame(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
+                    .contentShape(Rectangle())
+                    .onTapGesture { controller.openComposer() }
+                    .allowsHitTesting(visible)
+                    .animation(.easeOut(duration: visible ? DispatchPillMetrics.plumeFadeIn : 0.25)) {
+                        $0.opacity(visible ? 1 : 0)
+                    }
+                    .transition(.asymmetric(
+                        insertion: .opacity.animation(.easeOut(duration: DispatchPillMetrics.plumeFadeIn)),
+                        removal: .opacity.animation(.easeOut(duration: 0.25))))
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
     }
 }
 
@@ -201,11 +254,6 @@ struct DispatchPillComposerBar: View {
     @ObservedObject var adapter: FieldStateAdapter
     /// Command mode: the draft in purple, its ghost completion, Delete's opt-out, the send circle's run look.
     @ObservedObject var commandMode: DispatchPillCommandMode
-    /// The plume is up: it starts once the working look is wanted AND the shape has stopped moving
-    /// (`DispatchPillController.shapeSharp`), then stays for as long as the look is wanted — the shape blurring again
-    /// while the pill is still working does not take it down. It goes the moment the look does (the typing pill, a
-    /// card, the picker, the turn's end), and the next start waits for the shape again.
-    @State private var plumeUp = false
 
     var body: some View {
         let expanded = controller.presentation == .expanded
@@ -223,10 +271,8 @@ struct DispatchPillComposerBar: View {
         let covered = preview != nil || picker || card != nil
         let showsAccessories = expanded && !covered
             && dispatchPillAccessoryButtonsVisible(draft: draft, textWidth: dispatchPillDraftTextWidth(draft))
-        let plumeGate = DispatchPillPlumeGate(wanted: working && !picker, shapeSharp: controller.shapeSharp)
         ZStack(alignment: .top) {
             composerRow(draft: draft, expanded: expanded, running: running, working: working && !picker,
-                        showsPlume: working && !picker && (plumeUp || plumeGate.startsPlume),
                         placeholder: look.placeholder,
                         hidesComposer: working || covered || controller.contentFadingOut,
                         showsAccessories: showsAccessories)
@@ -277,17 +323,9 @@ struct DispatchPillComposerBar: View {
                     .allowsHitTesting(!controller.contentFadingOut)
             }
         }
-        .onChange(of: plumeGate, initial: true) { _, gate in
-            if !gate.wanted {
-                plumeUp = false
-            } else if gate.startsPlume {
-                plumeUp = true
-            }
-        }
     }
 
-    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool, showsPlume: Bool,
-                             placeholder: String?,
+    private func composerRow(draft: String, expanded: Bool, running: Bool, working: Bool, placeholder: String?,
                              hidesComposer: Bool, showsAccessories: Bool) -> some View {
         VStack(spacing: 0) {
             HStack(alignment: .bottom, spacing: DispatchPillMetrics.rowSpacing) {
@@ -310,18 +348,8 @@ struct DispatchPillComposerBar: View {
             .padding(.leading, DispatchPillMetrics.leadingPadding)
             .padding(.trailing, DispatchPillMetrics.trailingPadding)
             .frame(maxHeight: .infinity)
-            // Under the row, so the stop button sits on the plume's nozzle.
-            // Laid out at the shape's TARGET width, its trailing end (the nozzle) on the stop button: a spring that runs
-            // under a plume already up never lays it out again frame by frame.
-            .background(alignment: .bottomTrailing) {
-                if showsPlume {
-                    CompactPillWorking(thrown: controller.plumeThrows, repeating: controller.plumeRepeatingThrows)
-                        .frame(width: controller.plumeLayoutWidth, height: DispatchPillMetrics.pillHeight)
-                        .contentShape(Rectangle())
-                        .onTapGesture { controller.openComposer() }
-                        .transition(.opacity.animation(.easeOut(duration: 0.25)))
-                }
-            }
+            // The plume is not here: it is the shell's underlay (`DispatchPillPlumeUnderlay`), under this row — the
+            // stop button comes to rest on its nozzle — and outside the morph's blur.
         }
     }
 
@@ -400,14 +428,6 @@ struct DispatchPillComposerBar: View {
                 }
             }
     }
-}
-
-/// When the working plume may start: the look wants it and the shape is no longer moving (`shapeSharp`). Once
-/// started it stays while `wanted` holds (`DispatchPillComposerBar.plumeUp`).
-struct DispatchPillPlumeGate: Equatable {
-    let wanted: Bool
-    let shapeSharp: Bool
-    var startsPlume: Bool { wanted && shapeSharp }
 }
 
 /// What the pill's bar shows, as one value: the working look (the plume, the composer hidden), the trailing circle's
