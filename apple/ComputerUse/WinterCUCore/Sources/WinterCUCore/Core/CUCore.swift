@@ -100,6 +100,7 @@ public final class CUCore: @unchecked Sendable {
             privateCaptureOverride = { _, _ in nil }  // never the window server's capture from a unit test
             pressSettleMs = 0
             webPressWatchMs = 0
+            pointClickSteadyGapMs = 0
             menuSettleMs = 0
             selectionHoldMs = 0
             blipReadMs = 0
@@ -730,6 +731,9 @@ public final class CUCore: @unchecked Sendable {
     /// How long a press on web content is watched for an effect before it is called ignored (web handlers can
     /// act late; a click after a press that did act would do it twice). 0 in test cores.
     var webPressWatchMs: Double = 800
+    /// How long apart the two pictures of a point's surroundings are taken before a point click (`pointClickVerified`):
+    /// when they already differ, the area is animating and a change after the click proves nothing. 0 in test cores.
+    var pointClickSteadyGapMs: Double = 150
     /// How long a menu command that reads disabled is read again before it is called disabled. 0 in test cores.
     var menuSettleMs: Double = 400
     /// How long a selection set right after a focus click is watched (and set again if the late click moved
@@ -1081,11 +1085,22 @@ public final class CUCore: @unchecked Sendable {
         return try await queues.run(t.pid) { [self] in
             try floorCheckPrivacy(t)
             var unread: Int?
-            let roots: [CUNode]
+            var roots: [CUNode]
             if let fresh = freshRead(t) { roots = fresh } else {
                 let obs = try observe(t, within: nil)
                 roots = obs.roots
                 unread = obs.unread
+            }
+            var found = CUFinder.find(p.query, in: roots, formatter: formatter)
+            // A read cut short that found nothing: the whole tree once more, with a larger budget (live 2026-10-20: a
+            // find() on a long Safari page answered "read cut short" and nothing, the match past the ordinary read).
+            if found.isEmpty, let cut = unread, cut > 0 {
+                try token.check()
+                let deep = try observe(t, within: nil, maxNodes: Self.findDeepMaxNodes, timeBudgetMs: Self.findDeepBudgetMs)
+                CULog.act.notice("find in \(t.appName, privacy: .public): the read was cut short with no match — read deeper (\(cut, privacy: .public) unread before, \(deep.unread ?? 0, privacy: .public) after)")
+                roots = deep.roots
+                unread = deep.unread
+                found = CUFinder.find(p.query, in: roots, formatter: formatter)
             }
             // What the matches are of: a page other than the last state()'s, or a read cut short, is said.
             var notes: [String] = []
@@ -1102,10 +1117,13 @@ public final class CUCore: @unchecked Sendable {
             if let acted = t.afterActFromMs, clock.nowMs() - acted < Self.offDesktopLagFindMs, pageMayLagOffDesktop(t) {
                 notes.insert(Self.offDesktopLagSentence(t.appName), at: 0)
             }
-            return TargetFindResult(elements: CUFinder.find(p.query, in: roots, formatter: formatter), page: page,
-                                    note: notes.isEmpty ? nil : notes.joined(separator: "; "))
+            return TargetFindResult(elements: found, page: page, note: notes.isEmpty ? nil : notes.joined(separator: "; "))
         }
     }
+
+    /// The deeper read a `find` that matched nothing in a read cut short gets, once: nodes and wall time.
+    static let findDeepMaxNodes = 15_000
+    static let findDeepBudgetMs: Double = 6_000
 
     /// How long a full read may answer `find` again (a page's tree takes 0.5–2.5 s to walk; scripts run several
     /// finds in a row).
@@ -1969,7 +1987,8 @@ public final class CUCore: @unchecked Sendable {
     }
 
     /// Reads the bound window (plus open app menus), or the subtree at `within`.
-    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes) throws -> Observation {
+    func observe(_ t: CUTarget, within: Int?, maxNodes: Int = AXTreeReader.defaultMaxNodes,
+                 timeBudgetMs: Double? = nil) throws -> Observation {
         CUUserInputGuard.waitForQuiet()
         let win = try windowElement(t)
         if within == nil, let read = stateReadOverride {
@@ -1992,6 +2011,7 @@ public final class CUCore: @unchecked Sendable {
         if full { t.refs.beginGeneration() }
         var reader = AXTreeReader()
         reader.maxNodes = maxNodes
+        if let timeBudgetMs { reader.timeBudgetMs = timeBudgetMs }
         let readAt = clock.nowMs()
         let result = reader.read(roots: rootElements, cache: t.refs, now: clock.nowMs)
         if full, !result.truncated { t.refs.prune() }
@@ -2000,7 +2020,8 @@ public final class CUCore: @unchecked Sendable {
         }
         let hidden = Self.hiddenActions(t.refusedActions)
         let roots = hidden.isEmpty ? result.roots : result.roots.map { Self.removing(hidden, from: $0) }
-        if full { t.lastFullRead = (roots, readAt) }
+        // Only a COMPLETE read answers a later find() (`freshRead`): one cut short would hide its own cut there.
+        if full, !result.truncated { t.lastFullRead = (roots, readAt) }
         // The bound window's own focus (an app answers for its key window only).
         var focusedRef: Int?
         var caret: String?
