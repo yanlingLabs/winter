@@ -421,6 +421,20 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
     expect(dispatchSystemPrompt({ computerOffered: false })).toContain("means LOOK: use Search or WebFetch");
   });
 
+  // 2026-10-20 (live): Dispatch bound Chrome, spawned a child for the same window with the user's account address in its
+  // prompt, and the child was locked out of the app for three minutes.
+  test("app work stays with Dispatch; a child never gets an app it is in, nor the user's personal details", () => {
+    for (const computerOffered of ["ComputerV2", "Computer"] as const) {
+      const text = dispatchSystemPrompt({ computerOffered });
+      expect(text).toContain("Work in the user's apps — looking, clicking, reading account pages — stays with you; spawn only for file changes or long independent work");
+      expect(text).toContain("never hand a child an app you are still working in (finish there first: your hold on an app ends when your turn does)");
+      expect(text).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
+    }
+    const off = dispatchSystemPrompt({ computerOffered: false });
+    expect(off).not.toContain("Work in the user's apps");
+    expect(off).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
+  });
+
   test("the routing line: answering directly means from what it knows, not a question back", () => {
     expect(dispatchSystemPrompt()).toContain("answer directly (from what you know — not a question back) < Search < Read < Bash < ComputerV2 < SpawnSession.");
   });

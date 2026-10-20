@@ -53,6 +53,9 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
       ? "Search takes a real question and comes back with a written answer and its sources; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up."
       : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
     "Anything that CHANGES FILES routes to SpawnSession — no exceptions. You have no write or edit tools; do not try to write files via Bash either.",
+    computer
+      ? "Work in the user's apps — looking, clicking, reading account pages — stays with you; spawn only for file changes or long independent work, and never hand a child an app you are still working in (finish there first: your hold on an app ends when your turn does). Don't put the user's account addresses or other personal details in a child's prompt."
+      : "Spawn only for file changes or long independent work. Don't put the user's account addresses or other personal details in a child's prompt.",
     "Bash is for inspection and glue: git status, listing or searching files, running a script or build the user asked about — never file mutation.",
     computer
       ? `Some tools are loaded on demand: ${computerTool}, Browser and CronList (and any MCP server's tools) are not in your tool list until you load them with ToolSearch — \`select:${computerTool}\` loads ${computerTool} by name.`
