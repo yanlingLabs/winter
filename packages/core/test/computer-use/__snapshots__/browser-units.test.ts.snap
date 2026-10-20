@@ -4,6 +4,7 @@ exports[`the tool description snapshots, with and without vision 1`] = `
 "Run JavaScript (TypeScript syntax is fine) to see and control apps and browser tabs on this Mac. The runtime persists between calls: variables, bound apps and tabs survive. One call can do many steps — bind, act, wait, read — and only what you observe or print comes back.
 
 - Binding (\`apps.open\`, \`browsers.open\`, \`browsers.tab\`) prints the target's state. \`state()\` prints only what changed since you last saw it; pass \`{ full: true }\` for everything.
+- An app you hold can't be used by any other agent until you release it; release apps you no longer need (\`apps.release(app)\`, or \`apps.release()\` for all), and when another session asks you to release one, do it.
 - \`state()\`, \`screenshot()\` and the bind calls already show their result — calling \`print()\`/\`show()\` on them shows it twice. Use \`show()\` only for an image you read with \`{ emit: false }\`: \`const shot = await notes.screenshot({ emit: false }); if (changed) show(shot)\`.
 - Prefer element refs (the \`[n]\` numbers in state) over coordinates.
 - After acting, observe before deciding again — usually by ending the script with \`await app.state()\`.
@@ -106,6 +107,7 @@ interface Tab extends Target {
 }
 declare const apps: {
   list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;
+  release(app?: App | string): Promise<{ released: string[] }>;  // let go of a bound app (its handle, name or bundle id), or with none every app you hold: other agents can use it, and the handle is no longer bound
   open(target: string, o?: { window?: string | number; app?: string; emit?: boolean }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state (\`{ emit: false }\`: binds without printing it).
 };
 declare const browsers: {
@@ -146,6 +148,7 @@ exports[`the tool description snapshots, with and without vision 2`] = `
 "Run JavaScript (TypeScript syntax is fine) to see and control apps and browser tabs on this Mac. The runtime persists between calls: variables, bound apps and tabs survive. One call can do many steps — bind, act, wait, read — and only what you observe or print comes back.
 
 - Binding (\`apps.open\`, \`browsers.open\`, \`browsers.tab\`) prints the target's state. \`state()\` prints only what changed since you last saw it; pass \`{ full: true }\` for everything.
+- An app you hold can't be used by any other agent until you release it; release apps you no longer need (\`apps.release(app)\`, or \`apps.release()\` for all), and when another session asks you to release one, do it.
 - \`state()\` and the bind calls already show their result — calling \`print()\` on them shows it twice. Read with \`{ emit: false }\` when you only want the value: \`const s = await notes.state({ emit: false })\`.
 - Act on element refs: the \`[n]\` numbers in state.
 - After acting, observe before deciding again — usually by ending the script with \`await app.state()\`.
@@ -242,6 +245,7 @@ interface Tab extends Target {
 }
 declare const apps: {
   list(o?: Quiet): Promise<{ name: string; bundleId: string; running: boolean }[]>;
+  release(app?: App | string): Promise<{ released: string[] }>;  // let go of a bound app (its handle, name or bundle id), or with none every app you hold: other agents can use it, and the handle is no longer bound
   open(target: string, o?: { window?: string | number; app?: string; emit?: boolean }): Promise<App>;  // an app (name/bundle id/.app path) to bind, OR a file path / URL to OPEN — opened in the background in \`app\` or its default app, and that app is bound. To open a file or URL, always use apps.open — never Finder's Open, a double-click or a menu. Prints state (\`{ emit: false }\`: binds without printing it).
 };
 declare const browsers: {

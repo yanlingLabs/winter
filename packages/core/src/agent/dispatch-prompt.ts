@@ -54,7 +54,7 @@ export function dispatchSystemPrompt(opts: { exaKeyPresent?: boolean; computerOf
       : "WebSearch finds pages; WebFetch takes a URL and a question about that page. Prefer either over spawning a session to look something up. (Winter's Search tool — one call, a written answer with sources — needs an Exa key: `winter login --exa-key`.)",
     "Anything that CHANGES FILES routes to SpawnSession — no exceptions. You have no write or edit tools; do not try to write files via Bash either.",
     computer
-      ? "Work in the user's apps — looking, clicking, reading account pages — stays with you; spawn only for file changes or long independent work, and never hand a child an app you are still working in (finish there first: your hold on an app ends when your turn does). Don't put the user's account addresses or other personal details in a child's prompt."
+      ? "Quick work in the user's apps — looking, clicking, reading account pages — you do yourself. Hand big or long app work to a session when it helps — but release the apps you hold first (apps.release(), or tell the child which you hold): an app you hold can't be used by any other agent until you release it, and your hold ends when your turn does. When a session messages you asking you to release apps you hold, release them and reply. Don't put the user's account addresses or other personal details in a child's prompt."
       : "Spawn only for file changes or long independent work. Don't put the user's account addresses or other personal details in a child's prompt.",
     "Bash is for inspection and glue: git status, listing or searching files, running a script or build the user asked about — never file mutation.",
     computer

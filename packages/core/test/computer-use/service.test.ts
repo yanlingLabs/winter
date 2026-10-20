@@ -35,6 +35,9 @@ interface WorldOpts {
   dangerousAdded?: string[];
   attended?: boolean;
   answer?: (e: Extract<NewSessionEvent, { type: "approval_requested" }>, broker: ApprovalBroker) => void;
+  sessionLabel?: (sessionId: string) => string | undefined;
+  isDispatch?: (sessionId: string) => boolean;
+  coordinatorOf?: (sessionId: string) => string | undefined;
 }
 
 const services: ComputerV2Service[] = [];
@@ -77,6 +80,9 @@ function world(opts: WorldOpts = {}) {
     ...(opts.screenshotSink === undefined ? {} : { screenshotSink: opts.screenshotSink }),
     ...(opts.dangerousAdded === undefined ? {} : { site: { dangerousDomainsAdded: (cwd?: string) => (cwd === "/proj" ? opts.dangerousAdded : []) } }),
     sessionCwd: () => "/proj",
+    ...(opts.sessionLabel === undefined ? {} : { sessionLabel: opts.sessionLabel }),
+    ...(opts.isDispatch === undefined ? {} : { isDispatch: opts.isDispatch }),
+    ...(opts.coordinatorOf === undefined ? {} : { coordinatorOf: opts.coordinatorOf }),
   });
   services.push(svc);
   const run = (code: string, o: { sessionId?: string; vision?: boolean; timeoutMs?: number; reset?: boolean; signal?: AbortSignal; model?: string } = {}): Promise<ScriptResult> =>
@@ -514,13 +520,69 @@ describe("ComputerV2: AppleScript, an extra door beside the UI", () => {
 });
 
 describe("ComputerV2: locks, timeouts and cancellation", () => {
-  macOnly("two sessions on one app: the second waits, then TargetBusy names the holder", async () => {
-    const w = world();
-    const holder = w.run("const notes = await apps.open('Notes')\nawait sleep(3000)", { sessionId: "s_holder" });
+  // 2026-10-20 (the user's ruling): an app a session has bound is HELD — no other agent acts in it until it is released —
+  // and the refusal names the holder (its id and title or mode, never a pid) and how to get it released.
+  macOnly("two sessions on one app: the second is told who holds it, while running or idle, until it is released", async () => {
+    const w = world({ sessionLabel: (id) => (id === "s_holder" ? "“Order groceries”" : undefined) });
+    const holder = w.run("const notes = await apps.open('Notes')\nawait sleep(1500)", { sessionId: "s_holder" });
     await Bun.sleep(400);
-    const r = await w.run("try { await apps.open('Notes') } catch (e) { print(e.name, e.message) }", { sessionId: "s_other", timeoutMs: 2_000 });
-    expect(text(r)).toContain("TargetBusy Notes is in use by session s_holder");
+    const bindIn = (sid: string) => w.run("try { await apps.open('Notes'); print('bound') } catch (e) { print(e.name, e.message) }", { sessionId: sid, timeoutMs: 2_000 });
+    const held = "TargetBusy Notes is held by session s_holder (“Order groceries”); while it holds it, no other agent can act in it. Ask that session with SendMessage to release it (apps.release(\"Notes\")), or ask the user.";
+    expect(text(await bindIn("s_other"))).toContain(held);
     await holder;
+    // Idle between its scripts, it still holds Notes.
+    expect(text(await bindIn("s_other"))).toContain(held);
+    expect(w.fake.calls("target.bind")).toHaveLength(1);
+    // A document opened in a held app is refused the same way, before anything opens.
+    w.fake.handlers["apps.defaultOpener"] = () => ({ bundleId: "com.apple.Notes", name: "Notes", path: "/System/Applications/Notes.app" });
+    const opened = await w.run("try { await apps.open('/tmp/a.note') } catch (e) { print(e.name, e.message) }", { sessionId: "s_other" });
+    expect(text(opened)).toContain("TargetBusy Notes is held by session s_holder");
+    expect(w.fake.calls("apps.openDocument")).toHaveLength(0);
+    // Released: the other session binds at once, and the user's work mark on Notes lifts.
+    const rel = await w.run("print(JSON.stringify(await apps.release(notes)))", { sessionId: "s_holder" });
+    expect(text(rel)).toContain("released Notes — other agents can use it now");
+    expect(text(rel)).toContain('{"released":["Notes"]}');
+    expect(w.fake.calls("work.lift")).toContainEqual({ pids: [501], reason: "released" });
+    expect(text(await bindIn("s_other"))).toContain("bound");
+    // The released handle is no longer bound, and says why.
+    const stale = await w.run("try { await notes.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_holder" });
+    expect(text(stale)).toContain("TargetLost Notes was released (apps.release)");
+  }, 30_000);
+
+  macOnly("apps.release(): by name, all, or nothing held; an app no session holds any more has its work mark lifted", async () => {
+    const w = world();
+    await w.run("const notes = await apps.open('Notes')\nconst te = await apps.open('TextEdit')");
+    const none = await w.run("try { await apps.release('Mail') } catch (e) { print(e.name, e.message) }");
+    expect(text(none)).toContain("this session holds no app named \"Mail\" — it holds Notes, TextEdit");
+    expect(text(await w.run("await apps.release('com.apple.TextEdit')"))).toContain("released TextEdit");
+    expect(text(await w.run("await apps.release()"))).toContain("released Notes");
+    expect(text(await w.run("await apps.release()"))).toContain("this session holds no app");
+    expect(w.fake.calls("target.release").length).toBeGreaterThanOrEqual(2);
+  }, 30_000);
+
+  macOnly("Dispatch lets go of its apps when its turn ends; a code session keeps them", async () => {
+    const w = world({ isDispatch: (id) => id === "s_dispatch" });
+    await w.run("const chrome = await apps.open('Notes')", { sessionId: "s_dispatch" });
+    await w.run("const te = await apps.open('TextEdit')", { sessionId: "s_code" });
+    w.svc.turnEnded("s_dispatch");
+    w.svc.turnEnded("s_code");
+    expect(w.fake.calls("target.release").map((c) => c.targetId)).toEqual(["t1"]);
+    expect(w.fake.calls("work.lift")).toContainEqual({ pids: [501], reason: "turn_ended" });
+    const stale = await w.run("try { await chrome.state() } catch (e) { print(e.name, e.message) }", { sessionId: "s_dispatch" });
+    expect(text(stale)).toContain("TargetLost Dispatch let go of Notes when its last turn ended");
+    // Another session may bind it now; TextEdit stays held by the code session.
+    expect(text(await w.run("await apps.open('Notes'); print('ok')", { sessionId: "s_other" }))).toContain("ok");
+    expect(text(await w.run("try { await apps.open('TextEdit') } catch (e) { print(e.name) }", { sessionId: "s_other" }))).toContain("TargetBusy");
+  }, 30_000);
+
+  macOnly("the user's message to a session lifts their work mark on its apps and its Dispatch children's", async () => {
+    const w = world({ coordinatorOf: (id) => (id === "s_child" ? "s_dispatch" : undefined) });
+    await w.run("const n = await apps.open('Notes')", { sessionId: "s_child" });
+    await w.run("const t = await apps.open('TextEdit')", { sessionId: "s_unrelated" });
+    w.svc.userSaidGoAhead("s_dispatch");
+    expect(w.fake.calls("work.lift")).toEqual([{ pids: [501], reason: "message" }]);
+    w.svc.userSaidGoAhead("s_unrelated");
+    expect(w.fake.calls("work.lift").at(-1)).toEqual({ pids: [502], reason: "message" });
   }, 30_000);
 
   macOnly("a timeout cancels the in-flight primitive (Cancelled) and the runtime survives", async () => {

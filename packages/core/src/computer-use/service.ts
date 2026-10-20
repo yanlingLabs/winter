@@ -107,6 +107,12 @@ export interface ComputerV2ServiceDeps {
   site?: SiteFloorDeps;
   /** A session's working directory (a trusted project's own dangerous domains — review of round 14, LOW #7). */
   sessionCwd?(sessionId: string): string | undefined;
+  /** How another session's words name a session: its title, else its mode ("Dispatch"); undefined when unknown. */
+  sessionLabel?(sessionId: string): string | undefined;
+  /** Is this session Dispatch's coordinator (its apps are let go when its turn ends)? */
+  isDispatch?(sessionId: string): boolean;
+  /** The Dispatch coordinator a session was spawned by (a user's message to it speaks for its children too). */
+  coordinatorOf?(sessionId: string): string | undefined;
   /** Resolves a path or an unlisted bundle id to a bundle id WITHOUT launching (`app-resolve.ts`). */
   appResolver?: AppResolver;
   idleMs?: number;
@@ -613,6 +619,7 @@ export class ComputerV2Service {
         const window = typeof args.window === "string" || typeof args.window === "number" ? args.window : undefined;
         return await this.bind(ctx, { app: target, ...(window === undefined ? {} : { window }), quiet }, metric);
       }
+      case "apps.release": return this.releaseApps(ctx, args);
       case "screen.screenshot": return await this.screenScreenshot(ctx, args, metric);
       case "screen.windows": return await this.screenWindows(ctx, args, metric);
       case "screen.appAt": return await this.screenAppAt(ctx, args, metric);
@@ -927,6 +934,7 @@ export class ComputerV2Service {
       ctx, "apps.defaultOpener", { urls, ...(opener === undefined ? {} : { app: opener }) }, metric);
     this.live(ctx);
     const app: AppRef = { bundleId: who.bundleId, name: who.name };
+    this.refuseIfHeldElsewhere(ctx, app);
     await this.deps.policy.authorize(ctx.grants, app, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
     const res = await this.helperCall<{ app: { name: string; bundleId: string; pid: number }; windowID?: number }>(
@@ -951,6 +959,7 @@ export class ComputerV2Service {
   /** `apps.open` / `screen.appAt`: policy BEFORE the helper launches anything, bind, lock, print the full state. */
   private async bind(ctx: RunCtx, req: { app: string; window?: string | number; known?: AppRef; quiet?: boolean }, metric: PrimitiveMetric): Promise<AppHandle> {
     const known: AppRef & { path?: string } = req.known ?? await this.identifyApp(ctx, req.app, metric);
+    this.refuseIfHeldElsewhere(ctx, known);
     await this.deps.policy.authorize(ctx.grants, known, { kind: "bind" }, ctx.abort.signal);
     this.live(ctx);
     const settings = this.deps.settings();
@@ -1894,7 +1903,89 @@ export class ComputerV2Service {
   /** A main-thread turn ended: the helper fades that session's mirrors. */
   turnEnded(sessionId: string): void {
     this.deps.browsers?.turnEnded(sessionId);
-    if (this.sessions.has(sessionId)) this.deps.helper.tell("turn.ended", { sessionId });
+    const state = this.sessions.get(sessionId);
+    if (state === undefined) return;
+    this.deps.helper.tell("turn.ended", { sessionId });
+    // Dispatch lets go of its apps at its turn's end (2026-10-20, live): an app it bound and left idle between turns was
+    // held from every other agent, and a click of the user's in it marked it "the user is working in it" for whoever came
+    // next. A code session keeps its bindings (and their protection of the user's work) until it releases them.
+    let dispatch = false;
+    try { dispatch = this.deps.isDispatch?.(sessionId) === true; } catch { dispatch = false; }
+    if (dispatch && state.active === undefined) this.releaseTargets(sessionId, state, [...state.targets.values()], "turn_ended");
+  }
+
+  // ── holds: an app a session has bound is held from every other agent until released ─────────────────────────────
+
+  /** Another session that holds this app (a target of it bound and not let go), if any. */
+  holderOf(bundleId: string, exceptSession: string): string | undefined {
+    const want = bundleId.toLowerCase();
+    for (const [sid, st] of this.sessions) {
+      if (sid === exceptSession) continue;
+      for (const t of st.targets.values()) if (t.lost === undefined && t.bundleId.toLowerCase() === want) return sid;
+    }
+    return undefined;
+  }
+
+  /** A bind (or an open) of an app another session holds: refused, naming the holder and how to get it released. */
+  private refuseIfHeldElsewhere(ctx: RunCtx, app: AppRef): void {
+    const holder = this.holderOf(app.bundleId, ctx.sessionId);
+    if (holder === undefined) return;
+    let label: string | undefined;
+    try { label = this.deps.sessionLabel?.(holder); } catch { label = undefined; }
+    throw new AutomationFailure("TargetBusy", heldMessage(app.name, holder, label));
+  }
+
+  /** `apps.release(app?)`: let go of one bound app (a handle, a name or a bundle id) or, with none, every app this session
+   *  holds — other agents may use them then, and the user's work mark on them lifts. */
+  private releaseApps(ctx: RunCtx, args: Record<string, unknown>): { released: string[] } {
+    const live = [...ctx.state.targets.values()].filter((t) => t.lost === undefined);
+    let chosen = live;
+    const targetId = str(args.targetId);
+    const app = str(args.app)?.trim();
+    if (targetId !== undefined) chosen = live.filter((t) => t.targetId === targetId);
+    else if (app !== undefined && app.length > 0) {
+      const want = app.toLowerCase();
+      chosen = live.filter((t) => t.bundleId.toLowerCase() === want || t.name.toLowerCase() === want);
+      if (chosen.length === 0) throw bad(`apps.release(): this session holds no app named "${app.slice(0, 120)}"${live.length === 0 ? "" : ` — it holds ${[...new Set(live.map((t) => t.name))].join(", ")}`}`);
+    }
+    const released = this.releaseTargets(ctx.sessionId, ctx.state, chosen, "released");
+    for (const id of chosen.map((t) => t.targetId)) ctx.bound.delete(id);
+    ctx.builder.daemonLine(released.length === 0 ? "this session holds no app" : `released ${released.join(", ")} — other agents can use ${released.length === 1 ? "it" : "them"} now`);
+    return { released };
+  }
+
+  /** Lets go of these targets (`lost` = `reason`): the helper releases each, and the user's work mark lifts on every app no
+   *  session holds any more. The names released, once each. */
+  private releaseTargets(sessionId: string, state: SessionState, targets: TargetInfo[], reason: "released" | "turn_ended"): string[] {
+    const names: string[] = [];
+    const pids = new Set<number>();
+    for (const t of targets) {
+      if (t.lost !== undefined) continue;
+      t.lost = reason;
+      this.diffBases.clearTarget(sessionId, t.targetId);
+      state.lastTargetShot.delete(t.targetId);
+      this.deps.helper.tell("target.release", { targetId: t.targetId });
+      if (!names.includes(t.name)) names.push(t.name);
+      pids.add(t.pid);
+    }
+    const stillHeld = new Set<number>();
+    for (const st of this.sessions.values()) for (const t of st.targets.values()) if (t.lost === undefined) stillHeld.add(t.pid);
+    const lift = [...pids].filter((p) => !stillHeld.has(p));
+    if (lift.length > 0) this.deps.helper.tell("work.lift", { pids: lift, reason });
+    return names;
+  }
+
+  /** The user wrote to `sessionId` (a human-origin message): "go ahead" — their work mark lifts on every app that session
+   *  and its Dispatch children hold. */
+  userSaidGoAhead(sessionId: string): void {
+    const pids = new Set<number>();
+    for (const [id, state] of this.sessions) {
+      let spoken = id === sessionId;
+      if (!spoken) { try { spoken = this.deps.coordinatorOf?.(id) === sessionId; } catch { spoken = false; } }
+      if (!spoken) continue;
+      for (const t of state.targets.values()) if (t.lost === undefined) pids.add(t.pid);
+    }
+    if (pids.size > 0) this.deps.helper.tell("work.lift", { pids: [...pids], reason: "message" });
   }
 
   /** Stop one session's script and its turn, as the helper's Esc does — the browser engine's door for the
@@ -2153,8 +2244,15 @@ export function openedWindowGone(err: unknown, windowId: number): boolean {
   return err instanceof HelperRpcError && err.code === "invalid_params" && err.message.includes(`has no window ${windowId}`);
 }
 
+/** Another session holds the app: who, and how to get it released. */
+export function heldMessage(name: string, holder: string, label?: string): string {
+  return `${name} is held by session ${holder}${label === undefined || label.length === 0 ? "" : ` (${label.slice(0, 80)})`}; while it holds it, no other agent can act in it. Ask that session with SendMessage to release it (apps.release("${name}")), or ask the user.`;
+}
+
 export function targetLostMessage(name: string, reason: string): string {
   switch (reason) {
+    case "released": return `${name} was released (apps.release) — bind it again with apps.open() if you need it`;
+    case "turn_ended": return `Dispatch let go of ${name} when its last turn ended — bind it again with apps.open()`;
     case "app_quit": return `${name} quit — open it again with apps.open()`;
     case "window_closed": return `${name}'s window closed — call apps.open or useWindow to pick another`;
     case "helper_restart": return `Winter Computer Use restarted, so ${name} is no longer bound — bind it again with apps.open()`;
@@ -2171,7 +2269,7 @@ function refusedWords(reason: string, name: string): string {
     case "focus_not_editable": return `the focus in ${name} is not a text field, so nothing was typed — click the field or pass { into }`;
     case "focus_moved": return `the focus left the field partway in ${name}, so the rest was not typed — check state(), then type the rest with { into }`;
     case "app_in_front": return `${name} came to the front while the action was being prepared — the user may be using it now, so nothing was sent; check state(), and try again if it is still wanted`;
-    case "user_working": return `the user is working in ${name} right now — wait and retry, or ask them (reading it with state(), find() or screenshot() still works)`;
+    case "user_working": return `the user is working in ${name} right now — ask the user to switch away from ${name} for a moment, or to say go ahead (their next message lets you act); reading it with state(), find() or screenshot() still works`;
     case "wrong_field_shape": return `the text does not fit the field that has the focus in ${name} (several lines, or a long text, for a one-line field or the browser's own) — pass { into } for the field you mean`;
     case "auth_dialog": return "that is a system authentication dialog — ask the user to handle it";
     case "privacy_pane": return "System Settings' Privacy & Security panes are off limits — ask the user to change them";

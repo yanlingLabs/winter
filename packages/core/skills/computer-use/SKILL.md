@@ -45,6 +45,7 @@ Notes — window "Groceries" · focused [14] · settled 120 ms
 - To open a file or a URL, always `apps.open`: `await apps.open('/Users/me/menu.pdf')`, or `await apps.open('https://example.com', { app: 'Safari' })`. Never Finder's Open or a double-click.
 - The user approves each app once, the first time you bind it. If they decline, do not retry: ask them.
 - Which apps exist: `await apps.list()`.
+- An app you hold can't be used by any other agent until you release it; release apps you no longer need (`await apps.release(notes)`, or `await apps.release()` for all), and when another session asks you to release one, do it. A bind of an app another session holds fails `TargetBusy` naming that session: ask it with SendMessage to release the app, or ask the user.
 
 ## 2. Click a ref and verify with a diff
 

@@ -468,6 +468,17 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       ...(deps.savedAllowRules === undefined ? {} : { savedAllowRules: deps.savedAllowRules }),
     },
     sessionCwd: (sessionId) => deps.store.meta(sessionId).cwd ?? undefined,
+    sessionLabel: (sessionId) => {
+      const title = deps.store.getTitle(sessionId);
+      if (title !== null && title.trim().length > 0) return `“${title.trim()}”`;
+      const mode = deps.store.meta(sessionId).mode;
+      return mode === "dispatch" ? "Dispatch" : mode === undefined ? undefined : `a ${mode} session`;
+    },
+    isDispatch: (sessionId) => deps.store.meta(sessionId).mode === "dispatch",
+    coordinatorOf: (sessionId) => {
+      const m = deps.store.meta(sessionId);
+      return m.origin === "dispatch-child" ? m.parentSessionId : undefined;
+    },
     telemetry,
     ...(deps.audit === undefined ? {} : { audit: deps.audit }),
     ...(deps.interrupt === undefined ? {} : { interrupt: deps.interrupt }),
@@ -577,7 +588,11 @@ export function createComputerUseRuntime(deps: ComputerUseRuntimeDeps): Computer
       svc.hoverNotes.observe(event);
       // 5a: the USER's next message lifts the session's desktop-switch refusals (and its dispatch children's).
       const lift = desktopRefusalLiftFor(event);
-      if (lift !== undefined) policy.liftDesktopRefusals(lift);
+      if (lift !== undefined) {
+        policy.liftDesktopRefusals(lift);
+        // …and "go ahead" in the apps it (and its Dispatch children) hold: the user's work mark lifts there.
+        svc.userSaidGoAhead(lift);
+      }
       // A built-in tab closed in the strip (by the user, or by Winter): the engine lets go of it.
       if (event.type === "panel_tab_closed") browsers.panelTabClosed(event.sessionId, (event as { tabId: string }).tabId);
       if (event.type === "turn_completed") {

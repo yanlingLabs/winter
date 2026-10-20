@@ -117,6 +117,8 @@ describe("the service records its helper input per app", () => {
     expect(svc.ownAppInputAt("com.apple.Notes", ended + WAKE_LIMITS.ownInputGraceMs + 100)).toBe(false);
     // Another session that only READS the app sends it no input.
     await Bun.sleep(WAKE_LIMITS.ownInputGraceMs + 150);
+    // (s1 lets go of Notes first: an app one session holds, no other binds.)
+    await svc.run({ sessionId: "s1", vision: true, model: "anthropic/claude-opus-5-5" }, { code: "await apps.release()" });
     const before = Date.now();
     const read = await svc.run({ sessionId: "s2", vision: true, model: "anthropic/claude-opus-5-5" }, {
       code: "const notes = await apps.open('Notes', { emit: false })\nawait notes.state()",

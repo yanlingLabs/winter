@@ -423,15 +423,18 @@ describe("dispatch's base prompt — act first, ask with the tool, click by ref"
 
   // 2026-10-20 (live): Dispatch bound Chrome, spawned a child for the same window with the user's account address in its
   // prompt, and the child was locked out of the app for three minutes.
-  test("app work stays with Dispatch; a child never gets an app it is in, nor the user's personal details", () => {
+  test("quick app work stays with Dispatch, big app work may go to a session once its apps are released; release on request; no personal details", () => {
     for (const computerOffered of ["ComputerV2", "Computer"] as const) {
       const text = dispatchSystemPrompt({ computerOffered });
-      expect(text).toContain("Work in the user's apps — looking, clicking, reading account pages — stays with you; spawn only for file changes or long independent work");
-      expect(text).toContain("never hand a child an app you are still working in (finish there first: your hold on an app ends when your turn does)");
+      expect(text).toContain("Quick work in the user's apps — looking, clicking, reading account pages — you do yourself.");
+      expect(text).toContain("Hand big or long app work to a session when it helps — but release the apps you hold first (apps.release(), or tell the child which you hold)");
+      expect(text).toContain("When a session messages you asking you to release apps you hold, release them and reply.");
       expect(text).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
+      expect(text).not.toContain("stays with you");
     }
     const off = dispatchSystemPrompt({ computerOffered: false });
-    expect(off).not.toContain("Work in the user's apps");
+    expect(off).not.toContain("Quick work in the user's apps");
+    expect(off).not.toContain("apps.release");
     expect(off).toContain("Don't put the user's account addresses or other personal details in a child's prompt.");
   });
 
