@@ -55,15 +55,26 @@ struct DispatchPillCardView: View {
             section(.header)
             if flat {
                 section(.content)
+            } else if contentHeight <= bodyCap {
+                // A body that FITS is laid out flat, never in a scroll view (user, 2026-10-20: "the question cards don't
+                // let me select an option"). The pill is a non-activating panel over another app: AppKit asks the HIT
+                // view whether it acts on the first click, and a `ScrollView`'s clip view and SwiftUI containers say no —
+                // so every click on an option (the body) only tried to make the panel key and was lost, while the
+                // header and the ✓ row, on the pill's own `FirstClickHostingView`, worked. Flat, the body is that view's
+                // too (`DispatchPillQuestionClickTests`).
+                section(.content)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
             } else {
+                // Taller than the cap: it scrolls. (Its controls keep the scroll view's first-click limit — a long
+                // approval summary's allow-always rows, a long plan; question cards stay far below the cap.)
                 ScrollView(.vertical) {
                     section(.content)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
                 }
-                .frame(height: min(contentHeight, bodyCap))
-                .scrollDisabled(contentHeight <= bodyCap)
-                .scrollIndicators(contentHeight > bodyCap ? .automatic : .never)
+                .frame(height: bodyCap)
+                .scrollIndicators(.automatic)
             }
             section(.actions)
         }
