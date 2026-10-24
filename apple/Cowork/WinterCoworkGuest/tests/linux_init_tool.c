@@ -176,6 +176,49 @@ int main(int argc, char **argv) {
         printf("rc=%d\n", op_prepare_conversation_dirs(NULL, &set));
         return 0;
     }
+    if (argc >= 3 && strcmp(argv[1], "shares") == 0) {       /* KIND:RO:TAG:PATH...: op_mount_shares with SHARES_ROOT and SHARES_SYS_ROOT test paths (-D), the real mount(2) */
+        static struct wg_share_set set;
+        memset(&set, 0, sizeof set);
+        for (int i = 2; i < argc && set.count < WG_SHARES_MAX; i++) {
+            struct wg_share *share = &set.item[set.count++];
+            char kind[16];
+            int ro = 0, used = 0;
+            if (sscanf(argv[i], "%15[a-z]:%d:%32[a-z0-9-]:%n", kind, &ro, share->tag, &used) != 3 || used == 0) return 2;
+            snprintf(share->guest_path, sizeof share->guest_path, "%s", argv[i] + used);
+            share->read_only = ro;
+            share->kind = strcmp(kind, "folder") == 0 ? WG_SHARE_FOLDER : strcmp(kind, "guidance") == 0 ? WG_SHARE_GUIDANCE : strcmp(kind, "memory") == 0 ? WG_SHARE_MEMORY : WG_SHARE_OUTPUTS;
+        }
+        unsigned mounted = 99;
+        int rc = op_mount_shares(NULL, &set, &mounted);
+        printf("rc=%d mounted=%u\n", rc, mounted);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "umountshare") == 0) {  /* GUEST_PATH below SHARES_ROOT */
+        printf("rc=%d\n", op_umount_share(NULL, argv[2]));
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "mountinfo") == 0) {    /* WHERE: this process's real mount table, read and parsed as PID 1 does */
+        static char table[WG_MOUNTINFO_MAX];
+        long length = sop_read_mountinfo(NULL, table, sizeof table);
+        struct wg_mountinfo_entry entry;
+        memset(&entry, 0, sizeof entry);
+        int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, argv[2], &entry);
+        printf("count=%d\n", count);
+        if (count > 0) printf("root=%s\nmount_point=%s\noptions=%s\nfstype=%s\nsource=%s\nsuper=%s\n", entry.root, entry.mount_point, entry.options, entry.fstype, entry.source, entry.super_options);
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "realmount") == 0) {    /* TARGET: inside a user and mount namespace, a real tmpfs mount with a share's flags, then its own table */
+        if (mount("winter-probe", argv[2], "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RDONLY, "size=1m") != 0) { printf("mount-failed\n"); return 0; }
+        static char table[WG_MOUNTINFO_MAX];
+        long length = sop_read_mountinfo(NULL, table, sizeof table);
+        struct wg_mountinfo_entry entry;
+        memset(&entry, 0, sizeof entry);
+        int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, argv[2], &entry);
+        printf("count=%d\n", count);
+        if (count > 0) printf("root=%s\nmount_point=%s\noptions=%s\nfstype=%s\nsource=%s\nsuper=%s\n", entry.root, entry.mount_point, entry.options, entry.fstype, entry.source, entry.super_options);
+        printf("umount=%d\n", umount2(argv[2], 0));
+        return 0;
+    }
 #endif
     fprintf(stderr, "usage\n");
     return 2;

@@ -1994,6 +1994,147 @@ class ConversationSessionTests(unittest.TestCase):
 
 
 
+class LateChannel(FakeChannel):
+    """The host's next message is not there yet when the helper looks for one; it arrives later (while PID 1 mounts, or after the answer)."""
+    def has_pending(self):
+        return False
+
+
+class ShareSessionTests(unittest.TestCase):
+    """The helper's half of the share step (revision 3, design 2026-10-18 section 2.5): it judges and binds the host's `shares`, hands PID 1 the set, and turns
+    PID 1's one-byte answer into `shares_mounted` or a share fault. A set that follows a share step that did not end in `shares_mounted` never reaches PID 1."""
+    BOOT = "66666666-6666-4666-8666-666666666666"
+    OK = (gb.TAG_SHARES_RESULT, bytes([gb.SHARES_MOUNTED]))
+
+    def run_session(self, after_mounted, channel_class=FakeChannel):
+        incoming = [down("bootstrap-down-plan"), down("bootstrap-down-ready"), (gb.TAG_MOUNT_RESULT, b"\x01"), *after_mounted]
+
+        class D:
+            def close(self):
+                pass
+
+        channel = channel_class(incoming)
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        return session.run(), channel
+
+    def kinds(self, channel):
+        out = []
+        for tag, body in channel.sent:
+            if tag != gb.TAG_UP:
+                out.append(chr(tag))
+                continue
+            message = gb.parse_bootstrap_message(body, "up")
+            out.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
+        return out
+
+    @staticmethod
+    def shares_message():
+        return gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-shares"]), "down")
+
+    @staticmethod
+    def body(message):
+        return (gb.TAG_DOWN, gb.canonical_text(message).encode())
+
+    def test_a_bound_share_set_goes_to_pid_1_and_a_yes_is_answered_with_shares_mounted_then_the_set_may_start(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E", "S", "shares_mounted", "C", "runtime_ready"])
+        self.assertEqual(channel.sent[5][1], gb.shares_payload(self.shares_message()))
+        self.assertEqual(channel.sent[6][1], payload_of(POSITIVE["bootstrap-up-shares-mounted"]))   # byte for byte the contract's vector
+
+    def test_the_payload_to_pid_1_is_kind_flags_tag_and_path_per_share(self):
+        message = self.shares_message()
+        payload = gb.shares_payload(message)
+        at, items = 1, []
+        self.assertEqual(payload[0], len(message["shares"]))
+        for _ in range(payload[0]):
+            kind, flags, tag_length = payload[at], payload[at + 1], payload[at + 2]
+            tag = payload[at + 3:at + 3 + tag_length].decode()
+            at += 3 + tag_length
+            path = payload[at + 1:at + 1 + payload[at]].decode()
+            at += 1 + payload[at]
+            items.append({"tag": tag, "guestPath": path, "readOnly": flags == 1, "kind": ["folder", "guidance", "memory", "outputs"][kind]})
+        self.assertEqual(at, len(payload))
+        self.assertEqual(items, message["shares"])
+        self.assertEqual({item["kind"] for item in items}, {"folder", "guidance", "memory", "outputs"})
+
+    def test_pid_1s_two_refusals_become_the_two_share_faults_and_no_set_reaches_pid_1_after_either(self):
+        for result, code, vector in ((gb.SHARES_INVENTORY, "share_inventory", "bootstrap-up-fault-share-inventory"), (gb.SHARES_MOUNT_FAILED, "share_mount_failed", "bootstrap-up-fault-share-mount-failed"),
+                                     (7, "share_mount_failed", "bootstrap-up-fault-share-mount-failed")):
+            with self.subTest(code=code, result=result):
+                status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_SHARES_RESULT, bytes([result])), down("bootstrap-down-conversations-guided")])
+                self.assertEqual(status, 0)
+                self.assertEqual(self.kinds(channel)[-3:], ["S", "fault:" + code, "fault:bad_conversations"])
+                self.assertEqual(channel.sent[-2][1], payload_of(POSITIVE[vector]))
+                self.assertNotIn("C", self.kinds(channel))
+                self.assertNotIn("shares_mounted", self.kinds(channel))
+
+    def test_a_share_set_that_names_another_operation_or_nonce_mounts_nothing(self):
+        for key, value in (("nonce", "ab" * 16), ("operationId", "filesystem_77777777-7777-4777-8777-777777777777")):
+            with self.subTest(key):
+                message = self.shares_message()
+                message[key] = value
+                status, channel = self.run_session([self.body(message)])
+                self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:share_mount_failed"))
+                self.assertNotIn("S", self.kinds(channel))
+                status, channel = self.run_session([self.body(message), down("bootstrap-down-conversations-guided")], LateChannel)
+                self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+                self.assertNotIn("S", self.kinds(channel))
+                self.assertNotIn("C", self.kinds(channel))
+                # the fault is said under the exchange's own ids, never the ones the stray message named
+                fault = gb.parse_bootstrap_message(channel.sent[-2][1], "up")
+                plan = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-plan"]), "down")
+                self.assertEqual((fault["operationId"], fault["nonce"]), (plan["operationId"], plan["nonce"]))
+
+    def test_the_host_speaking_before_it_could_have_seen_shares_mounted_mounts_nothing(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_host_message_that_arrives_while_pid_1_mounts_turns_the_answer_into_a_fault(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_DOWN, payload_of(POSITIVE["bootstrap-down-conversations-guided"])), self.OK], LateChannel)
+        self.assertEqual(self.kinds(channel)[-3:], ["S", "fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("shares_mounted", self.kinds(channel))
+        self.assertNotIn("C", self.kinds(channel))
+
+    def test_a_second_share_set_or_one_after_the_conversation_set_mounts_nothing(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")], LateChannel)
+        self.assertEqual(self.kinds(channel)[-3:], ["shares_mounted", "fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertEqual(self.kinds(channel).count("S"), 1)
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), down("bootstrap-down-shares")], LateChannel)
+        self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:share_mount_failed"])
+        self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_broken_share_set_is_answered_and_blocks_the_set(self):
+        broken = payload_of(POSITIVE["bootstrap-down-shares"]).replace(b'"kind":"memory"', b'"kind":"memories"')
+        status, channel = self.run_session([(gb.TAG_DOWN, broken), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("S", self.kinds(channel))
+        for name in ("shares-empty-list", "shares-thirteen", "shares-ten-folders", "shares-duplicate-tag", "shares-duplicate-guest-path", "shares-guidance-writable",
+                     "shares-memory-read-only", "shares-outputs-wrong-mount", "shares-folder-nested-mount", "shares-folder-outside-folders", "shares-two-memory"):
+            with self.subTest(name):
+                status, channel = self.run_session([(gb.TAG_DOWN, bytes.fromhex(NEGATIVE[name]["hex"])[16:])])
+                self.assertEqual(self.kinds(channel)[-1], "fault:share_mount_failed")
+                self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_broken_channel_while_pid_1_mounts_ends_the_helper(self):
+        status, channel = self.run_session([down("bootstrap-down-shares")])
+        self.assertEqual(status, 2)
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_MOUNT_RESULT, b"\x01")])
+        self.assertEqual(status, 2)
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_SHARES_RESULT, b"\x00\x00")])
+        self.assertEqual(status, 2)
+
+    def test_the_revision_two_helper_does_not_know_shares(self):
+        gb.set_revision_three(False)
+        self.addCleanup(gb.set_revision_three, True)
+        message = json.loads(payload_of(POSITIVE["bootstrap-down-shares"]))
+        message["v"] = 1
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(gb.canonical_text(message).encode(), "down")
+        self.assertEqual(caught.exception.code, "unknown_type")
+
+
 def time_now():
     import time
     return time.monotonic()
@@ -2059,9 +2200,11 @@ class RecordingChannel(FakeChannel):
 class BootstrapOrderVectorTests(unittest.TestCase):
     """bootstrap-order.json: 25 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
     cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason. The nine transcripts that carry host-backed
-    `shares` need a guest that mounts shares (SH6); this guest answers `shares` with the share-inventory fault and mounts nothing, which
-    test_a_shares_message_is_answered_with_the_share_inventory_fault holds, so they are left out of the tests that complete a transcript."""
+    `shares` (contract revision 3, SH6) are completed like the others: PID 1's answer to the helper's 'S' comes just before the `up` message it leads to."""
     BOOT = "66666666-6666-4666-8666-666666666666"
+    SHARE_CASES = ("full-sequence-with-shares", "shares-without-conversations", "conversations-before-shares-mounted", "shares-after-conversations", "shares-before-mounted",
+                   "shares-mounted-without-shares", "shares-twice", "shares-mounted-travelling-down", "fault-answering-shares")
+
     @staticmethod
     def with_shares(case):
         return any(e["t"] in ("shares", "shares_mounted") for e in case["events"])
@@ -2070,21 +2213,28 @@ class BootstrapOrderVectorTests(unittest.TestCase):
               "shares": lambda: payload_of(POSITIVE["bootstrap-down-shares"]),
               "conversations": lambda: payload_of(POSITIVE["bootstrap-down-conversations-guided"]),
               "mounted": lambda: payload_of(POSITIVE["bootstrap-up-mounted"]),
+              "shares_mounted": lambda: payload_of(POSITIVE["bootstrap-up-shares-mounted"]),
               "reboot": lambda: gb.canonical_text({"v": 2, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
 
     def inputs_for(self, events):
         """The channel the transcript's `down` events make: PID 1's mount and supervisor answers come after the message that asks for them."""
         incoming = []
         pending_answer = None
+        last_down = None
         for index, (direction, kind) in enumerate(events):
             if direction == "up":
                 if kind == "mounted":   # PID 1 answers the guest's mount request just before the guest says `mounted`
                     incoming.append((gb.TAG_MOUNT_RESULT, b"\x01"))
+                if kind == "shares_mounted":   # and its share step just before `shares_mounted`
+                    incoming.append((gb.TAG_SHARES_RESULT, bytes([gb.SHARES_MOUNTED])))
+                if kind == "fault" and last_down == "shares" and pending_answer is None:   # a share step that failed (the inventory did not match)
+                    incoming.append((gb.TAG_SHARES_RESULT, bytes([gb.SHARES_INVENTORY])))
                 if pending_answer is not None and kind in ("runtime_ready", "fault"):
                     incoming.append(pending_answer(kind))
                     pending_answer = None
                 continue
             incoming.append((gb.TAG_DOWN, self.BODIES[kind]()))
+            last_down = kind
             if kind == "conversations" and pending_answer is None:
                 pending_answer = lambda up: (gb.TAG_CONVERSATIONS_RESULT, bytes([2, 0]) if up == "fault" else bytes([0, 1]))
         if pending_answer is not None:
@@ -2111,7 +2261,7 @@ class BootstrapOrderVectorTests(unittest.TestCase):
         not_applicable = {"plan-before-hello"}   # the guest sends `hello` before it reads anything, so a plan can never be the first message of its transcript
         names = []
         for case in ORDER_VECTORS["cases"]:
-            if case["name"] in not_applicable or self.with_shares(case):
+            if case["name"] in not_applicable:
                 continue
             names.append(case["name"])
             with self.subTest(case["name"]):
@@ -2138,11 +2288,12 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                     self.assertEqual(merged[result["index"]], violating)
                 self.assertLessEqual(merged.count(("up", "runtime_ready")), 1)
                 self.assertLessEqual(sum(1 for tag, _ in channel.sent if tag == gb.TAG_CONVERSATIONS), 1)
-        self.assertEqual(len(names), 15)
+        self.assertEqual(len(names), 24)
+        self.assertEqual(sorted(c["name"] for c in ORDER_VECTORS["cases"] if self.with_shares(c)), sorted(self.SHARE_CASES))
 
     def test_the_guest_says_runtime_ready_only_for_a_set_that_came_after_mounted(self):
         for case in ORDER_VECTORS["cases"]:
-            if case["name"] == "plan-before-hello" or self.with_shares(case):
+            if case["name"] == "plan-before-hello":
                 continue
             with self.subTest(case["name"]):
                 events = [(e["dir"], e["t"]) for e in case["events"]]
@@ -2151,14 +2302,21 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                     at = merged.index(("up", "runtime_ready"))
                     self.assertIn(("down", "conversations"), merged[:at])
                     self.assertIn(("up", "mounted"), merged[:merged.index(("down", "conversations"))])
+                    # a set that came after a share set starts only once that share set was mounted and the host was told so
+                    if ("down", "shares") in merged[:merged.index(("down", "conversations"))]:
+                        self.assertIn(("up", "shares_mounted"), merged[:merged.index(("down", "conversations"))])
 
-    def test_a_shares_message_is_answered_with_the_share_inventory_fault(self):
-        """The guest has no share support (SH6): after `mounted` a `shares` message gets `share_inventory`, nothing is mounted, and no `shares_mounted` is ever said."""
-        events = [("down", "plan"), ("down", "ready"), ("up", "mounted"), ("down", "shares")]
-        channel = self.run_guest(events)
-        ups = [gb.parse_bootstrap_message(body, "up") for tag, body in channel.sent if tag == gb.TAG_UP]
-        self.assertEqual([m["t"] + (":" + m["code"] if m["t"] == "fault" else "") for m in ups], ["hello", "receipt", "mounted", "fault:share_inventory"])
-        self.assertNotIn("shares_mounted", [m["t"] for m in ups])
+    def test_the_share_set_reaches_pid_1_only_in_order_and_shares_mounted_only_after_pid_1_said_yes(self):
+        reached = {}
+        for case in ORDER_VECTORS["cases"]:
+            if case["name"] == "plan-before-hello":
+                continue
+            channel = self.run_guest([(e["dir"], e["t"]) for e in case["events"]])
+            reached[case["name"]] = sum(1 for tag, _ in channel.sent if tag == gb.TAG_SHARES)
+            ups = [gb.parse_bootstrap_message(body, "up")["t"] for tag, body in channel.sent if tag == gb.TAG_UP]
+            self.assertLessEqual(ups.count("shares_mounted"), reached[case["name"]], case["name"])
+        self.assertEqual({name for name, count in reached.items() if count}, {"full-sequence-with-shares", "shares-without-conversations", "fault-answering-shares"})
+        self.assertEqual(max(reached.values()), 1)
 
     def test_exact_outputs_for_the_violations_by_the_host(self):
         expect = {
@@ -2169,6 +2327,16 @@ class BootstrapOrderVectorTests(unittest.TestCase):
             "second-set-before-the-answer": ["hello", "receipt", "mounted", "runtime_ready", "fault:second_conversations"],
             "unknown-message": ["hello", "fault:bad_plan"],
             "mounted-travelling-down": ["hello", "receipt", "fault:bad_plan"],
+            # the nine transcripts with host-backed shares (SH6)
+            "full-sequence-with-shares": ["hello", "receipt", "mounted", "shares_mounted", "runtime_ready"],
+            "shares-without-conversations": ["hello", "receipt", "mounted", "shares_mounted"],
+            "conversations-before-shares-mounted": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "shares-after-conversations": ["hello", "receipt", "mounted", "runtime_ready", "fault:share_mount_failed"],
+            "shares-before-mounted": ["hello", "receipt", "fault:bad_plan"],
+            "shares-mounted-without-shares": ["hello", "receipt", "mounted"],
+            "shares-twice": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "shares-mounted-travelling-down": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "fault-answering-shares": ["hello", "receipt", "mounted", "fault:share_inventory"],
         }
         for name, ups in expect.items():
             with self.subTest(name):

@@ -277,6 +277,39 @@ class GuestFilesTests(unittest.TestCase):
                 with self.assertRaises(ValueError):image.refuse_blkid(tree)
         image.refuse_blkid(Tree())
 
+class GitConfigTests(unittest.TestCase):
+    """R15: the image's system gitconfig sets init.templateDir to an empty, root-owned directory, so git never makes `.git/hooks` in a read-write folder share."""
+    BASE='opt/winter/environment/base'
+    def tree(self):
+        tree=Tree()
+        tree.add(self.BASE+'/etc/ssl/certs/x','file',b'x');tree.add(self.BASE+'/usr/bin/git','file',b'git',True)
+        for name in ('etc','usr'):tree.add(name,'symlink',(self.BASE+'/'+name).encode())
+        image.add_git_config(tree,self.BASE);return tree
+    def test_the_system_gitconfig_names_an_empty_root_owned_template_directory(self):
+        tree=self.tree();image.check_git_config(tree)
+        _,config=tree.resolve('/etc/gitconfig')
+        lines=[line.strip() for line in config['data'].decode().splitlines() if line.strip() and not line.startswith('#')]
+        self.assertEqual(lines,['[init]','templateDir = /usr/share/winter-git-template'])
+        target,directory=tree.resolve('/usr/share/winter-git-template')
+        self.assertEqual((directory['kind'],directory['mode']),('directory',0o555))
+        self.assertEqual([name for name in tree.nodes if name.startswith(target+'/')],[])
+        entries={entry['path']:entry for entry in tree.manifest()}
+        self.assertEqual((entries['/'+target]['uid'],entries['/'+target]['gid'],entries['/'+target]['type']),(0,0,'directory'))
+        self.assertEqual(entries['/'+self.BASE+'/etc/gitconfig']['mode'],'0o444')
+    def test_a_template_entry_or_another_gitconfig_is_refused(self):
+        tree=self.tree();tree.add(self.BASE+'/usr/share/winter-git-template/hooks/pre-commit.sample','file',b'#!/bin/sh\n',True)
+        with self.assertRaises(ValueError):image.check_git_config(tree)
+        tree=Tree();tree.add(self.BASE+'/etc/gitconfig','file',b'[core]\n\thooksPath = /x\n')
+        with self.assertRaises(ValueError):image.add_git_config(tree,self.BASE)   # a package that ships its own conflicts
+        tree=Tree();tree.add('etc','symlink',(self.BASE+'/etc').encode());tree.add(self.BASE+'/etc/x','file',b'x')
+        with self.assertRaises(ValueError):image.check_git_config(tree)            # none at all
+    def test_the_image_build_adds_and_checks_it(self):
+        source=(HERE/'image.py').read_text()
+        main=source[source.index('def main('):]
+        self.assertIn('add_git_config(tree,base)',main);self.assertIn('check_git_config(tree)',main)
+        self.assertLess(main.index('add_git_config(tree,base)'),main.index('check_git_config(tree)'))
+        self.assertLess(main.index('check_git_config(tree)'),main.index("tree.cpio(out/'immutable-root.cpio')"))
+
 class CpioReadbackTests(unittest.TestCase):
     """A tiny root through the real emitter and the independent reader (verify.py)."""
     INIT=b'\x7fELF-pinned-init'

@@ -18,6 +18,7 @@
 #include "boot.h"
 #ifdef WG_FILE_CHANNEL_V1
 #include "dataroots.h"
+#include "shares.h"
 #endif
 #include "discover.h"
 #include "ext4sb.h"
@@ -458,6 +459,45 @@ static int op_read_data_device(void *ctx, uint64_t *device) {
     return 0;
 }
 #endif
+#ifdef WG_FILE_CHANNEL_V1
+/* Host-backed shares (shares.c). The three paths below may be overridden only by the native test build (tests/linux_init_tool.c); PID 1 uses the real ones. */
+#ifndef SHARES_ROOT
+#define SHARES_ROOT ""
+#endif
+#ifndef SHARES_SYS_ROOT
+#define SHARES_SYS_ROOT "/sys"
+#endif
+#ifndef MOUNTINFO_PATH
+#define MOUNTINFO_PATH "/proc/self/mountinfo"
+#endif
+static long sop_read_mountinfo(void *ctx, char *out, size_t capacity) {
+    (void)ctx;
+    int fd = open(MOUNTINFO_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t have = 0;
+    for (;;) {
+        if (have == capacity) { close(fd); return -1; }   /* it does not fit: never judge a cut table */
+        ssize_t n = read(fd, out + have, capacity - have);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { close(fd); return -1; }
+        if (n == 0) break;
+        have += (size_t)n;
+    }
+    close(fd);
+    return (long)have;
+}
+static int op_mount_shares(void *ctx, const struct wg_share_set *set, unsigned *mounted) {
+    (void)ctx;
+    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, 0 };
+    return wg_mount_shares(&ops, set, mounted);
+}
+static int op_umount_share(void *ctx, const char *guest_path) {
+    (void)ctx;
+    char where[WG_SHARE_PATH_MAX + 4096];
+    if (snprintf(where, sizeof where, "%s%s", SHARES_ROOT, guest_path) >= (int)sizeof where) return -1;
+    return umount2(where, 0);
+}
+#endif
 static int op_read_base_config(void *ctx, char *out, size_t capacity, size_t *length) {
     (void)ctx;
     long n = wg_read_small_file(BASE_CONFIG_PATH, out, capacity, 0);
@@ -782,12 +822,17 @@ int main(void) {
     boot_ops.start_supervisor = op_start_supervisor;
 #ifdef WG_FILE_CHANNEL_V1
     boot_ops.read_data_device = op_read_data_device;
+    boot_ops.mount_shares = op_mount_shares; boot_ops.umount_share = op_umount_share;
 #endif
     boot_ops.stop_helper = op_stop_helper; boot_ops.stop_supervisor = op_stop_supervisor;
     boot_ops.kill_all = op_kill_all; boot_ops.sync_all = op_sync_all; boot_ops.flush_devices = op_flush_devices; boot_ops.power_off = op_power_off;
     wg_boot_init(&boot, &boot_ops);
     ctl_reader_init(&relay_reader, relay_payload, sizeof relay_payload, "PDFf");
+#ifdef WG_FILE_CHANNEL_V1
+    ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQMECS");
+#else
     ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQMEC");
+#endif
 
 #ifdef WG_FILE_CHANNEL_V1
     G.relay = spawn_relay(port_fd, r2p, p2r, rt_in, rt_out, rt_err, file_in, file_out);
