@@ -1,0 +1,11 @@
+# Winter guest: the environment image's fixed system gitconfig (the tool launcher mounts it read-only at /etc/gitconfig for the process worker).
+# Safe defaults only: no hook, no fsmonitor, no credential helper, no include, no alias. verify.py accepts exactly these settings and nothing else.
+[init]
+	templateDir = /usr/share/winter/git-empty-template
+[core]
+	hooksPath = /dev/null
+	fsmonitor = false
+[credential]
+	helper =
+[protocol "ext"]
+	allow = never

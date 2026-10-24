@@ -154,9 +154,9 @@ export interface CoworkConversationSetInput {
   /** The plan execution view's epoch (the policy machine's `epoch`): under plan, the conversation's own writable plan
    *  scratch `/workspace/plan/<sid>/<epoch>` is mounted beside its read-only roots. Nothing passes it yet: the native
    *  contract (`allowedView`, plan's read-only rule) and the supervisor do not admit that view, so a set carrying it is
-   *  refused on the wire (pinned). Ignored outside plan. */
+   *  refused on the wire (pinned). Ignored outside plan. Needs `uids`: the epoch directory is the conversation's own tool uid's. */
   readonly planScratchEpoch?: number;
-  /** #92 N3 (L7): the conversation's stable uids (`CoworkRepository.allocateGuestUids`). Absent: the fixed picks. */
+  /** #92 N3 (L7): the conversation's stable uids (`CoworkRepository.allocateGuestUids`). Absent: the fixed picks, and then no plan scratch (`planScratchEpoch` is refused without them). */
   readonly uids?: { readonly runtimeUid: number; readonly toolUid: number };
 }
 
@@ -179,6 +179,9 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
   const root = source === undefined
     ? Object.freeze({ id: "outputs", guestPath: cwd, source: cwd, readOnly: policy === "plan" })
     : Object.freeze({ id: source.sourceId, guestPath: cwd, source: cwd, readOnly: source.access === "read-only" || policy === "plan" });
+  // The plan view belongs to THIS conversation's own tool uid (the guest gives the epoch directory to it, mode 0700), so a set that carries one without the conversation's allocated
+  // uids would hand the directory to the shared fixed pick: refused, never defaulted.
+  if (policy === "plan" && input.planScratchEpoch !== undefined && input.uids === undefined) throw new CoworkError("invalid_request");
   const planRoot = policy === "plan" && input.planScratchEpoch !== undefined
     ? (() => { const path = coworkPlanScratchPath(binding.sessionId, input.planScratchEpoch); return Object.freeze({ id: "plan-scratch", guestPath: path, source: path, readOnly: false }); })()
     : undefined;

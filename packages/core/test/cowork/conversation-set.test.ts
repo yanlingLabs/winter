@@ -163,7 +163,8 @@ test("the set is refused for a binding that is not active, in another workspace,
 
 test("plan view: under plan with an epoch the set carries the own writable plan scratch beside the read-only roots; the native wire admits it (revision 3, S7B) and the driver still passes no epoch", () => {
   const plan = fixture({ policy: "plan" }), input = inputFor(plan);
-  const item = coworkConversationFor({ ...input, planScratchEpoch: 3 }).conversations[0]!;
+  const uids = { runtimeUid: 3001, toolUid: 3002 };
+  const item = coworkConversationFor({ ...input, uids, planScratchEpoch: 3 }).conversations[0]!;
   expect(item.roots).toEqual([
     { id: plan.sourceId, guestPath: "/workspace/folders/grant", source: "/workspace/folders/grant", readOnly: true },
     { id: "plan-scratch", guestPath: "/workspace/plan/conversation/3", source: "/workspace/plan/conversation/3", readOnly: false },
@@ -178,9 +179,12 @@ test("plan view: under plan with an epoch the set carries the own writable plan 
     refused({ roots: [item.roots[0], { ...view, guestPath: path, source: path }] });                              // not the own session, a non-canonical epoch, a bare or deeper path
   refused({ roots: [item.roots[0], view, { ...view, id: "second", guestPath: "/workspace/plan/conversation/4", source: "/workspace/plan/conversation/4" }] }); // at most one
   expect(coworkConversationFor(input).conversations[0]!.roots).toHaveLength(1);
-  for (const epoch of [-1, 1.5, Number.NaN]) expect(() => coworkConversationFor({ ...input, planScratchEpoch: epoch })).toThrow("invalid_request");
+  for (const epoch of [-1, 1.5, Number.NaN]) expect(() => coworkConversationFor({ ...input, uids, planScratchEpoch: epoch })).toThrow("invalid_request");
+  // No plan scratch without the conversation's own allocated uids: there is no shared fixed pick to give the directory to.
+  expect(() => coworkConversationFor({ ...input, planScratchEpoch: 3 })).toThrow("invalid_request");
+  expect(item.toolUid).toBe(3002);
   // Outside plan the epoch is ignored: no plan scratch is ever mounted writable beside a writable source.
   const ask = fixture({ policy: "ask" });
-  expect(coworkConversationFor({ ...inputFor(ask), planScratchEpoch: 3 }).conversations[0]!.roots).toHaveLength(1);
+  expect(coworkConversationFor({ ...inputFor(ask), planScratchEpoch: 3 }).conversations[0]!.roots).toHaveLength(1);   // (and needs no uids there)
   expect(coworkPlanScratchPath("s_0123456789ab", 0)).toBe("/workspace/plan/s_0123456789ab/0");
 });

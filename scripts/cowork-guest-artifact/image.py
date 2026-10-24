@@ -367,26 +367,6 @@ def add_guest_files(tree,programs,scripts,helper_digests,runtime_digests=None):
     tree.add('opt/winter/etc/supervisor-base.json','file',supervisor_base_config(helper_digests)+b'\n',False,'derived:supervisor-static-config')
     if runtime_digests is not None:tree.add(verify.RUNTIME_ARTIFACTS_PATH,'file',runtime_artifacts_config(runtime_digests)+b'\n',False,'derived:supervisor-runtime-artifacts')
 
-# R15 (design 2026-10-18): git copies its template directory into every new `.git` (`git init`, `git clone`, submodule clones), hooks/*.sample included, and dies
-# when an entry cannot be made. A read-write folder share refuses every `.git/hooks` entry, so the system gitconfig points init.templateDir at an EMPTY,
-# root-owned (cpio uid 0, mode 0555) directory: git then never makes a hooks directory at all. The directory sits under /usr so a tool compartment, which
-# mounts bin, lib, lib64 and usr of the environment base, sees the same path.
-GIT_TEMPLATE_DIR='/usr/share/winter-git-template'
-SYSTEM_GITCONFIG=b'# Winter Cowork guest: an empty template directory, so git init, clone and submodule clones never create .git/hooks (design 2026-10-18, R15).\n[init]\n\ttemplateDir = '+GIT_TEMPLATE_DIR.encode()+b'\n'
-
-def add_git_config(tree,base):
-    """The image's system gitconfig (`/etc/gitconfig`, the environment base's etc) and the empty template directory it names."""
-    tree.add(base+GIT_TEMPLATE_DIR,'directory',origin='derived:empty-git-template-directory')
-    tree.add(base+'/etc/gitconfig','file',SYSTEM_GITCONFIG,False,'derived:system-gitconfig-empty-template')
-
-def check_git_config(tree):
-    """The template directory is empty and the system gitconfig names exactly it; refused otherwise (a package that ships either is a conflict in Tree.add already)."""
-    target,node=tree.resolve('/etc/gitconfig')
-    if node['kind']!='file' or node['data']!=SYSTEM_GITCONFIG:raise ValueError('system gitconfig is not the pinned one')
-    target,node=tree.resolve(GIT_TEMPLATE_DIR)
-    if node['kind']!='directory' or node['mode']!=0o555:raise ValueError('git template directory missing')
-    if any(name.startswith(target+'/') for name in tree.nodes):raise ValueError('git template directory is not empty')
-
 def refuse_blkid(tree):
     """The probe is `dumpe2fs -h` plus a direct superblock read (decision D9); the image must not grow a blkid for anything to lean on."""
     if any(name.endswith('/blkid') or name=='blkid' for name in tree.nodes):raise ValueError('blkid is not part of the image')
@@ -489,14 +469,20 @@ def main():
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
     if base+'/bin/sh' not in tree.nodes:tree.add(base+'/bin/sh','symlink',b'dash',origin='derived:explicit-dash-shell')
-    add_git_config(tree,base)
+    # The environment's fixed system gitconfig (agent-sdk SH6b mounts it read-only at /etc/gitconfig for the process worker) and the empty directory its init.templateDir names:
+    # safe defaults only (verify.check_gitconfig_text), the pinned bytes of a file kept beside this script, never derived from anything at build time.
+    gitconfig=(HERE/'environment'/'gitconfig').read_bytes()
+    verify.check_gitconfig_text(gitconfig)
+    if sha(gitconfig)!=pins['environment']['gitconfigSha256']:raise ValueError('environment/gitconfig does not match the pinned environment.gitconfigSha256')
+    tree.add(verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',gitconfig,False,'pinned:scripts/cowork-guest-artifact/environment/gitconfig')
+    tree.add(verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory',origin='derived:empty-git-template-directory')
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
     check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
     records=verify_elfs(tree)
     refuse_blkid(tree)
     refuse_provider_bridge(tree)
-    check_git_config(tree)
     verify.check_runtime_artifacts(tree_files(tree),tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data'])
+    verify.check_environment_gitconfig(tree_files(tree),pins['environment']['gitconfigSha256'])
     required=REQUIRED_PROGRAMS
     for path in required:
         target,node=tree.resolve(path)
@@ -508,6 +494,7 @@ def main():
     receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
     problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems
     receipt['packageLockSha256']=lock_sha
+    receipt['environment']={'gitconfigPath':'/etc/gitconfig','gitconfigSha256':sha(gitconfig)}
     (out/'packages.lock.json').write_bytes(lock_bytes)
     receipt['reproducibilityPinned']=not problems
     (out/'receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')

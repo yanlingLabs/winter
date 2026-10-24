@@ -1,8 +1,8 @@
 {
   "note": "What the pinned SDK supervisor's parse_arguments does with each command line, derived by importing the pinned file (no root, nothing started) and calling it. PID 1's two command lines must be among the accepted ones. Regenerate with tests/regenerate when sdkCommit moves.",
-  "sdkCommit": "7511bbaedd734c7379bdafdc68c13027f60fe398",
+  "sdkCommit": "ec91fe06719d76e99bcdbdae8a6daaf690dfeb50",
   "supervisorPath": "packages/runtime/src/guest/linux-supervisor.py",
-  "supervisorSha256": "00274717197787a109b171061a4397eb16582a2d369cf719ee4431e815f5ea09",
+  "supervisorSha256": "7ecbdc1ef15eed6111ca180b67687f0be2cdf9e63e2573e0835401e633b0fc78",
   "accepted": [
     {
       "argv": [

@@ -77,7 +77,7 @@ class HelperToPid1Tests(unittest.TestCase):
                 self.assertEqual(int(browse), message["browseUid"] or 0)
                 seen_browse |= message["browseUid"] is not None
                 self.assertEqual(int(count), len(message["conversations"]))
-                expected = ";".join("%s:%d:%d:%s" % (c["logicalSessionId"], c["runtimeUid"], c["workspaceGid"], ",".join(r["source"] for r in c["roots"])) for c in message["conversations"])
+                expected = ";".join("%s:%d:%d:%d:%s" % (c["logicalSessionId"], c["runtimeUid"], c["toolUid"], c["workspaceGid"], ",".join(r["source"] for r in c["roots"])) for c in message["conversations"])
                 self.assertEqual(conversations, expected)
                 self.assertEqual(json.loads(items), gb.supervisor_items(message))
         self.assertTrue(seen_browse)
@@ -160,6 +160,168 @@ class DataRootTests(unittest.TestCase):
         self.assertFalse((self.dir / "folders/docs").exists() or (self.dir / "folders/a").exists())
         self.assertEqual(self.run_tool(self.gid, "/workspace/folders-x"), "0")             # a sibling that merely starts the same way is a root
         self.assertEqual(self.mode_of("folders-x"), 0o2770)
+
+    def chown_requests(self):
+        log = self.dir.parent / (self.dir.name + ".chown-log")
+        log.unlink(missing_ok=True)
+        self.addCleanup(lambda: log.unlink(missing_ok=True))
+        return log
+
+    def run_env(self, *args, **env):
+        result = subprocess.run([str(self.tool), "dataroots", str(self.dir), *map(str, args)], capture_output=True, text=True, timeout=60, env=dict(os.environ, **{k: str(v) for k, v in env.items()}))
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return result.stdout.strip()
+
+    def foreign_id(self):
+        return 1 if os.geteuid() == 0 else 0           # an owner id that is not this user's
+
+    def test_the_plan_view_has_root_parents_and_an_epoch_that_belongs_to_the_conversations_tool_uid_alone(self):
+        log = self.chown_requests()
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_LOG=log), "0")
+        # (this user stands for root: what was asked of fchown is in the log, what the file system keeps is the user's own)
+        self.assertEqual((self.mode_of("plan"), self.mode_of("plan/conv-0001"), self.mode_of("plan/conv-0001/5")), (0o711, 0o711, 0o700))
+        me = "%d:%d" % (os.getuid(), os.getgid())
+        self.assertEqual(log.read_text().split(), [me, me, "41001:41001"])                       # /workspace/plan and the folder of the id: root's; the epoch: the tool uid, group = the same id
+        self.assertNotIn("41001:%d" % self.gid, log.read_text())                                  # never the workspace group, which other conversations may share
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_LOG=log), "0")    # idempotent
+        self.assertEqual(sorted(p.name for p in (self.dir / "plan/conv-0001").iterdir()), ["5"])
+        # the second conversation of a set gets its own folder under its own id, owned by ITS tool uid
+        log.unlink()
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", "--", self.gid, "/workspace/plan/conv-0002/0", DATAROOTS_LOG=log), "0")
+        self.assertTrue((self.dir / "plan/conv-0002/0").is_dir())
+        self.assertEqual([line for line in log.read_text().split() if line.startswith("41")], ["41001:41001", "41002:41002"])
+
+    def test_a_sibling_conversations_uid_has_no_access_to_a_plan_view(self):
+        """The bits: the epoch is owner-only (no group, no other, no setgid) and the folders above it are 0711 root's, so neither the workspace group nor another conversation's tool uid
+        (nor its private group) gets in, and nobody but root can add or remove an epoch. With root (the CI's sudo step) it is tried for real with the tool uids."""
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5", "--", self.gid, "/workspace/plan/conv-0002/3"), "0")
+        for relative in ("plan/conv-0001/5", "plan/conv-0002/3"):
+            self.assertEqual(self.mode_of(relative) & 0o7077, 0, relative)
+        for relative in ("plan", "plan/conv-0001", "plan/conv-0002"):
+            self.assertEqual(self.mode_of(relative), 0o711, relative)
+        if os.geteuid() != 0:
+            if os.environ.get("WG_REQUIRE_ROOT"):
+                self.fail("WG_REQUIRE_ROOT is set but this is not root: the identity half would silently not run")
+            self.skipTest("the real-identity half needs root (cowork-guest-boot.yml runs it with sudo)")
+        shared = 42000                                   # the workspace group both conversations share: not root's group, and not either tool uid's
+        # a workspace the tool uids can walk down to (the temporary directory may be under a home they cannot enter)
+        self.dir = Path(tempfile.mkdtemp(prefix="guest-ids-", dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        os.chmod(self.dir, 0o755)
+        self.assertEqual(self.run_env(shared, "/workspace/plan/conv-0001/5", "--", shared, "/workspace/plan/conv-0002/3", DATAROOTS_REAL_IDS="1"), "0")
+        st = (self.dir / "plan/conv-0001/5").stat()
+        self.assertEqual((st.st_uid, st.st_gid), (41001, 41001))
+        self.assertEqual(((self.dir / "plan/conv-0001").stat().st_uid, (self.dir / "plan").stat().st_uid), (0, 0))
+        (self.dir / "plan/conv-0001/5/secret").write_text("mine")
+        def as_tool(uid, action):
+            pid = os.fork()
+            if pid == 0:
+                code = 99
+                try:
+                    os.setgroups([shared])                           # the workspace group (a real one, not root's 0), as every tool process of the workspace may have
+                    os.setresgid(uid, uid, uid)
+                    os.setresuid(uid, uid, uid)
+                    action()
+                    code = 0
+                except PermissionError:
+                    code = 13
+                except BaseException:
+                    code = 98
+                finally:
+                    os._exit(code)
+            return os.waitpid(pid, 0)[1] >> 8
+        view = str(self.dir / "plan/conv-0001/5")
+        self.assertEqual(as_tool(41002, lambda: os.listdir(view)), 13)
+        self.assertEqual(as_tool(41002, lambda: open(view + "/secret").read()), 13)
+        self.assertEqual(as_tool(41002, lambda: open(view + "/new", "w")), 13)
+        self.assertEqual(as_tool(41001, lambda: open(view + "/new", "w").write("x")), 0)               # the owner's own tool uid can
+        folder = str(self.dir / "plan/conv-0001")
+        self.assertEqual(as_tool(41001, lambda: os.mkdir(folder + "/9")), 13)                           # the past-epoch record is not the tool uid's to edit
+        self.assertEqual(as_tool(41002, lambda: os.mkdir(folder + "/9")), 13)
+        self.assertEqual(as_tool(41001, lambda: os.rmdir(folder + "/5")), 13)                           # nor an epoch to remove
+
+    def test_an_existing_plan_directory_with_loose_bits_is_reset_and_a_loose_parent_too(self):
+        (self.dir / "plan/conv-0001/5").mkdir(parents=True, mode=0o755)
+        for relative, mode in (("plan", 0o777), ("plan/conv-0001", 0o777), ("plan/conv-0001/5", 0o755)):
+            os.chmod(self.dir / relative, mode)
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        self.assertEqual((self.mode_of("plan"), self.mode_of("plan/conv-0001"), self.mode_of("plan/conv-0001/5")), (0o711, 0o711, 0o700))
+
+    def test_an_existing_epoch_directory_of_another_owner_is_refused_before_anything_is_changed_on_it(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        os.chmod(self.dir / "plan/conv-0001/5", 0o755)
+        log = self.chown_requests()
+        # root's is another id and the tool uid is stored as yet another: the directory (this user's) is neither
+        foreign = self.foreign_id()
+        out = self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_LOG=log, DATAROOTS_PARENT_OWNER=foreign, DATAROOTS_STORED_UID=foreign + 5000)
+        self.assertEqual(out, "-1")
+        self.assertNotIn("41001", log.read_text())                                                   # no chown was even asked for
+        self.assertEqual(self.mode_of("plan/conv-0001/5"), 0o755)                                      # and no chmod
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")                  # the same directory is fine for its own owner
+
+    def test_the_result_of_making_an_epoch_directory_is_checked_not_the_return_values(self):
+        log = self.chown_requests()
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_STORED_UID=self.foreign_id() + 5000, DATAROOTS_LOG=log), "-1")     # the owner is not the one asked for
+        self.assertIn("41001:41001", log.read_text())                                                  # (a directory PID 1 made itself is let through to the chown; it is the result that fails)
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_STORED_GID=os.getgid() + 5000), "-1")          # nor is the group
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/7"), "0")
+
+    def test_a_directory_read_that_fails_or_a_stale_errno_decides_the_epoch_scan_correctly(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_READDIR_FAIL="1"), "-1")      # a read error is not "no later epoch"
+        self.assertFalse((self.dir / "plan/conv-0001/6").exists())
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_STALE_ERRNO="1"), "0")        # the end of a directory is no error, whatever errno held before
+
+    def test_a_plan_directory_above_the_epoch_that_is_not_roots_is_refused(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        foreign = self.foreign_id()
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_PARENT_OWNER=foreign, DATAROOTS_OWNER=foreign), "-1")    # /workspace/plan looks like somebody else's
+        self.assertFalse((self.dir / "plan/conv-0001/6").exists())
+
+    def test_a_plan_path_that_is_not_exactly_the_conversations_own_epoch_view_is_refused_and_nothing_is_made(self):
+        for source in ("/workspace/plan", "/workspace/plan/conv-0001", "/workspace/plan/conv-0002/1", "/workspace/plan/conv-0001/01", "/workspace/plan/conv-0001/1234567890",
+                       "/workspace/plan/conv-0001/x", "/workspace/plan/conv-0001/1/deeper", "/workspace/plan/conv-00011/1", "/workspace/plan/conv-000112"):
+            with self.subTest(source):
+                self.assertEqual(self.run_tool(self.gid, source), "-1")
+        self.assertFalse((self.dir / "plan").exists())
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/123456789"), "0")     # nine digits is fine
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/0"), "-1")             # ... but 0 is below 123456789 now
+        self.assertEqual(self.run_tool(self.gid, "/workspace/planning/x"), "0")                    # a sibling name that merely starts the same way is an ordinary root
+
+    def test_an_earlier_epoch_is_never_made_again_and_is_left_untouched(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        (self.dir / "plan/conv-0001/5/note").write_text("kept")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "0")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/4"), "-1")             # below 6: stale
+        self.assertFalse((self.dir / "plan/conv-0001/4").exists())
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "0")              # the same epoch again is fine
+        self.assertEqual((self.dir / "plan/conv-0001/5/note").read_text(), "kept")                  # the earlier epoch is not re-created or emptied
+        self.assertEqual(self.mode_of("plan/conv-0001/5"), 0o700)
+
+    def test_without_a_browse_uid_only_the_plan_view_is_made(self):
+        env = dict(os.environ, DATAROOTS_PLAN_ONLY="1")
+        def run(*sources):
+            return subprocess.run([str(self.tool), "dataroots", str(self.dir), str(self.gid), *sources], capture_output=True, text=True, env=env, timeout=60).stdout.strip()
+        self.assertEqual(run("/workspace/repos/r1", "/workspace/plan/conv-0001/2"), "0")
+        self.assertTrue((self.dir / "plan/conv-0001/2").is_dir())
+        self.assertFalse((self.dir / "repos/r1").exists())                                          # an ordinary data root is not made without a browse uid
+        self.assertEqual(run("/workspace/plan/conv-0001/1"), "-1")                                  # the staleness rule holds on this path too
+        self.assertEqual(run("/workspace/plan/conv-0002/1"), "-1")                                  # and the own-conversation rule
+
+    def test_a_plan_parent_that_is_a_symlink_or_not_a_directory_is_refused(self):
+        outside = Path(tempfile.mkdtemp(prefix="guest-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (self.dir / "plan").symlink_to(outside)
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
+        self.assertEqual(list(outside.iterdir()), [])
+        (self.dir / "plan").unlink()
+        (self.dir / "plan").mkdir(mode=0o711)
+        (self.dir / "plan/conv-0001").symlink_to(outside)
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
+        self.assertEqual(list(outside.iterdir()), [])
+        (self.dir / "plan/conv-0001").unlink()
+        (self.dir / "plan/conv-0001").write_text("a file where the parent belongs")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
 
     def test_a_symlink_anywhere_on_the_path_is_refused_and_nothing_is_followed(self):
         outside = Path(tempfile.mkdtemp(prefix="guest-outside-"))
