@@ -245,7 +245,7 @@ class FileChannelPid1Tests(unittest.TestCase):
         result = subprocess.run([CC, "-std=c11", "-O1", "-Wall", "-Wextra", "-Werror", "-pedantic", str(ROOT / "tests/fake_supervisor.c"), "-o", str(cls.fake)], capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
         sources = [ROOT / "tests/linux_init_tool.c", INIT / "boot.c", INIT / "discover.c", INIT / "ext4sb.c", INIT / "mounts.c", INIT / "skeleton.c",
-                   INIT / "trusted_config.c", INIT / "dataroots.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"]
+                   INIT / "trusted_config.c", INIT / "dataroots.c", INIT / "shares.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"]
         cls.tool = build(sources, cls.folder / "linux-init-tool", extra=["-DWG_FILE_CHANNEL_V1", f'-DPYTHON_PATH="{cls.fake}"', f'-DTRUSTED_DIR="{cls.trusted}"',
                                                                          f'-DWG_WORKSPACE_PATH="{cls.workspace}"', f'-DWORKSPACE_CONVERSATIONS="{cls.conversations_store}"',
                                                                          f'-DRUN_CONVERSATIONS="{cls.conversations_run}"'])

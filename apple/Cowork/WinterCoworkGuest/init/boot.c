@@ -119,6 +119,66 @@ int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct 
     return 0;
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+static int share_tag_ok(const uint8_t *text, size_t length) {
+    if (length < 1 || length > WG_SHARE_TAG_MAX) return 0;
+    for (size_t i = 0; i < length; i++) {
+        uint8_t c = text[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return 0;
+    }
+    return 1;
+}
+
+/* A folder source's mount point: /workspace/folders/ and one name of [A-Za-z0-9][A-Za-z0-9_.-]{0,127} (protocol.ts FOLDER_MOUNT). */
+static int folder_mount_ok(const char *path, size_t length) {
+    size_t prefix = sizeof WG_SHARE_FOLDERS_PREFIX - 1;
+    if (length <= prefix || length - prefix > WG_SHARE_FOLDER_NAME_MAX || memcmp(path, WG_SHARE_FOLDERS_PREFIX, prefix) != 0) return 0;
+    for (size_t i = prefix; i < length; i++) {
+        char c = path[i];
+        int alnum = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
+        if (!(alnum || (i > prefix && (c == '_' || c == '.' || c == '-')))) return 0;
+    }
+    return 1;
+}
+
+int wg_parse_share_payload(const uint8_t *payload, size_t length, struct wg_share_set *out) {
+    static const char *const FIXED[4] = { NULL, WG_SHARE_GUIDANCE_PATH, WG_SHARE_MEMORY_PATH, WG_SHARE_OUTPUTS_PATH };
+    memset(out, 0, sizeof *out);
+    if (length < 1 || payload[0] < 1 || payload[0] > WG_SHARES_MAX) return -1;
+    out->count = payload[0];
+    size_t at = 1;
+    unsigned per_kind[4] = { 0, 0, 0, 0 };
+    for (unsigned i = 0; i < out->count; i++) {
+        struct wg_share *share = &out->item[i];
+        if (length - at < 3) return -1;
+        unsigned kind = payload[at], flags = payload[at + 1];
+        size_t tag_length = payload[at + 2];
+        at += 3;
+        if (kind > WG_SHARE_OUTPUTS || (flags & ~1u) != 0 || length - at < tag_length || !share_tag_ok(payload + at, tag_length)) return -1;
+        memcpy(share->tag, payload + at, tag_length);
+        share->tag[tag_length] = '\0';
+        at += tag_length;
+        if (length - at < 1) return -1;
+        size_t path_length = payload[at++];
+        if (path_length > WG_SHARE_PATH_MAX || length - at < path_length) return -1;
+        memcpy(share->guest_path, payload + at, path_length);
+        share->guest_path[path_length] = '\0';
+        at += path_length;
+        share->kind = kind;
+        share->read_only = (flags & 1u) != 0;
+        /* the mount point and the mode each kind must have: guidance read-only, memory and outputs read-write, a folder as its grant says */
+        if (kind == WG_SHARE_FOLDER ? !folder_mount_ok(share->guest_path, path_length) : (strlen(FIXED[kind]) != path_length || memcmp(share->guest_path, FIXED[kind], path_length) != 0)) return -1;
+        if (kind != WG_SHARE_FOLDER && share->read_only != (kind == WG_SHARE_GUIDANCE)) return -1;
+        per_kind[kind]++;
+        for (unsigned j = 0; j < i; j++)
+            if (strcmp(out->item[j].tag, share->tag) == 0 || strcmp(out->item[j].guest_path, share->guest_path) == 0) return -1;
+    }
+    if (at != length) return -1;
+    if (per_kind[WG_SHARE_FOLDER] > WG_FOLDER_SHARES_MAX || per_kind[WG_SHARE_GUIDANCE] > 1 || per_kind[WG_SHARE_MEMORY] > 1 || per_kind[WG_SHARE_OUTPUTS] > 1) return -1;
+    return 0;
+}
+#endif
+
 /* Stops everything that could still write, then unmounts. Returns 1 only when every filesystem this boot mounted is unmounted
  * again, nothing is left mounted under the replay root, and each volume's superblock proves its final unmount happened (a mount
  * namespace or a bind mount that still holds the filesystem would leave it dirty). That is the only fact `halting` may claim. */
@@ -132,6 +192,23 @@ static int teardown(struct wg_boot *boot, long long started) {
     boot->supervisor_alive = 0;
     ops->kill_all(ops->ctx);
     ops->sync_all(ops->ctx);
+#ifdef WG_FILE_CHANNEL_V1
+    /* The virtio-fs shares first, the last mounted first: three of their mount points are on the data volume, and the ext4 volumes are unmounted only once
+     * no share is mounted any more. `halting` keeps meaning that every filesystem this boot mounted is unmounted, the shares included. */
+    for (int attempt = 0; attempt < UMOUNT_ATTEMPTS; attempt++) {
+        for (unsigned i = boot->shares.count; i-- > 0;)
+            if ((boot->shares_mounted & (1u << i)) && ops->umount_share(ops->ctx, boot->shares.item[i].guest_path) == 0) boot->shares_mounted &= ~(1u << i);
+        for (int v = 0; v < 2; v++) if (boot->replay_mounted[v] && ops->umount_replay(ops->ctx, PURPOSES[v]) == 0) boot->replay_mounted[v] = 0;
+        if (boot->shares_mounted == 0) {
+            if (boot->environment_mounted && ops->umount(ops->ctx, WG_VOLUME_ENVIRONMENT) == 0) boot->environment_mounted = 0;
+            if (boot->data_mounted && ops->umount(ops->ctx, WG_VOLUME_DATA) == 0) boot->data_mounted = 0;
+        }
+        if (!boot->shares_mounted && !boot->environment_mounted && !boot->data_mounted && !boot->replay_mounted[0] && !boot->replay_mounted[1]) break;
+        ops->kill_all(ops->ctx);   /* something still holds a filesystem: stop whatever it is and try again */
+        ops->pause_ms(ops->ctx, 100);
+    }
+    if (boot->shares_mounted || boot->environment_mounted || boot->data_mounted || boot->replay_mounted[0] || boot->replay_mounted[1]) return 0;
+#else
     for (int attempt = 0; attempt < UMOUNT_ATTEMPTS; attempt++) {
         for (int v = 0; v < 2; v++) if (boot->replay_mounted[v] && ops->umount_replay(ops->ctx, PURPOSES[v]) == 0) boot->replay_mounted[v] = 0;
         if (boot->environment_mounted && ops->umount(ops->ctx, WG_VOLUME_ENVIRONMENT) == 0) boot->environment_mounted = 0;
@@ -141,6 +218,7 @@ static int teardown(struct wg_boot *boot, long long started) {
         ops->pause_ms(ops->ctx, 100);
     }
     if (boot->environment_mounted || boot->data_mounted || boot->replay_mounted[0] || boot->replay_mounted[1]) return 0;
+#endif
     for (int v = 0; v < 2; v++)
         if (boot->ever_mounted[v] && ops->verify_unmounted(ops->ctx, v, boot->uuid[v]) != 0) return 0;
     return 1;
@@ -225,6 +303,10 @@ static void start_conversations(struct wg_boot *boot, const uint8_t *payload, si
     const struct wg_boot_ops *ops = boot->ops;
     struct wg_conversation_set set;
     if (boot->phase != WG_PHASE_MOUNTED || boot->conv_state != WG_CONV_NONE) { wg_boot_fail_stop(boot, "conversations-out-of-order"); return; }
+#ifdef WG_FILE_CHANNEL_V1
+    /* The host waits for `shares_mounted` before it sends a set, and the helper answers a set that follows a failed share step itself: one here is a helper fault. */
+    if (boot->shares_state == WG_SHARES_STATE_FAILED) { wg_boot_fail_stop(boot, "conversations-after-failed-shares"); return; }
+#endif
     boot->conv_state = WG_CONV_FAILED;   /* one attempt per incarnation, whatever happens */
     if (wg_parse_conversation_payload(payload, length, &set) != 0) { conversations_failed(boot, 1, "conversations-payload"); return; }
     boot->conv_count = set.count;
@@ -266,6 +348,33 @@ static void start_conversations(struct wg_boot *boot, const uint8_t *payload, si
     boot->supervisor_alive = 1;
     boot->conv_state = WG_CONV_STARTING;
 }
+
+#ifdef WG_FILE_CHANNEL_V1
+/* The share step (design section 2.5): once, after the data volume is mounted and the helper said 'E', and before any conversation set. Whatever happens it is
+ * the one attempt of the incarnation; only a step that mounted and checked every share lets a set follow. */
+static void mount_shares(struct wg_boot *boot, const uint8_t *payload, size_t length) {
+    const struct wg_boot_ops *ops = boot->ops;
+    if (boot->phase != WG_PHASE_MOUNTED || boot->conv_state != WG_CONV_NONE || boot->shares_state != WG_SHARES_STATE_NONE) { wg_boot_fail_stop(boot, "shares-out-of-order"); return; }
+    boot->shares_state = WG_SHARES_STATE_FAILED;
+    uint8_t answer = WG_SHARES_MOUNT_FAILED;
+    if (wg_parse_share_payload(payload, length, &boot->shares) != 0) {
+        memset(&boot->shares, 0, sizeof boot->shares);
+        note(boot, "shares-payload");
+    } else {
+        unsigned mounted = 0, all = (1u << boot->shares.count) - 1u;
+        int result = ops->mount_shares(ops->ctx, &boot->shares, &mounted);
+        boot->shares_mounted = mounted & all;   /* whatever is mounted is the drain's to unmount, success or not */
+        if (result == WG_SHARES_MOUNTED && mounted == all) {
+            boot->shares_state = WG_SHARES_STATE_MOUNTED;
+            answer = WG_SHARES_MOUNTED;
+        } else {
+            answer = result == WG_SHARES_INVENTORY ? WG_SHARES_INVENTORY : WG_SHARES_MOUNT_FAILED;
+            note(boot, answer == WG_SHARES_INVENTORY ? "share-inventory" : "share-mount-failed");
+        }
+    }
+    if (boot->helper_alive) ops->to_helper(ops->ctx, CTL_SHARES_RESULT, &answer, 1);
+}
+#endif
 
 static void enter_mounted(struct wg_boot *boot) {
     if (boot->phase != WG_PHASE_BOOTSTRAP) return;
@@ -359,6 +468,11 @@ void wg_boot_helper_message(struct wg_boot *boot, uint8_t tag, const uint8_t *pa
     case CTL_HELPER_CONVERSATIONS:
         start_conversations(boot, payload, length);
         break;
+#ifdef WG_FILE_CHANNEL_V1
+    case CTL_HELPER_SHARES:
+        mount_shares(boot, payload, length);
+        break;
+#endif
     case CTL_HELPER_DONE:
         if (!boot->mount_requested || !boot->data_mounted || length != 0) { wg_boot_fail_stop(boot, "done-out-of-order"); return; }
         boot->helper_done = 1;

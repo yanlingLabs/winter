@@ -41,6 +41,11 @@
 #define CTL_REPLAY_RESULT 'q'  /* one byte, 1 = the replay mounted, flushed and unmounted cleanly */
 #define CTL_MOUNT_RESULT 'm'   /* one byte, 1 = the data filesystem is mounted */
 #define CTL_CONVERSATIONS_RESULT 'r' /* two bytes: status (0 the supervisor is ready, 1 bad_conversations, 2 supervisor_failed), conversation count */
+#ifdef WG_FILE_CHANNEL_V1
+/* Host-backed shares (contract revision 3; an image that declares `file-channel-v1` is the only one that speaks it). */
+#define CTL_HELPER_SHARES 'S'  /* helper -> init: the validated, bound share set to mount (boot.h wg_share_set), at most once, after 'E' and before 'C' */
+#define CTL_SHARES_RESULT 's'  /* init -> helper: one byte, WG_SHARES_MOUNTED (0), WG_SHARES_INVENTORY (1) or WG_SHARES_MOUNT_FAILED (2) */
+#endif
 
 #define CTL_DRAIN_PAYLOAD_BYTES 37u
 
