@@ -31,12 +31,11 @@ def effective_config():
 
 
 class KernelPinTests(unittest.TestCase):
-    def test_it_is_pinned_unbuilt_and_claims_nothing_else(self):
-        self.assertEqual(PINS["status"], "pinned-unbuilt")
+    def test_it_is_built_and_reproduced_but_never_booted_and_claims_nothing_else(self):
+        self.assertEqual(PINS["status"], "built-reproduced-unbooted")
         self.assertFalse(PINS["bootVerified"])
-        self.assertIsNone(PINS["expectedOutputs"]["Image"])
-        self.assertIsNone(PINS["expectedOutputs"]["vmlinux"])
-        self.assertIsNone(PINS["expectedOutputs"]["resolvedConfig"])
+        for key in ("Image", "vmlinux", "resolvedConfig"):
+            self.assertRegex(PINS["expectedOutputs"][key], r"^[0-9a-f]{64}$")
 
     def test_the_base_config_and_fragment_are_the_pinned_bytes(self):
         self.assertEqual(sha(HERE / PINS["baseConfig"]["file"]), PINS["baseConfig"]["sha256"])

@@ -94,12 +94,20 @@ def rewrite_command(command, source, output, llvm_bin, jobs):
     return out
 
 
-def build_environment(llvm_bin):
+def path_independence_flags(work):
+    """Compiler flags that map the whole work folder (source, output and compiler live under it) to `.` in file names, debug information and macros, so the kernel does not carry the runner's path. The work folder is also a fixed path in the workflow (belt and braces)."""
+    work = str(work)
+    return " ".join(f"{flag}={work}=." for flag in ("-ffile-prefix-map", "-fdebug-prefix-map", "-fmacro-prefix-map"))
+
+
+def build_environment(llvm_bin, work=None):
     env = dict(PINS["environment"])
     env["PATH"] = f"{llvm_bin}:/usr/bin:/bin"
     env["SOURCE_DATE_EPOCH"] = CI["sourceDateEpoch"]
     env["KBUILD_BUILD_TIMESTAMP"] = CI["kbuildBuildTimestamp"]
     env["HOME"] = env.get("HOME", "/nonexistent")
+    if work is not None:
+        env["KCFLAGS"] = env["KAFLAGS"] = path_independence_flags(work)
     return env
 
 
@@ -181,7 +189,7 @@ def build(downloads, work, out):
     if not source.is_dir() or not (llvm_bin / "clang").is_file():
         raise ValueError("unexpected archive layout")
     (output / ".config").write_text(merge_config((HERE / PINS["baseConfig"]["file"]).read_text(), (HERE / PINS["fragment"]["file"]).read_text()))
-    env = build_environment(str(llvm_bin))
+    env = build_environment(str(llvm_bin), work)
     commands = [rewrite_command(command, source, output, llvm_bin, CI["jobs"]) for command in PINS["commands"]]
     with open(out / "build.log", "w") as log:
         resolve_and_build(commands, source, output, env, log)

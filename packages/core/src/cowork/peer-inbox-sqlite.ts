@@ -1,7 +1,7 @@
 import type { RuntimeStateDb } from "../runtime-state/db";
 import { durableCoworkTransaction } from "./durable-transaction";
 import { isTerminalPeerState } from "./peer-inbox";
-import type { PeerAppendResult, PeerInboxAudit, PeerInboxCaps, PeerInboxEntry, PeerInboxPatch, PeerInboxRecord, PeerInboxStore, PeerReceiptState, PeerSendIdentity } from "./peer-inbox";
+import type { PeerCommitOutcome, PeerAppendResult, PeerInboxAudit, PeerInboxCaps, PeerInboxEntry, PeerInboxPatch, PeerInboxRecord, PeerInboxStore, PeerReceiptState, PeerSendIdentity } from "./peer-inbox";
 import { CoworkError } from "./types";
 
 /*
@@ -28,7 +28,7 @@ const HANDLE_PREFIX = "pib_";
 const CONTROL = /[\u0000-\u001f\u007f]/;
 const COLUMNS = `receipt_id, sender_session_id, sender_incarnation, send_id, recipient_session_id, digest, size,
   body IS NOT NULL AS has_body, sequence, state, reason, attempts, offered_incarnation, offered_lease_epoch,
-  delivered_incarnation, delivered_lease_epoch, discarded_by, accepted_at, updated_at, version`;
+  delivered_incarnation, delivered_lease_epoch, discarded_by, offer_count, acked_hold_token, commit_confirmed_at, commit_outcome, accepted_at, updated_at, version`;
 const STATES: readonly PeerReceiptState[] = ["accepted", "delivered", "blocked", "refused"];
 const DECODER = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true });
 
@@ -37,6 +37,7 @@ interface Row {
   digest: string; size: number; has_body: number; sequence: number; state: PeerReceiptState; reason: PeerInboxRecord["reason"];
   attempts: number; offered_incarnation: string | null; offered_lease_epoch: number | null;
   delivered_incarnation: string | null; delivered_lease_epoch: number | null; discarded_by: string | null;
+  offer_count: number; acked_hold_token: string | null; commit_confirmed_at: number | null; commit_outcome: PeerCommitOutcome | null;
   accepted_at: number; updated_at: number; version: number;
 }
 
@@ -55,7 +56,7 @@ const record = (row: Row): PeerInboxRecord => ({
   attempts: row.attempts,
   offered: row.offered_incarnation === null ? null : { incarnationId: row.offered_incarnation, leaseEpoch: row.offered_lease_epoch! },
   deliveredUnder: row.delivered_incarnation === null ? null : { incarnationId: row.delivered_incarnation, leaseEpoch: row.delivered_lease_epoch! },
-  discardedBy: row.discarded_by, acceptedAt: row.accepted_at, updatedAt: row.updated_at, version: row.version,
+  discardedBy: row.discarded_by, offerCount: row.offer_count, ackedHoldToken: row.acked_hold_token, commitConfirmedAt: row.commit_confirmed_at, commitOutcome: row.commit_outcome, acceptedAt: row.accepted_at, updatedAt: row.updated_at, version: row.version,
 });
 
 export class SqlitePeerInboxStore implements PeerInboxStore {
@@ -148,6 +149,8 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
       set(columns[0], epoch === null ? null : epoch.incarnationId); set(columns[1], epoch === null ? null : epoch.leaseEpoch);
     }
     if (patch.discardedBy !== undefined) { if (patch.discardedBy !== null) checkId(patch.discardedBy); set("discarded_by", patch.discardedBy); }
+    if (patch.offerCount !== undefined) { if (!Number.isSafeInteger(patch.offerCount) || patch.offerCount < 0) throw new CoworkError("invalid_request"); set("offer_count", patch.offerCount); }
+    if (patch.ackedHoldToken !== undefined) { if (patch.ackedHoldToken !== null && !/^[0-9a-f]{64}$/.test(patch.ackedHoldToken)) throw new CoworkError("invalid_request"); set("acked_hold_token", patch.ackedHoldToken); }
     if (!Number.isFinite(patch.updatedAt)) throw new CoworkError("invalid_request");
     set("updated_at", patch.updatedAt);
     const run = () => durableCoworkTransaction(this.rs, () => {
@@ -163,6 +166,18 @@ export class SqlitePeerInboxStore implements PeerInboxStore {
     // Every update, not only the terminal one: an UPDATE rewrites the row, and a rewrite that changes its size frees the old
     // overflow chain of a large body (offer and block do exactly that), which must be zeroed too.
     return this.erasing(run);
+  }
+
+  confirm(receiptId: string, outcome: PeerCommitOutcome, at: number): PeerInboxRecord {
+    if (!Number.isFinite(at)) throw new CoworkError("invalid_request");
+    return durableCoworkTransaction(this.rs, () => {
+      const current = this.row(receiptId);
+      if (!current) throw new CoworkError("not_found");
+      if (current.state !== "delivered" || current.acked_hold_token === null) throw new CoworkError("invalid_request");
+      if (current.commit_confirmed_at !== null) return record(current);
+      this.rs.db.run("UPDATE cowork_peer_inbox SET commit_confirmed_at=?, commit_outcome=?, version=version+1 WHERE receipt_id=?", [at, outcome, receiptId]);
+      return record(this.row(receiptId)!);
+    });
   }
 
   readBody(handle: string): string | undefined {

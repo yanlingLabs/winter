@@ -16,6 +16,10 @@ import { createCoworkRecoverGuards, processStartToken } from "./guards";
 import { createCoworkLauncherPort, type CoworkLauncherPortOptions } from "./launcher-port";
 import { createCoworkHomeBindingStore, createCoworkLaunchJournal, createCoworkReceiptStore } from "./stores";
 import { readVolumeId } from "./volume-identity";
+import { createCoworkOutputsPreparer, createCoworkShareDirectoryOpener } from "./guest-dirs";
+import { CoworkGuestRecords } from "./guest-records";
+import { createCoworkProvisioningPort, type CoworkVerifiedGuestImage } from "./provisioning";
+import { CoworkError } from "../types";
 import type { CoordinationPathInputs } from "../native/admission-probes";
 
 /*
@@ -63,6 +67,10 @@ export interface CoworkNativeProductionOptions {
   readonly launcher?: Partial<Pick<CoworkLauncherPortOptions, "spawn" | "openChannel" | "closeChannelDescriptor" | "verifyProcess" | "checkExecutable" | "helloTimeoutMs">>;
   readonly daemonPid?: number;
   readonly now?: () => number;
+  /** The installed image's verified facts (the image lane's manifest check), or null. No reader exists yet, so the default is null and the provisioning port stays unavailable. */
+  readonly image?: () => CoworkVerifiedGuestImage | null;
+  /** Records the image pin for a workspace (the lifecycle authority behind it is the caller's). The default refuses. */
+  readonly pin?: (workspaceId: string, digests: { baseImageDigest: string; runtimeImageDigest: string }) => unknown;
 }
 
 export interface CoworkNativeProductionEnvironment extends CoworkNativeEnvironment {
@@ -149,8 +157,11 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   };
 
   let timer: ReturnType<typeof setInterval> | null = null;
+  const guestRecords = new CoworkGuestRecords(options.db);
   return {
     launcher, admission: ledger, backup: timeMachineVolumeBackup, hostBoot, daemon, receipts, journal,
+    guestRecords, outputs: createCoworkOutputsPreparer(options.home), shareDirectories: createCoworkShareDirectoryOpener(),
+    provisioningPort: createCoworkProvisioningPort({ db: options.db, home: options.home, backup: timeMachineVolumeBackup, guestRecords, environmentActive: () => true, image: options.image ?? (() => null), pin: options.pin ?? (() => { throw new CoworkError("unsupported_topology"); }) }),
     guards: ({ volumes }) => createCoworkRecoverGuards({ journal, processes: adapters.processes, bootId: () => probes.hostIdentity()?.bootId ?? null, home: canonicalHome, ownersHeld: workspaceId => volumes.records(workspaceId).some(volume => volume.owner !== null) }),
     probes, ledger, pressure: guard, homeId, installationId, receiptDirectory, journalDirectory,
     bindHost(host) { halt = async () => { const outcomes = await Promise.all(host.activeWorkspaces().map(workspaceId => host.stop(workspaceId, "shutdown").then(outcome => outcome.released, () => false))); return outcomes.every(Boolean); }; },

@@ -5,6 +5,7 @@
 //
 // These doubles prove host composition only. They are never native, Linux or image admission evidence (that is D5's
 // real-host run after S7B lands).
+import { coworkHeldInputVerbs } from "../../src/cowork/held-input";
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -17,9 +18,12 @@ import { QuestionBroker } from "../../src/agent/questions";
 import { COWORK_GUEST_RUNTIME_MODES } from "../../src/cowork/conversation-set";
 import { parseCoworkNativeMuxFrame, serializeCoworkNativeMuxFrame } from "../../src/cowork/native/protocol";
 import { coworkApprovalPort } from "../../src/cowork/session-door";
-import { coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
-import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
+import { coworkAcknowledgeMountedShares, coworkGuestPermissionAnswer, createCoworkSessionDrivers, type CoworkSessionDriverDeps } from "../../src/cowork/session-driver";
+import type { CoworkApprovalPort, CoworkGuestConversationContext, CoworkGuestConversationSet, CoworkGuestStartRequest, CoworkGuestRun, CoworkGuestRuntimeLink, CoworkGuestRuntimeOffer, CoworkGuestStarter, CoworkGuestStopOutcome } from "../../src/cowork/session-ports";
 import { startWinterSession } from "../../src/runtime-sdk/winter-session";
+import { CoworkRepository } from "../../src/cowork/repository";
+import { openRuntimeStateDb } from "../../src/runtime-state/db";
+import { CoworkError } from "../../src/cowork/types";
 import { ProjectionCheckpoints } from "../../src/runtime-state/checkpoints";
 import { SessionHub } from "../../src/sessions/hub";
 import { SessionStore } from "../../src/sessions/store";
@@ -138,17 +142,23 @@ const OFFER: CoworkGuestRuntimeOffer = { profile: "host-query-v1", readiness: ["
 const cleanups: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const cleanup of cleanups.splice(0).reverse()) await cleanup(); });
 
-function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs" } = {}) {
-  const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness] };
+function harness(opts: { policy?: ApprovalPolicy; conversations?: number; production?: boolean; route?: ReturnType<typeof standinRoute>; script?: (text: string, guest: ScriptedGuest) => void; afterSet?: () => void; toolClasses?: string[]; location?: "source" | "outputs"; shares?: (context: CoworkGuestConversationContext, request: CoworkGuestStartRequest) => void;
+  deps?: Partial<CoworkSessionDriverDeps>; capabilities?: string[]; echo?: ("fresh" | "resume" | undefined)[]; beforeSet?: (n: number) => void; wrapQuery?: (query: ReturnType<typeof agentQuery>) => unknown } = {}) {
+  const offer: CoworkGuestRuntimeOffer = { ...OFFER, readiness: [...OFFER.readiness], ...(opts.capabilities ? { runtimeCapability: { ...OFFER.runtimeCapability, capabilities: opts.capabilities } } : {}) };
+  const starts: CoworkGuestStartRequest[] = [];
   const storeHome = mkdtempSync(join(tmpdir(), "winter-door-d3-store-")), store = new SessionStore(storeHome), hub = new SessionHub(store);
   const sessions = Array.from({ length: opts.conversations ?? 1 }, () => store.createSession("t", { mode: "code" }));
-  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}) });
+  const f: DoorFixture = doorFixture({ policy: opts.policy ?? "ask", sessions, ...(opts.toolClasses ? { toolClasses: opts.toolClasses } : {}), ...(opts.location ? { location: opts.location } : {}), ...(opts.shares ? { ack: false } : {}) });
   const guests: ScriptedGuest[] = [], launched: Options[] = [], approvals = new ApprovalBroker(), questions = new QuestionBroker();
   const native: CoworkGuestStarter = {
     async start(workspaceId, request) {
       expect(workspaceId).toBe(f.workspaceId);
+      starts.push(request!);
       const context = f.begin(`incarnation-${guests.length + 1}`);
       let set: CoworkGuestConversationSet | null;
+      opts.beforeSet?.(guests.length);
+      // #92 N2: a v3 host reports `shares_mounted` before it asks for the set (a bootstrap fault if refused).
+      if (opts.shares) { try { opts.shares(context, request!); } catch { f.power("stopped"); throw new Error("bootstrap fault: share_mount_failed"); } }
       // The host fails the start on a refused set (a bootstrap fault); the driver must still surface ITS typed refusal.
       try { set = request!.conversations(context); } catch { f.power("stopped"); throw new Error("bootstrap fault: bad_conversations"); }
       if (set === null) throw new Error("no set");
@@ -156,6 +166,8 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
       f.power("running");
       const guest = new ScriptedGuest(context, onTheWire(set, context.incarnationId), () => f.power("stopped"));
       guest.onUser = opts.script ?? (() => {});
+      const echoed = opts.echo?.[guests.length];
+      if (echoed !== undefined) Object.assign(guest.run, { continuation: echoed });
       guests.push(guest);
       return guest.run;
     },
@@ -165,12 +177,13 @@ function harness(opts: { policy?: ApprovalPolicy; conversations?: number; produc
   const deps: CoworkSessionDriverDeps = {
     records: f.records, authority: f.authority, store, hub, checkpoints: new ProjectionCheckpoints(f.db),
     ...(opts.production ? {} : { route: opts.route ?? standinRoute(), native, offer, approvals: port }),
-    query: input => { launched.push(input.options as Options); return agentQuery(input); },
+    query: input => { launched.push(input.options as Options); const q = agentQuery(input); return (opts.wrapQuery ? opts.wrapQuery(q) : q) as ReturnType<typeof agentQuery>; },
     endGraceMs: 200,
+    ...opts.deps,
   };
   const drivers = createCoworkSessionDrivers(deps);
   cleanups.push(async () => { await drivers.beginShutdown(); store.close(); f.close(); rmSync(storeHome, { recursive: true, force: true }); });
-  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps, offer };
+  return { f, store, hub, sessions, sid: sessions[0]!, drivers, guests, launched, approvals, deps, offer, starts };
 }
 async function until(predicate: () => boolean, what = "condition") {
   const deadline = Date.now() + 3000;
@@ -272,6 +285,57 @@ test("D3b: a conversation whose location changed between ensure and the set is r
   expect(h.launched).toEqual([]);
 });
 
+test("#92 N2: at shares_mounted, before the set, a mounted folder source becomes ready for THIS incarnation, and the turn runs on it", async () => {
+  const h = harness({ script: reply("ok"), shares: (context, request) => {
+    expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+    request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: h.f.records.source(h.f.workspaceId, h.f.sourceId).revision }]);
+  } });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId)).toMatchObject({ state: "ready", ackIncarnationId: "incarnation-1" });
+  await session.send("hi", "cli"); await session.idle();
+  expect(h.guests[0]!.refusals).toEqual([]);
+});
+
+test("#92 N2: without shares_mounted the unacknowledged source refuses the set; a bad report faults the boot and acknowledges nothing", async () => {
+  const none = harness({ script: reply("never"), shares: () => {} });
+  await expect((await none.drivers.ensure(none.sid)).open()).rejects.toThrow("source_unavailable");
+  for (const [name, code, report] of [
+    ["a stale revision", "stale_acknowledgment", (f: DoorFixture) => [{ sourceId: f.sourceId, revision: f.records.source(f.workspaceId, f.sourceId).revision + 1 }]],
+    ["an unknown source", "not_found", () => [{ sourceId: "source_other", revision: 1 }]],
+    ["a repeat", "invalid_request", (f: DoorFixture) => { const r = f.records.source(f.workspaceId, f.sourceId).revision; return [{ sourceId: f.sourceId, revision: r }, { sourceId: f.sourceId, revision: r }]; }],
+    ["nothing", "invalid_request", () => []],
+  ] as [string, string, (f: DoorFixture) => { sourceId: string; revision: number }[]][]) {
+    let h: ReturnType<typeof harness> | undefined;
+    h = harness({ script: reply("never"), shares: (context, request) => request.sharesMounted!(context, report(h!.f)) });
+    const error = await (await h.drivers.ensure(h.sid)).open().then(() => undefined, (caught: unknown) => caught as CoworkError);
+    // The driver surfaces ITS typed refusal, not the host's bootstrap fault.
+    expect([name, (error as CoworkError | undefined)?.code]).toEqual([name, code]);
+    expect([name, h.f.records.source(h.f.workspaceId, h.f.sourceId).state]).toEqual([name, "preparing"]);
+    expect([name, h.launched.length]).toEqual([name, 0]);
+  }
+});
+
+test("#92 N2: only a present folder source can be acknowledged by a share (a repository is never mounted as one)", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-n2-")), db = openRuntimeStateDb(home), records = new CoworkRepository(db);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  const made = records.create({ principalId: "fixture", requestId: "c" }, { ownership: "project", title: "t", ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" },
+    sources: [{ kind: "githubRepository", access: "read-only", label: "repo", detail: { repositoryId: "repo-1", authorityRef: "auth-1", initialRef: "main" } }] });
+  const epoch = records.beginIncarnation(made.workspaceId, "inc", records.get(made.workspaceId).configRevision), source = records.sources(made.workspaceId)[0]!;
+  const context = { workspaceId: made.workspaceId, incarnationId: "inc", leaseEpoch: epoch.leaseEpoch, guestBootId: "12345678-1234-4234-8234-123456789abc" };
+  expect(() => coworkAcknowledgeMountedShares(records, context, [{ sourceId: source.sourceId, revision: source.revision }])).toThrow("stale_acknowledgment");
+  expect(records.source(made.workspaceId, source.sourceId).state).toBe("preparing");
+});
+
+test("#92 N2: shares_mounted after the set is refused (it must precede conversations)", async () => {
+  let late: (() => void) | undefined;
+  const h = harness({ script: reply("ok"), afterSet: () => { late!(); } , shares: (context, request) => {
+    request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: h.f.records.source(h.f.workspaceId, h.f.sourceId).revision }]);
+    late = () => expect(() => request.sharesMounted!(context, [{ sourceId: h.f.sourceId, revision: 1 }])).toThrow("recovery_required");
+  } });
+  await (await h.drivers.ensure(h.sid)).open();
+});
+
 test("D3b: under plan the outputs root is read-only and the runtime runs plan", async () => {
   const h = harness({ policy: "plan", location: "outputs", script: reply("ok") });
   const session = await h.drivers.ensure(h.sid);
@@ -296,6 +360,8 @@ test("plan view: not expressible in host-query-v1 yet. The real validator refuse
   // The driver never asks for the view: the approvals bridge sees planViewInstalled false (a plan scratch write is refused).
   const text = readFileSync(join(import.meta.dir, "..", "..", "src", "cowork", "session-driver.ts"), "utf8");
   expect(text).not.toMatch(/planViewMounted/);
+  // Nor the plan scratch root (conversation-set.ts builds it only when asked; the native wire refuses it today).
+  expect(text).not.toMatch(/planScratchEpoch/);
 });
 
 test("for every policy the host launch's mode equals the mode the guest's own map gives the set's policy: default or plan only", async () => {
@@ -495,4 +561,292 @@ test("between the runtime's exit and the incarnation's stop outcome, a send refu
   expect(h.store.read(h.sid).length).toBe(length);
   guest.terminate({ released: true, evidence: "orderly-receipt" });
   await until(() => h.drivers.get(h.sid) === undefined, "the close");
+});
+
+test("#92 N2 fix: a mixed report acknowledges nothing: no source ready, nothing published, no operation concluded", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-n2-mixed-")), db = openRuntimeStateDb(home), records = new CoworkRepository(db);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  const folder = { kind: "folder" as const, access: "read-write" as const, label: "f", detail: { grantRef: "grant", rootIdentity: "root" } };
+  const made = records.create({ principalId: "fixture", requestId: "c" }, { ownership: "project", title: "t", ceiling: { toolClasses: ["read"], hostServices: [], connectors: [], network: "none" }, sources: [folder, folder] });
+  const epoch = records.beginIncarnation(made.workspaceId, "inc", records.get(made.workspaceId).configRevision);
+  const [good, other] = records.sources(made.workspaceId) as [ReturnType<typeof records.source>, ReturnType<typeof records.source>];
+  const context = { workspaceId: made.workspaceId, incarnationId: "inc", leaseEpoch: epoch.leaseEpoch, guestBootId: "12345678-1234-4234-8234-123456789abc" };
+  const published = () => db.db.query("SELECT COUNT(*) AS n FROM cowork_outbox WHERE kind IN ('workspace_sources_changed','workspace_operation_changed')").get();
+  const before = published();
+  for (const [report, code] of [
+    [[{ sourceId: good.sourceId, revision: good.revision }, { sourceId: other.sourceId, revision: other.revision + 1 }], "stale_acknowledgment"],
+    [[{ sourceId: good.sourceId, revision: good.revision }, { sourceId: "source_missing", revision: 1 }], "not_found"],
+    [Array.from({ length: 13 }, (_, i) => ({ sourceId: `source_${i}`, revision: 1 })), "invalid_request"],
+  ] as [{ sourceId: string; revision: number }[], string][]) {
+    expect(() => coworkAcknowledgeMountedShares(records, context, report)).toThrow(code);
+    expect(records.sources(made.workspaceId).map(source => source.state)).toEqual(["preparing", "preparing"]);
+    expect(published()).toEqual(before);
+    expect(records.operation(made.workspaceId, made.operationId).status).toBe("pending");
+  }
+  // Both good: both ready together, and the creation concludes applied.
+  coworkAcknowledgeMountedShares(records, context, [{ sourceId: good.sourceId, revision: good.revision }, { sourceId: other.sourceId, revision: other.revision }]);
+  expect(records.sources(made.workspaceId).map(source => source.state)).toEqual(["ready", "ready"]);
+  expect(records.operation(made.workspaceId, made.operationId).status).toBe("applied");
+});
+
+test("#92 N2 fix: a report for another workspace is authority_denied; once a report is refused, the set is refused too", async () => {
+  let h: ReturnType<typeof harness> | undefined;
+  h = harness({ script: reply("never"), shares: (context, request) => request.sharesMounted!({ ...context, workspaceId: "ws_other" }, [{ sourceId: h!.f.sourceId, revision: 1 }]) });
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("authority_denied");
+  expect(h.f.records.source(h.f.workspaceId, h.f.sourceId).state).toBe("preparing");
+  // A host that swallowed the refusal and asks for the set anyway: the driver refuses it with the first refusal.
+  let s: ReturnType<typeof harness> | undefined;
+  s = harness({ script: reply("never"), shares: (context, request) => {
+    request.sharesMounted!(context, [{ sourceId: s!.f.sourceId, revision: s!.f.records.source(s!.f.workspaceId, s!.f.sourceId).revision }]);
+    try { request.sharesMounted!(context, []); } catch { /* swallowed by a faulty host */ }
+  } });
+  await expect((await s.drivers.ensure(s.sid)).open()).rejects.toThrow("invalid_request");
+  expect([s.guests.length, s.launched.length]).toEqual([0, 0]);
+});
+
+// ------------------------------------------------------------------------------------------------ #92 N3 + N4
+test("N3: a fresh start allocates the stable uids, writes started ahead of the set, and the first completed turn records created", async () => {
+  const h = harness({ script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open();
+  expect(h.f.records.storeState(h.sid)).toEqual({ storeState: "started", lastIncarnationId: "incarnation-1", runtimeUid: 2001, toolUid: 2002 });
+  const item = h.guests[0]!.set.conversations[0]!;
+  expect([item.runtimeUid, item.toolUid]).toEqual([2001, 2002]);
+  expect(h.starts[0]!.resume).toBeUndefined();
+  await session.send("hi", "cli"); await session.idle();
+  expect(h.f.records.storeState(h.sid).storeState).toBe("created");
+  expect(session.resumed).toBe(false);
+  // The set carries the ALLOCATED pair, not fixed picks: with another conversation's uids taken, this one gets the next pair.
+  const two = harness({ conversations: 2, script: reply("ok") });
+  expect(two.f.records.allocateGuestUids(two.sessions[1]!, 2000)).toEqual({ runtimeUid: 2001, toolUid: 2002 });
+  await (await two.drivers.ensure(two.sid)).open();
+  const sent = two.guests[0]!.set.conversations[0]!;
+  expect([sent.runtimeUid, sent.toolUid]).toEqual([2003, 2004]);
+});
+
+test("N3 gate: without the cold-resume port a conversation whose guest received a set never starts again (every production host)", async () => {
+  const h = harness({ script: reply("ok") });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle(); await session.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(1);
+});
+
+test("N3 gated on: a created store resumes under the SAME backend identity and uids, with continuation resume and the proven-ended boots", async () => {
+  const h = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  // S7B records the first boot and its proven end (D1 evidence) after release.
+  h.f.db.db.run("INSERT INTO cowork_guest_boots(workspace_id,incarnation_id,lease_epoch,guest_boot_id,recorded_at,ended_proof,ended_at) VALUES(?,?,?,?,'t','orderly-receipt','t')",
+    [h.f.workspaceId, "incarnation-1", h.guests[0]!.context.leaseEpoch, h.guests[0]!.context.guestBootId]);
+  const second = await h.drivers.ensure(h.sid);
+  expect(second.resumed).toBe(true);
+  expect(second.backendSessionId).toBe(first.backendSessionId);
+  await second.open();
+  expect(h.starts[1]!.resume).toEqual({ continuation: "resume", endedGuestBoots: [h.guests[0]!.context.guestBootId] });
+  const before = h.guests[0]!.set.conversations[0]!, after = h.guests[1]!.set.conversations[0]!;
+  expect([after.runtimeUid, after.toolUid, after.authority.sessionId]).toEqual([before.runtimeUid, before.toolUid, before.authority.sessionId]);
+  expect([(h.launched[0] as { resume?: string }).resume, (h.launched[1] as { resume?: string }).resume]).toEqual([undefined, first.backendSessionId]);
+  expect(h.f.records.storeState(h.sid)).toMatchObject({ storeState: "created", lastIncarnationId: "incarnation-2" });
+  await second.send("again", "cli"); await second.idle();
+  expect(h.guests[1]!.refusals).toEqual([]);
+});
+
+test("N3 gated on: a started store (no completed turn) resumes as `either`; a lost store refuses and starts nothing", async () => {
+  const h = harness({ script: () => {}, echo: [undefined, "fresh"], deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  expect(h.f.records.storeState(h.sid).storeState).toBe("started");
+  const second = await h.drivers.ensure(h.sid);
+  await second.open();
+  expect(h.starts[1]!.resume).toEqual({ continuation: "either", endedGuestBoots: [] });
+  expect((h.launched[1] as { resume?: string }).resume).toBeUndefined(); // `either`, the guest echoed `fresh`: no store to resume
+  await second.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the second incarnation to end");
+  h.f.records.markStoreLost(h.sid);
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(2);
+});
+
+/** Ends the first incarnation of a started-store conversation (no completed turn), so the next `ensure` plans `either`. */
+async function startedThenEnded(h: ReturnType<typeof harness>) {
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  expect(h.f.records.storeState(h.sid).storeState).toBe("started");
+}
+
+test("N3 (CR2): an `either` start sets the query's resume only when the guest echoes `resume`; no echo is refused, never guessed", async () => {
+  const found = harness({ script: () => {}, echo: [undefined, "resume"], deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(found);
+  const second = await found.drivers.ensure(found.sid);
+  await second.open();
+  expect((found.launched[1] as { resume?: string }).resume).toBe(second.backendSessionId);
+  // No echo: the host cannot tell fresh from resume, so the incarnation is stopped before any query is built.
+  const silent = harness({ script: () => {}, deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(silent);
+  const third = await silent.drivers.ensure(silent.sid);
+  await expect(third.open()).rejects.toThrow("recovery_required");
+  expect(silent.launched).toHaveLength(1);
+  expect(silent.guests[1]!.stops).toEqual(["user"]);
+  // A created store whose guest says `fresh` lost its store: never started fresh under the old identity.
+  const missing = harness({ script: reply("ok"), echo: [undefined, "fresh"], deps: { coldResume: { ownerPatchApplied: true } } });
+  const one = await missing.drivers.ensure(missing.sid);
+  await one.open(); await one.send("hi", "cli"); await one.idle(); await one.end();
+  await until(() => missing.drivers.get(missing.sid) === undefined, "the incarnation to end");
+  await expect((await missing.drivers.ensure(missing.sid)).open()).rejects.toThrow("recovery_required");
+  expect(missing.launched).toHaveLength(1);
+});
+
+test("N3 (L8): a store marked lost while the native start runs is refused at the set, in the repository and in the driver", async () => {
+  const h = harness({ script: reply("ok"), beforeSet: n => { if (n === 1) h.f.records.markStoreLost(h.sid); }, deps: { coldResume: { ownerPatchApplied: true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("cold_resume_unavailable");
+  expect(h.guests).toHaveLength(1);
+  expect(h.f.records.storeState(h.sid).storeState).toBe("lost");
+  // The repository refuses to assign (and so to send) over a lost store, and never moves it back to started.
+  expect(() => h.f.records.assignConversationBackend(h.sid, first.backendSessionId, "incarnation-9")).toThrow("cold_resume_unavailable");
+  expect(h.f.records.storeState(h.sid)).toMatchObject({ storeState: "lost", lastIncarnationId: "incarnation-1" });
+});
+
+test("N3 (L8): a plan that no longer matches the store state at the set (started became created) is refused by the driver", async () => {
+  const h = harness({ script: () => {}, echo: [undefined, "resume"], beforeSet: n => { if (n === 1) h.f.records.markStoreCreated(h.sid); }, deps: { coldResume: { ownerPatchApplied: true } } });
+  await startedThenEnded(h);
+  await expect((await h.drivers.ensure(h.sid)).open()).rejects.toThrow("cold_resume_unavailable");
+  expect(h.guests).toHaveLength(1);
+});
+
+test("N3 gate: the cold-resume port without ownerPatchApplied true refuses like no port", async () => {
+  const h = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: undefined as unknown as true } } });
+  const first = await h.drivers.ensure(h.sid);
+  await first.open(); await first.send("hi", "cli"); await first.idle(); await first.end();
+  await until(() => h.drivers.get(h.sid) === undefined, "the incarnation to end");
+  await expect(h.drivers.ensure(h.sid)).rejects.toThrow("cold_resume_unavailable");
+  expect(h.starts).toHaveLength(1);
+  for (const unset of [false, 1, "true", null] as unknown[]) {
+    const g = harness({ script: reply("ok"), deps: { coldResume: { ownerPatchApplied: unset as true } } });
+    const s = await g.drivers.ensure(g.sid);
+    await s.open(); await s.send("hi", "cli"); await s.idle(); await s.end();
+    await until(() => g.drivers.get(g.sid) === undefined, "the incarnation to end");
+    await expect(g.drivers.ensure(g.sid)).rejects.toThrow("cold_resume_unavailable");
+  }
+});
+
+const HOLD_HEX = "b".repeat(64);
+function heldQuery(calls: unknown[]) {
+  return (query: ReturnType<typeof agentQuery>) => Object.assign(query, {
+    holdInput: async (request: unknown) => { calls.push(["hold", request]); return { held: true }; },
+    commitInput: async (inputId: string, token: string) => { calls.push(["commit", inputId, token]); return { outcome: "queued" }; },
+    discardInput: async () => ({ discarded: true }), forgetInput: async () => ({ forgotten: true }),
+  });
+}
+
+const heldGate = (reconcile: (context: { sessionId: string; inputs: readonly unknown[]; epoch: { incarnationId: string; leaseEpoch: number }; verbs: unknown }) => void | Promise<void> = () => {}) => ({ enabled: true as const, reconcile: reconcile as never });
+const HELD_CAPS = ["confined-guest-posture-v1", "held-input-v1"];
+/** A guest turn that also emits `system/held_inputs` (once, after init), carrying `inputs`. */
+const heldReply = (inputs: unknown, times = 1) => (_: string, guest: ScriptedGuest) => {
+  const sessionId = guest.set.conversations[0]!.authority.sessionId;
+  guest.data(systemInit({ session_id: sessionId, model: FIXTURE_MODEL, tools: ["Read", "Edit", "Write", "Bash"], permissionMode: SDK_HOST_QUERY_MODES[guest.set.conversations[0]!.policy] }));
+  for (let i = 0; i < times; i++) guest.data({ type: "system", subtype: "held_inputs", inputs, uuid: "11111111-1111-4111-8111-111111111111", session_id: sessionId } as never);
+  guest.data(assistantText("ok")); guest.data(result());
+};
+const holdOne = (session: Awaited<ReturnType<ReturnType<typeof harness>["drivers"]["ensure"]>>) => session.heldInput!.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "hello", clientName: "peer" });
+
+test("N4 gate: heldInput exists only with the host's gate AND a runtime offering held-input-v1", async () => {
+  const withBoth = harness({ script: reply("ok"), capabilities: HELD_CAPS, deps: { heldInput: heldGate() } });
+  expect((await withBoth.drivers.ensure(withBoth.sid)).heldInput).toBeDefined();
+  const noGate = harness({ script: reply("ok"), capabilities: HELD_CAPS });
+  expect((await noGate.drivers.ensure(noGate.sid)).heldInput).toBeUndefined();
+  const oldRuntime = harness({ script: reply("ok"), deps: { heldInput: heldGate() } });
+  expect((await oldRuntime.drivers.ensure(oldRuntime.sid)).heldInput).toBeUndefined();
+});
+
+test("N4: the verbs reach the live query bound to the running incarnation, only after system/held_inputs was reconciled", async () => {
+  const calls: unknown[] = [], reconciled: unknown[] = [];
+  const h = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(({ inputs, epoch }) => { reconciled.push([inputs, epoch]); }) }, wrapQuery: heldQuery(calls) });
+  const session = await h.drivers.ensure(h.sid);
+  await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
+  await session.open();
+  // The run exists but the runtime has not reported its held inputs: no verb may bind yet.
+  expect(session.coworkEpoch).toBeUndefined(); // rule 1: the epoch is not published before the reconcile
+  await expect(holdOne(session)).rejects.toThrow("cold_resume_unavailable");
+  await session.send("hi", "cli"); await session.idle();
+  await until(() => reconciled.length === 1, "the reconcile");
+  const context = h.guests[0]!.context;
+  expect(reconciled).toEqual([[[], { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }]]);
+  expect(session.coworkEpoch).toEqual({ incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch });
+  expect(await holdOne(session)).toEqual({ held: true });
+  expect(await session.heldInput!.commit("r1", HOLD_HEX)).toEqual({ outcome: "queued" });
+  expect(calls).toEqual([["hold", { inputId: "r1", holdToken: HOLD_HEX, epoch: { incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch }, text: "hello", clientName: "peer" }], ["commit", "r1", HOLD_HEX]]);
+  await session.end();
+  await expect(session.heldInput!.commit("r1", HOLD_HEX)).rejects.toThrow("cold_resume_unavailable");
+  expect(calls).toHaveLength(2);
+});
+
+test("N4 rule 1: the epoch is published only when the reconcile RESOLVES; a throw, a malformed list or no reconcile leaves the verbs refused; it runs once", async () => {
+  // Pending until released.
+  let release!: () => void, count = 0;
+  const pending = harness({ script: heldReply([], 2), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { count++; return new Promise<void>(r => { release = r; }); }) }, wrapQuery: heldQuery([]) });
+  const a = await pending.drivers.ensure(pending.sid);
+  await a.open(); await a.send("hi", "cli"); await a.idle();
+  await until(() => count === 1, "the reconcile to start");
+  await expect(holdOne(a)).rejects.toThrow("cold_resume_unavailable");
+  release();
+  await Bun.sleep(30);
+  expect(await holdOne(a)).toEqual({ held: true });
+  expect(count).toBe(1); // the repeat message did not reconcile again
+  // A throw: refused for the incarnation.
+  const failing = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { throw new Error("ledger"); }), log: () => {} }, wrapQuery: heldQuery([]) });
+  const b = await failing.drivers.ensure(failing.sid);
+  await b.open(); await b.send("hi", "cli"); await b.idle(); await Bun.sleep(30);
+  await expect(holdOne(b)).rejects.toThrow("cold_resume_unavailable");
+  // A malformed list never reaches the reconcile.
+  let called = 0;
+  const bad = harness({ script: heldReply([{ inputId: "r1", digest: "nope", holdToken: HOLD_HEX, state: "held" }]), capabilities: HELD_CAPS, deps: { heldInput: heldGate(() => { called++; }), log: () => {} }, wrapQuery: heldQuery([]) });
+  const c = await bad.drivers.ensure(bad.sid);
+  await c.open(); await c.send("hi", "cli"); await c.idle(); await Bun.sleep(30);
+  expect(called).toBe(0);
+  await expect(holdOne(c)).rejects.toThrow("cold_resume_unavailable");
+  // A gate with no reconcile is not a gate: the verbs never bind.
+  const bare = harness({ script: heldReply([]), capabilities: HELD_CAPS, deps: { heldInput: { enabled: true } as never, log: () => {} }, wrapQuery: heldQuery([]) });
+  const d = await bare.drivers.ensure(bare.sid);
+  await d.open(); await d.send("hi", "cli"); await d.idle(); await Bun.sleep(30);
+  await expect(holdOne(d)).rejects.toThrow("cold_resume_unavailable");
+});
+
+test("N4 rule 1: the reconcile's verbs work BEFORE the epoch is published, and `published` fires only after it is", async () => {
+  const calls: unknown[] = [], order: string[] = [];
+  const h = harness({
+    script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), capabilities: HELD_CAPS, wrapQuery: heldQuery(calls),
+    deps: { heldInput: { enabled: true, reconcile: (async ({ sessionId, inputs, verbs }: { sessionId: string; inputs: readonly { inputId: string; holdToken: string }[]; verbs: { discard(id: string, token: string): Promise<unknown> } }) => {
+      order.push(`reconcile:${sessionId === h.sid}`);
+      expect(h.drivers.get(h.sid)!.coworkEpoch).toBeUndefined(); // not yet published ...
+      await verbs.discard(inputs[0]!.inputId, inputs[0]!.holdToken); // ... but the reconcile can decide the held input
+    }) as never, published: sessionId => { order.push(`published:${sessionId === h.sid}:${h.drivers.get(h.sid)!.coworkEpoch !== undefined}`); } } },
+  });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle();
+  await until(() => order.length === 2, "the reconcile and the publication");
+  expect(order).toEqual(["reconcile:true", "published:true:true"]);
+});
+
+test("N4 (rule 1): a gate-on runtime WITHOUT held-input-v1 that forges system/held_inputs gets no reconcile, no verbs and no tap effect", async () => {
+  let reconciled = 0;
+  const h = harness({ script: heldReply([{ inputId: "r9", digest: "a".repeat(64), holdToken: HOLD_HEX, state: "held" }]), deps: { heldInput: heldGate(() => { reconciled++; }) } });
+  const session = await h.drivers.ensure(h.sid);
+  await session.open(); await session.send("hi", "cli"); await session.idle(); await Bun.sleep(30);
+  expect(reconciled).toBe(0);
+  expect(session.heldInput).toBeUndefined();
+  expect(session.coworkEpoch).toBeDefined(); // not held back: this runtime is not a held-input runtime
+});
+
+test("N4: the hold verb refuses text whose trimStart starts with `/` (a slash command ends the host-query guest)", async () => {
+  const verbs = coworkHeldInputVerbs(() => ({ holdInput: async () => ({ held: true }), commitInput: async () => ({}), discardInput: async () => ({}), forgetInput: async () => ({}) }), () => ({ incarnationId: "i", leaseEpoch: 1 }));
+  for (const text of ["/clear", "  \n/x", "\t/compact now"]) await expect(verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text, clientName: "peer" })).rejects.toThrow("invalid_request");
+  expect(await verbs.hold({ inputId: "r1", holdToken: HOLD_HEX, text: "a/b", clientName: "peer" })).toEqual({ held: true });
 });

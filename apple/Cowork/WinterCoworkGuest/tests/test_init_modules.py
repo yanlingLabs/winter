@@ -649,7 +649,12 @@ class TrustedConfigTests(InitModuleCase):
         """The helper's `conversations_payload` (Python) against `wg_parse_conversation_payload` (C), on the contract's own vectors."""
         vectors = json.loads((ROOT / "vectors/mux-frames.json").read_text())["positive"]
         for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
-            message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == name), "down")
+            # The vectors are revision 3; PID 1 here is the production build (no file channel), so it reads the plain payload the revision-2 helper sends for the same set.
+            gb.set_revision_three(True)
+            try:
+                message = gb.parse_bootstrap_message(next(bytes.fromhex(v["hex"])[16:] for v in vectors if v["name"] == name), "down")
+            finally:
+                gb.set_revision_three(False)
             payload = gb.conversations_payload(message)
             fields = self.run_tool("convparse", payload.hex()).split("|")
             profile = {None: 0, "host-query-v1": 1, "host-query-guided-v1": 2}[message["profile"]]

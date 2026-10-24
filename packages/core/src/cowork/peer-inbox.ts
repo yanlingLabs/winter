@@ -50,6 +50,11 @@ export type PeerEpoch = Pick<GuestEpoch, "incarnationId" | "leaseEpoch">;
 export interface PeerSendIdentity { senderSessionId: string; senderIncarnation: string; sendId: string }
 export interface PeerSendRequest extends PeerSendIdentity { recipientSessionId: string; text: string }
 
+/** #92 4.5: how the guest runtime took a committed held input (`lost`: it had no record of it, terminal). */
+export type PeerCommitOutcome = "folded" | "queued" | "started" | "already" | "lost";
+const COMMIT_OUTCOMES: readonly string[] = ["folded", "queued", "started", "already", "lost"];
+const HOLD_TOKEN = /^[0-9a-f]{64}$/;
+
 export interface PeerInboxRecord {
   readonly receiptId: string;
   readonly senderSessionId: string; readonly senderIncarnation: string; readonly sendId: string;
@@ -71,6 +76,13 @@ export interface PeerInboxRecord {
    * Kept for audit only: a host identity must never reach a possibly untrusted guest agent, so no `PeerReceipt`
    * (the sender-visible projection) carries it. */
   readonly discardedBy: string | null;
+  /** #92 4.5: how many times `offer` offered this record (the hold token's input). Incremented by `offer`. */
+  readonly offerCount: number;
+  /** The hold token the ack landed under (held-input delivery only), stored atomically with the delivery; else null. */
+  readonly ackedHoldToken: string | null;
+  /** When the host confirmed the guest took the commit (held-input delivery only), and how. Both set together, or neither. */
+  readonly commitConfirmedAt: number | null;
+  readonly commitOutcome: PeerCommitOutcome | null;
   readonly acceptedAt: number; readonly updatedAt: number;
   /** Compare-and-set token, bumped by every update. */
   readonly version: number;
@@ -79,7 +91,7 @@ export interface PeerInboxRecord {
 export type PeerInboxEntry = Pick<PeerInboxRecord, "receiptId" | "senderSessionId" | "senderIncarnation" | "sendId" | "recipientSessionId" | "digest" | "size" | "acceptedAt">;
 /** The only fields `update` may change. An unspecified (or `undefined`) field is left untouched; an explicit `null`
  * clears a nullable one. Anything else on the object is ignored, so `sequence`, identity and digest are immutable. */
-export type PeerInboxPatch = Partial<Pick<PeerInboxRecord, "state" | "reason" | "attempts" | "offered" | "deliveredUnder" | "discardedBy">> & { updatedAt: number };
+export type PeerInboxPatch = Partial<Pick<PeerInboxRecord, "state" | "reason" | "attempts" | "offered" | "deliveredUnder" | "discardedBy" | "offerCount" | "ackedHoldToken">> & { updatedAt: number };
 /** Exhaustion bounds, decided by the store INSIDE its atomic append. */
 export interface PeerInboxCaps { maxUnresolvedPerRecipient: number; maxUnresolvedPerSenderRecipient: number; maxUnresolvedBytesPerRecipient: number }
 export type PeerAppendResult =
@@ -143,6 +155,10 @@ export interface PeerInboxStore {
    * MUST throw, never return `undefined`: the ledger treats `undefined` as a damaged body, and the host
    * `discard` exit would then drop a healthy message after a transient failure. */
   readBody(handle: string): string | undefined;
+  /** #92 4.5: marks a DELIVERED record whose held input the guest took (`commitConfirmedAt` and `commitOutcome`, set together).
+   * Not a compare-and-set: the first confirmation wins, a later one returns the record unchanged. A record that is not
+   * delivered, or has no `ackedHoldToken`, throws invalid_request. The record stays terminal. */
+  confirm(receiptId: string, outcome: PeerCommitOutcome, at: number): PeerInboxRecord;
   /** Removes a TERMINAL record; a non-terminal one throws invalid_request and stays. The recipient's sequence
    * counter is untouched, including across a restart. */
   remove(receiptId: string): void;
@@ -164,8 +180,11 @@ export type PeerAcceptResult =
   | { outcome: "retained"; receipt: PeerReceipt }
   /** Not persisted and no receipt: a refused attempt creates no durable state and wakes nothing. */
   | { outcome: "refused"; reason: PeerAcceptRefusal };
-export interface PeerOffer { receipt: PeerReceipt; body: string; epoch: PeerEpoch }
-export interface PeerAck { receiptId: string; recipientSessionId: string; epoch: PeerEpoch }
+export interface PeerOffer { receipt: PeerReceipt; body: string; epoch: PeerEpoch; /** The record's offer counter after this offer (>= 1). */ offerCount: number }
+/** `holdToken`: the hold the recipient's runtime holds this input under (#92 4.5); stored as `ackedHoldToken` atomically with the delivery. */
+export interface PeerAck { receiptId: string; recipientSessionId: string; epoch: PeerEpoch; holdToken?: string }
+/** What a held input's final disposition must be, from the ledger alone (#92 4.5). */
+export type PeerVerdict = { action: "commit"; ackedHoldToken: string } | { action: "discard" };
 /** The door out for a record that would otherwise sit forever. `user` must be an authenticated local user
  * client (the wired surface supplies the principal; peers and runtime principals must never reach it); `host`
  * drops only a head whose body is provably damaged. */
@@ -288,7 +307,7 @@ export class CoworkPeerInbox {
     const records = durable(() => this.store.unresolved(recipientSessionId));
     // A record parked only for authority is runnable again the moment its pair may send; one the delivery owner
     // blocked (grants, resources, recovery) is not, until that owner retries it.
-    const runnable = records.filter(record => (record.state === "accepted" || (record.state === "blocked" && record.reason === "authority")) && this.verdict(record, verdicts)).length;
+    const runnable = records.filter(record => (record.state === "accepted" || (record.state === "blocked" && record.reason === "authority")) && this.pairVerdict(record, verdicts)).length;
     return { runnable, blocked: records.length - runnable };
   }
 
@@ -319,8 +338,8 @@ export class CoworkPeerInbox {
       if (!(head.state === "blocked" && head.reason === "recovery")) this.move(head, { state: "blocked", reason: "recovery", offered: null });
       return undefined;
     }
-    const offered = this.move(head, { state: "accepted", reason: null, attempts: head.attempts + 1, offered: { incarnationId: epoch.incarnationId, leaseEpoch: epoch.leaseEpoch } });
-    return { receipt: view(offered), body, epoch: { incarnationId: epoch.incarnationId, leaseEpoch: epoch.leaseEpoch } };
+    const offered = this.move(head, { state: "accepted", reason: null, attempts: head.attempts + 1, offerCount: head.offerCount + 1, offered: { incarnationId: epoch.incarnationId, leaseEpoch: epoch.leaseEpoch } });
+    return { receipt: view(offered), body, epoch: { incarnationId: epoch.incarnationId, leaseEpoch: epoch.leaseEpoch }, offerCount: offered.offerCount };
   }
 
   /** The recipient durably acknowledged the input (not that a model read it). Refused unless the ack carries
@@ -329,6 +348,7 @@ export class CoworkPeerInbox {
    * recipient runtime discards the input it was holding). Idempotent for the same epoch once delivered. */
   ack(request: PeerAck): PeerReceipt {
     checkId(request?.receiptId); checkId(request.recipientSessionId); checkEpoch(request.epoch);
+    if (request.holdToken !== undefined && (typeof request.holdToken !== "string" || !HOLD_TOKEN.test(request.holdToken))) throw new CoworkError("invalid_request");
     const record = durable(() => this.store.get(request.receiptId));
     if (!record || record.recipientSessionId !== request.recipientSessionId) throw new CoworkError("not_found");
     if (record.state === "delivered") {
@@ -338,7 +358,36 @@ export class CoworkPeerInbox {
     if (record.state !== "accepted" || record.offered === null) throw new CoworkError("stale_acknowledgment");
     if (!sameEpoch(record.offered, request.epoch) || !this.epochCurrent(record.recipientSessionId, request.epoch)) throw new CoworkError("stale_acknowledgment");
     if (!this.permitted(record)) { this.deny(record); throw new CoworkError("authority_denied"); }
-    return view(this.move(record, { state: "delivered", reason: null, offered: null, deliveredUnder: record.offered }));
+    return view(this.move(record, { state: "delivered", reason: null, offered: null, deliveredUnder: record.offered, ...(request.holdToken === undefined ? {} : { ackedHoldToken: request.holdToken }) }));
+  }
+
+  /** #92 4.5: what to do with a held input of `receiptId` that the recipient's runtime reports holding. `delivered` with a
+   * recorded ack token commits under THAT token; everything else (accepted, blocked, refused, an unknown id, another
+   * recipient's id, a delivery that recorded no token) discards. Read-only. */
+  verdict(receiptId: string, recipientSessionId: string): PeerVerdict {
+    checkId(receiptId); checkId(recipientSessionId);
+    const record = durable(() => this.store.get(receiptId));
+    if (record && record.recipientSessionId === recipientSessionId && record.state === "delivered" && record.ackedHoldToken !== null) return { action: "commit", ackedHoldToken: record.ackedHoldToken };
+    return { action: "discard" };
+  }
+
+  /** #92 4.5: the host learned how the guest took the committed input. Delivered, held-input receipts only. Idempotent: the
+   * first outcome stays. Without this mark `prune` keeps the record (its verdict may still be needed). */
+  confirmCommitted(receiptId: string, outcome: PeerCommitOutcome): PeerReceipt {
+    checkId(receiptId);
+    if (!COMMIT_OUTCOMES.includes(outcome)) throw new CoworkError("invalid_request");
+    const record = durable(() => this.store.get(receiptId));
+    if (!record) throw new CoworkError("not_found");
+    if (record.state !== "delivered" || record.ackedHoldToken === null) throw new CoworkError("invalid_request");
+    if (record.commitConfirmedAt !== null) return view(record);
+    return view(durable(() => this.store.confirm(receiptId, outcome, this.now())));
+  }
+
+  /** #92 4.5 rule 3: this recipient's delivered held-input receipts the host has not confirmed, oldest first. */
+  deliveredUnconfirmed(recipientSessionId: string): Array<{ receiptId: string; ackedHoldToken: string }> {
+    checkId(recipientSessionId);
+    return durable(() => this.store.terminal(recipientSessionId)).filter(record => record.state === "delivered" && record.ackedHoldToken !== null && record.commitConfirmedAt === null)
+      .map(record => ({ receiptId: record.receiptId, ackedHoldToken: record.ackedHoldToken! }));
   }
 
   /** The delivery owner cannot deliver now (grants, resources, recovery). Only the owner of the CURRENT offer
@@ -388,7 +437,8 @@ export class CoworkPeerInbox {
     const at = this.now(), ttl = this.limits.terminalTtlMs, keep = this.limits.terminalKeepPerRecipient;
     let removed = 0;
     for (const recipient of recipientSessionId === undefined ? durable(() => this.store.recipients()) : [recipientSessionId]) {
-      const terminal = durable(() => this.store.terminal(recipient));
+      // A delivered held input the host has not confirmed is never pruned: its verdict may still be asked for (#92 4.5).
+      const terminal = durable(() => this.store.terminal(recipient)).filter(record => !(record.state === "delivered" && record.ackedHoldToken !== null && record.commitConfirmedAt === null));
       const live = terminal.filter(record => at - record.updatedAt <= ttl);
       const doomed = [...terminal.filter(record => at - record.updatedAt > ttl), ...live.slice(0, Math.max(0, live.length - keep))];
       for (const record of doomed) { durable(() => this.store.remove(record.receiptId)); removed++; }
@@ -410,7 +460,7 @@ export class CoworkPeerInbox {
     return mayContactCoworkPeer(this.records, record.senderSessionId, record.recipientSessionId, "send");
   }
   /** One authority answer per (sender, recipient) pair per pass. */
-  private verdict(record: PeerInboxRecord, verdicts: Map<string, boolean>): boolean {
+  private pairVerdict(record: PeerInboxRecord, verdicts: Map<string, boolean>): boolean {
     const key = JSON.stringify([record.senderSessionId, record.recipientSessionId]);
     let allowed = verdicts.get(key);
     if (allowed === undefined) { allowed = this.permitted(record); verdicts.set(key, allowed); }
@@ -420,7 +470,7 @@ export class CoworkPeerInbox {
   private sweep(recipientSessionId: string): PeerInboxRecord[] {
     const verdicts = new Map<string, boolean>(), eligible: PeerInboxRecord[] = [];
     for (const record of durable(() => this.store.unresolved(recipientSessionId))) {
-      if (this.verdict(record, verdicts)) eligible.push(record); else this.deny(record);
+      if (this.pairVerdict(record, verdicts)) eligible.push(record); else this.deny(record);
     }
     return eligible;
   }
@@ -477,7 +527,7 @@ export interface PeerInboxMemoryState {
   bodyCounter: number;
 }
 export const createPeerInboxMemoryState = (): PeerInboxMemoryState => ({ records: new Map(), identities: new Map(), bodies: new Map(), sequences: new Map(), bodyCounter: 0 });
-const PATCHABLE = ["state", "reason", "attempts", "offered", "deliveredUnder", "discardedBy", "updatedAt"] as const;
+const PATCHABLE = ["state", "reason", "attempts", "offered", "deliveredUnder", "discardedBy", "offerCount", "ackedHoldToken", "updatedAt"] as const;
 const identityKey = (identity: PeerSendIdentity): string => JSON.stringify([identity.senderSessionId, identity.senderIncarnation, identity.sendId]);
 
 export class InMemoryPeerInboxStore implements PeerInboxStore {
@@ -502,7 +552,7 @@ export class InMemoryPeerInboxStore implements PeerInboxStore {
     if (open.reduce((total, record) => total + record.size, 0) + entry.size > caps.maxUnresolvedBytesPerRecipient) return { status: "full", reason: "inbox_bytes_full" };
 
     const previous = this.state.sequences.get(entry.recipientSessionId) ?? 0, sequence = previous + 1, handle = `body_${this.state.bodyCounter + 1}`;
-    const record: PeerInboxRecord = { ...entry, bodyHandle: handle, sequence, state: "accepted", reason: null, attempts: 0, offered: null, deliveredUnder: null, discardedBy: null, updatedAt: entry.acceptedAt, version: 1 };
+    const record: PeerInboxRecord = { ...entry, bodyHandle: handle, sequence, state: "accepted", reason: null, attempts: 0, offered: null, deliveredUnder: null, discardedBy: null, offerCount: 0, ackedHoldToken: null, commitConfirmedAt: null, commitOutcome: null, updatedAt: entry.acceptedAt, version: 1 };
     const undo: Array<() => void> = [];
     try {
       this.beforeWrite(); this.state.bodies.set(handle, body); undo.push(() => { this.state.bodies.delete(handle); });
@@ -540,6 +590,15 @@ export class InMemoryPeerInboxStore implements PeerInboxStore {
       this.state.records.set(receiptId, { ...next, bodyHandle: null });
     } else this.state.records.set(receiptId, next);
     return { ...this.state.records.get(receiptId)! };
+  }
+  confirm(receiptId: string, outcome: PeerCommitOutcome, at: number): PeerInboxRecord {
+    const current = this.state.records.get(receiptId);
+    if (!current) throw new CoworkError("not_found");
+    if (current.state !== "delivered" || current.ackedHoldToken === null) throw new CoworkError("invalid_request");
+    if (current.commitConfirmedAt !== null) return { ...current };
+    const next: PeerInboxRecord = { ...current, commitConfirmedAt: at, commitOutcome: outcome, version: current.version + 1 };
+    this.state.records.set(receiptId, next);
+    return { ...next };
   }
   readBody(handle: string): string | undefined { return this.state.bodies.get(handle); }
   remove(receiptId: string): void {

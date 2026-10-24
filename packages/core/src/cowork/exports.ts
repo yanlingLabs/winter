@@ -71,6 +71,13 @@ export class CoworkExports {
     return row ? record(row) : null;
   }
 
+  /** The generation still being prepared for a workspace, if any. A crash between `prepare` and `complete`/`fail` leaves one
+   * behind, and it blocks every later export with `export_in_progress` until something calls `fail` on it. */
+  inFlight(workspaceId: string): CoworkExportRecord | null {
+    const row = this.rs.db.query<Row, [string]>("SELECT * FROM cowork_exports WHERE workspace_id=? AND state='prepared'").get(lifecycleId(workspaceId));
+    return row ? record(row) : null;
+  }
+
   /** Record one export generation for a stopped, unowned workspace whose volumes are ready and whose images
    * are pinned. The manifest is derived from canonical rows inside this one transaction, so it describes one
    * state. Only one generation may be in flight per workspace. */

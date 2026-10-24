@@ -146,6 +146,99 @@
       "refusedAt": null
     },
     {
+      "name": "an-empty-out-end-frame-clears-nothing",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 0,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 2
+    },
+    {
+      "name": "an-empty-err-end-frame-clears-nothing",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "err",
+          "bytes": 0,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 2
+    },
+    {
+      "name": "a-one-byte-out-frame-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "a-one-byte-out-frame-with-end-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "out",
+          "bytes": 1,
+          "end": true
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
+      "name": "a-one-byte-err-frame-clears-it",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "err",
+          "bytes": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 1048576
+        }
+      ],
+      "refusedAt": null
+    },
+    {
       "name": "two-chunks-then-more-than-the-rest",
       "steps": [
         {
@@ -158,6 +251,318 @@
         }
       ],
       "refusedAt": 1
+    }
+  ],
+  "fileRequestBytes": 16384,
+  "fileResponseBytes": 393216,
+  "fileInFlightRequests": 4,
+  "fileNote": "Contract revision 3, the guest file channel on conversation 0. A step is `bytes` payload bytes of which the last `newlines` are line ends. FILE_IN request lines count against their own bound (fileInFlightRequests outstanding, fileRequestBytes per line, newline included); a request is answered when a FILE_OUT response line ends; FILE_OUT bytes never clear the runtime IN count and FILE_IN bytes never add to it. `refusedAt` is the index of the first refused step and `error` its code, or null when every step is accepted.",
+  "fileCases": [
+    {
+      "name": "four-outstanding-requests-are-accepted",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "a-fifth-outstanding-request-is-refused",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": 4,
+      "error": "oversize"
+    },
+    {
+      "name": "a-response-frees-one-slot",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_out",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "four-requests-in-one-frame",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 400,
+          "newlines": 4
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "five-requests-in-one-frame-are-refused",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 500,
+          "newlines": 5
+        }
+      ],
+      "refusedAt": 0,
+      "error": "oversize"
+    },
+    {
+      "name": "a-request-line-of-exactly-16-kib-is-accepted",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 16384,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "a-request-line-over-16-kib-is-refused",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 16385,
+          "newlines": 0
+        }
+      ],
+      "refusedAt": 0,
+      "error": "oversize"
+    },
+    {
+      "name": "a-request-line-split-across-frames-counts-once",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 10000,
+          "newlines": 0
+        },
+        {
+          "stream": "file_in",
+          "bytes": 6384,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "a-split-request-line-over-16-kib-is-refused",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 10000,
+          "newlines": 0
+        },
+        {
+          "stream": "file_in",
+          "bytes": 6385,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": 1,
+      "error": "oversize"
+    },
+    {
+      "name": "a-response-with-nothing-outstanding-is-refused",
+      "steps": [
+        {
+          "stream": "file_out",
+          "bytes": 100,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": 0,
+      "error": "bad_field"
+    },
+    {
+      "name": "a-response-line-of-exactly-384-kib-is-accepted",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_out",
+          "bytes": 393216,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "a-response-line-over-384-kib-is-refused",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_out",
+          "bytes": 393217,
+          "newlines": 0
+        }
+      ],
+      "refusedAt": 1,
+      "error": "oversize"
+    },
+    {
+      "name": "file-out-bytes-never-clear-the-runtime-in-count",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_out",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "in",
+          "bytes": 1
+        }
+      ],
+      "refusedAt": 3,
+      "error": "oversize"
+    },
+    {
+      "name": "file-in-bytes-never-add-to-the-runtime-in-count",
+      "steps": [
+        {
+          "stream": "in",
+          "bytes": 1048576
+        },
+        {
+          "stream": "file_in",
+          "bytes": 16384,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 16384,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": null,
+      "error": null
+    },
+    {
+      "name": "runtime-out-bytes-never-answer-a-file-request",
+      "steps": [
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        },
+        {
+          "stream": "out",
+          "bytes": 10
+        },
+        {
+          "stream": "file_in",
+          "bytes": 100,
+          "newlines": 1
+        }
+      ],
+      "refusedAt": 5,
+      "error": "oversize"
     }
   ]
 }

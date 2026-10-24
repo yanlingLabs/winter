@@ -64,7 +64,7 @@ def shutdown_rd_fails_peer_writes():
 class Harness:
     """One running relay with its six descriptors."""
 
-    def __init__(self, binary, extra_fds=(), arguments=None):
+    def __init__(self, binary, extra_fds=(), arguments=None, file_channel=False, file_in_instead=None, file_out_instead=None):
         self.host, relay_port = socket.socketpair()
         init_to_relay_r, self.init_w = os.pipe()          # init -> relay
         self.init_r, relay_to_init_w = os.pipe()          # relay -> init
@@ -73,13 +73,29 @@ class Harness:
         relay_rt_err_r, self.sup_err_w = os.pipe()        # supervisor stderr -> relay
         fds = [relay_port.fileno(), init_to_relay_r, relay_to_init_w, relay_rt_in_w, relay_rt_out_r, relay_rt_err_r]
         names = ["--port", "--ctl-in", "--ctl-out", "--rt-in", "--rt-out", "--rt-err"]
+        self.file_r = self.file_w = None
+        relay_file = []
+        if file_channel:                                   # the gated relay's two more pipes: FILE_IN to the file service, FILE_OUT back
+            self.file_r, relay_file_in_w = os.pipe()        # relay -> file service (FILE_IN)
+            relay_file_out_r, self.file_w = os.pipe()       # file service -> relay (FILE_OUT)
+            if file_in_instead is not None:                 # a test hands the relay something that is not a pipe in the FILE_IN slot
+                os.close(relay_file_in_w)
+                relay_file_in_w = file_in_instead
+            if file_out_instead is not None:
+                os.close(relay_file_out_r)
+                relay_file_out_r = file_out_instead
+            relay_file = [relay_file_in_w, relay_file_out_r]
+            fds += relay_file
+            names += ["--file-in", "--file-out"]
         argv = arguments if arguments is not None else [x for pair in zip(names, map(str, fds)) for x in pair]
         self.proc = subprocess.Popen([str(binary), *argv], pass_fds=[*fds, *extra_fds], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         relay_port.close()
-        for fd in (init_to_relay_r, relay_to_init_w, relay_rt_in_w, relay_rt_out_r, relay_rt_err_r):
+        for fd in (init_to_relay_r, relay_to_init_w, relay_rt_in_w, relay_rt_out_r, relay_rt_err_r, *[f for f in relay_file if f not in (file_in_instead, file_out_instead)]):
             os.close(fd)
         for fd in (self.init_r, self.sup_r):
             os.set_blocking(fd, False)
+        if self.file_r is not None:
+            os.set_blocking(self.file_r, False)
         self.host.settimeout(5)
         self.buffers = {self.init_r: b"", self.sup_r: b""}
 
@@ -90,7 +106,9 @@ class Harness:
         for stream in (self.proc.stdout, self.proc.stderr):
             stream.close()
         self.host.close()
-        for fd in (self.init_w, self.init_r, self.sup_r, self.sup_out_w, self.sup_err_w):
+        for fd in (self.init_w, self.init_r, self.sup_r, self.sup_out_w, self.sup_err_w, self.file_r, self.file_w):
+            if fd is None:
+                continue
             try:
                 os.close(fd)
             except OSError:
@@ -567,7 +585,7 @@ class RelayTests(unittest.TestCase):
         queue is a quarter-ratio above that limit, so it needs no guest-side credit or check."""
         flow = json.loads((ROOT / "vectors/runtime-flow.json").read_text())
         self.assertEqual(flow["limitBytes"], 1048576)
-        self.assertEqual(len(flow["cases"]), 8)
+        self.assertEqual(len(flow["cases"]), 13)
         for case in flow["cases"]:
             with self.subTest(case["name"]):
                 h = self.start()
@@ -791,6 +809,313 @@ class RelayTests(unittest.TestCase):
                 host.close()
                 port.close()
             self.assertEqual(result.returncode, 65)
+
+
+FILE_IN, FILE_OUT = 4, 5
+EXIT_OVERSIZE, EXIT_BAD_FIELD, EXIT_BAD_DIRECTION = EXIT_WMX + 2, EXIT_WMX + 5, EXIT_WMX + 8
+EXIT_STATE = 95
+
+
+@unittest.skipUnless(CC, "no C compiler")
+class FileChannelRelayTests(unittest.TestCase):
+    """The relay built with WG_FILE_CHANNEL_V1 (an image that declares `file-channel-v1`): streams 4 and 5 on conversation 0, their own ring and flow rule,
+    FILE_IN closed first on a drain, FILE_OUT's end framed before `halting`. The production relay has none of it."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.folder = tempfile.mkdtemp(prefix="guest-relay-file-")
+        sources = [ROOT / "relay/relay.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c", ROOT / "common/fileflow.c"]
+        cls.relay = build(sources, Path(cls.folder) / "relay", extra=["-DWG_TEST_PORT_SOCKET", "-DWG_FILE_CHANNEL_V1"])
+        cls.plain = build([ROOT / "relay/relay.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"], Path(cls.folder) / "relay-plain", extra=["-DWG_TEST_PORT_SOCKET"])
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.folder, ignore_errors=True)
+
+    def start(self, file_channel=True, binary=None, **kwargs):
+        harness = Harness(binary or self.relay, file_channel=file_channel, **kwargs)
+        self.addCleanup(harness.close)
+        return harness
+
+    READY = RelayTests.READY
+
+    def open_all(self, h, bits=3):
+        """PID 1's order: `G` (bit 0 runtime streams, bit 1 the file service), then `runtime_ready` through the relay."""
+        h.init_send("G", bytes([bits]))
+        time.sleep(0.1)
+        h.init_send("U", self.READY)
+        self.assertEqual(h.read_frame(), (1, 1, self.READY))
+
+    def read_file(self, h, count, timeout=5):
+        deadline = time.monotonic() + timeout
+        data = b""
+        while len(data) < count:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError("file service input")
+            ready, _, _ = select.select([h.file_r], [], [], remaining)
+            if ready:
+                chunk = os.read(h.file_r, count - len(data))
+                if not chunk:
+                    break
+                data += chunk
+        return data
+
+    def file_eof(self, h, timeout=5):
+        """True when FILE_IN reads as closed (every write end gone)."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([h.file_r], [], [], 0.1)
+            if ready:
+                return os.read(h.file_r, 65536) == b""
+        return False
+
+    # ---- the argument and descriptor contract
+
+    def test_the_gated_relay_takes_the_two_file_pipes_and_the_plain_one_refuses_them(self):
+        h = self.start(file_channel=True, binary=self.plain)
+        self.assertEqual(h.wait_exit(), 64)                         # 17 arguments to a relay that takes 13
+        h = self.start(file_channel=False)
+        self.assertEqual(h.wait_exit(), 64)                         # 13 arguments to a relay that takes 17
+        a, b = os.pipe()
+        try:
+            h = self.start(extra_fds=[a])
+            self.assertEqual(h.wait_exit(), 71)                     # a stray descriptor is refused
+        finally:
+            os.close(a)
+            os.close(b)
+
+    def test_the_file_pipes_must_be_pipes(self):
+        with open("/dev/null", "rb") as not_a_pipe:
+            h = self.start(file_in_instead=not_a_pipe.fileno())
+            self.assertEqual(h.wait_exit(), 65)                     # EXIT_DESCRIPTOR
+            h = self.start(file_out_instead=not_a_pipe.fileno())
+            self.assertEqual(h.wait_exit(), 65)
+
+    # ---- the production relay refuses the file streams
+
+    def test_a_relay_without_the_gate_ends_the_stream_on_stream_four(self):
+        h = self.start(file_channel=False, binary=self.plain)
+        h.init_send("G", b"\x01")
+        time.sleep(0.1)
+        h.send(frame(2, 1, rt(FILE_IN, b"x\n")))
+        self.assertEqual(h.wait_exit(), EXIT_BAD_FIELD)
+
+    # ---- FILE_IN
+
+    def test_a_request_line_reaches_the_file_service_byte_for_byte_and_a_response_comes_back_as_stream_five(self):
+        h = self.start()
+        self.open_all(h)
+        request = b'{"op":"stat","path":"/workspace/a"}\n'
+        h.send(frame(2, 1, rt(FILE_IN, request)))
+        self.assertEqual(self.read_file(h, len(request)), request)
+        response = b'{"ok":true}\n'
+        os.write(h.file_w, response)
+        cls, seq, payload = h.read_frame()
+        self.assertEqual((cls, seq, payload[:4], payload[4:]), (2, 1, bytes([0, FILE_OUT, 0, 0]), response))
+
+    def test_file_in_never_reaches_the_runtime_input_and_runtime_input_never_reaches_the_file_service(self):
+        h = self.start()
+        self.open_all(h)
+        h.send(frame(2, 1, rt(IN, b"runtime bytes\n")))
+        h.send(frame(2, 2, rt(FILE_IN, b"file bytes\n")))
+        self.assertEqual(h.read_supervisor_input(14), b"runtime bytes\n")
+        self.assertEqual(self.read_file(h, 11), b"file bytes\n")
+        ready, _, _ = select.select([h.sup_r], [], [], 0.3)
+        self.assertEqual(ready, [])
+
+    def test_the_runtime_streams_exist_only_for_a_host_query_conversation_even_when_the_file_service_does(self):
+        h = self.start()
+        self.open_all(h, bits=2)
+        h.send(frame(2, 1, rt(IN, b"runtime bytes\n")))
+        self.assertEqual(h.wait_exit(), EXIT_BAD_FIELD)
+
+    def test_a_file_service_that_is_not_there_is_never_read(self):
+        h = self.start()
+        self.open_all(h, bits=1)
+        os.write(h.file_w, b"nobody asked\n")
+        time.sleep(0.3)
+        h.send(control(1, '{"v":1,"t":"ping","n":9}'))
+        self.assertEqual(h.read_frame(), (0, 1, b'{"v":1,"t":"pong","n":9}'))      # the next frame is the pong: no FILE_OUT frame before it
+        self.assertIsNone(h.proc.poll())
+
+    def test_a_file_service_that_exits_does_not_end_the_relay(self):
+        h = self.start()
+        self.open_all(h)
+        os.close(h.file_r)
+        h.file_r = None
+        h.send(frame(2, 1, rt(FILE_IN, b"q\n")))
+        time.sleep(0.3)
+        h.send(frame(2, 2, rt(IN, b"runtime still works\n")))
+        self.assertEqual(h.read_supervisor_input(20), b"runtime still works\n")
+        h.send(control(1, '{"v":1,"t":"ping","n":4}'))
+        self.assertEqual(h.read_frame()[0:2], (0, 1))
+        self.assertIsNone(h.proc.poll())
+
+    def test_file_in_works_with_no_host_query_conversation(self):
+        h = self.start()
+        h.init_send("G", b"\x02")                                   # bit 1 only: a tools-only set still has a file service
+        time.sleep(0.1)
+        h.init_send("U", self.READY)
+        h.read_frame()
+        h.send(frame(2, 1, rt(FILE_IN, b"q\n")))
+        self.assertEqual(self.read_file(h, 2), b"q\n")
+        self.assertIsNone(h.proc.poll())
+
+    def test_the_end_of_file_in_closes_the_file_service_input_after_what_came_before_and_nothing_follows(self):
+        h = self.start()
+        self.open_all(h)
+        h.send(frame(2, 1, rt(FILE_IN, b"last\n")) + frame(2, 2, rt(FILE_IN, b"", end=True)))   # one port read: the end is seen before the data is written
+        self.assertEqual(self.read_file(h, 5), b"last\n")
+        self.assertTrue(self.file_eof(h))
+        h.send(frame(2, 3, rt(FILE_IN, b"late\n")))
+        self.assertEqual(h.wait_exit(), EXIT_BAD_FIELD)
+
+    def test_file_in_before_the_go_or_without_a_file_service_ends_the_stream(self):
+        h = self.start()
+        h.send(frame(2, 1, rt(FILE_IN, b"x\n")))
+        self.assertEqual(h.wait_exit(), EXIT_BAD_FIELD)
+        h = self.start()
+        self.open_all(h, bits=1)                                    # the supervisor has no file service
+        h.send(frame(2, 1, rt(FILE_IN, b"x\n")))
+        self.assertEqual(h.wait_exit(), EXIT_BAD_FIELD)
+
+    def test_the_streams_exist_on_conversation_zero_and_in_their_own_direction_only(self):
+        for payload, code in ((rt(FILE_IN, b"x\n", conversation=1), EXIT_BAD_FIELD), (rt(FILE_OUT, b"x\n"), EXIT_BAD_DIRECTION), (rt(6, b"x\n"), EXIT_BAD_FIELD),
+                              (rt(FILE_IN, b"", end=False), EXIT_BAD_FIELD), (rt(FILE_IN, b"x\n", flags=2), EXIT_BAD_FIELD)):
+            h = self.start()
+            self.open_all(h)
+            h.send(frame(2, 1, payload))
+            self.assertEqual(h.wait_exit(), code, payload)
+
+    def test_the_file_in_flow_rule_is_the_contracts(self):
+        """Four request lines outstanding, 16 KiB per line; a fifth line or a longer line ends the stream with `oversize`."""
+        h = self.start()
+        self.open_all(h)
+        for seq in range(1, 5):
+            h.send(frame(2, seq, rt(FILE_IN, b"r\n")))
+        self.assertEqual(self.read_file(h, 8), b"r\n" * 4)
+        h.send(frame(2, 5, rt(FILE_IN, b"r\n")))
+        self.assertEqual(h.wait_exit(), EXIT_OVERSIZE)
+        h = self.start()
+        self.open_all(h)
+        h.send(frame(2, 1, rt(FILE_IN, b"x" * 16383 + b"\n")))
+        self.assertEqual(len(self.read_file(h, 16384)), 16384)
+        self.assertIsNone(h.proc.poll())
+        h = self.start()
+        self.open_all(h)
+        h.send(frame(2, 1, rt(FILE_IN, b"x" * 16384 + b"\n")))
+        self.assertEqual(h.wait_exit(), EXIT_OVERSIZE)
+
+    def test_a_response_frees_a_slot_and_a_response_with_nothing_outstanding_is_a_state_error(self):
+        h = self.start()
+        self.open_all(h)
+        for seq in range(1, 5):
+            h.send(frame(2, seq, rt(FILE_IN, b"r\n")))
+        self.read_file(h, 8)
+        os.write(h.file_w, b"a\n")
+        h.read_frame()
+        h.send(frame(2, 5, rt(FILE_IN, b"r\n")))
+        self.assertEqual(self.read_file(h, 2), b"r\n")
+        self.assertIsNone(h.proc.poll())
+        h = self.start()
+        self.open_all(h)
+        os.write(h.file_w, b"unasked\n")                           # the guest's own supervisor answered nobody: a broken guest, not a host violation
+        self.assertEqual(h.wait_exit(), EXIT_STATE)
+
+    def test_file_out_is_not_read_before_runtime_ready_is_framed(self):
+        h = self.start()
+        h.init_send("G", b"\x03")
+        time.sleep(0.1)
+        h.send(frame(2, 1, rt(FILE_IN, b"q\n")))
+        self.read_file(h, 2)
+        os.write(h.file_w, b"early\n")
+        time.sleep(0.3)
+        h.init_send("U", self.READY)
+        self.assertEqual(h.read_frame(), (1, 1, self.READY))
+        cls, _, payload = h.read_frame()
+        self.assertEqual((cls, payload[1], payload[4:]), (2, FILE_OUT, b"early\n"))
+
+    # ---- drain and halting
+
+    def test_a_drain_closes_file_in_before_pid_1_hears_of_it(self):
+        h = self.start()
+        self.open_all(h)
+        h.send(control(1, RelayTests.drain_text(None)))
+        self.assertEqual(h.init_read()[0], "D")
+        self.assertTrue(self.file_eof(h, timeout=0.5), "FILE_IN must already be closed when PID 1 reads the drain")
+        h.send(frame(2, 1, rt(FILE_IN, b"late\n")))                # ignored while draining, like runtime input
+        h.send(control(2, '{"v":1,"t":"ping","n":5}'))
+        self.assertEqual(h.read_frame()[0:2], (0, 1))
+        self.assertIsNone(h.proc.poll())
+
+    def test_file_outs_end_is_framed_before_halting(self):
+        h = self.start()
+        self.open_all(h)
+        h.send(frame(2, 1, rt(FILE_IN, b"q\n")))
+        self.read_file(h, 2)
+        h.send(control(1, RelayTests.drain_text(None)))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        self.assertEqual(h.read_frame()[0:2], (0, 1))                 # drain_ack
+        os.write(h.file_w, b"final\n")                             # the file service's last answer, then it exits
+        os.close(h.file_w)
+        h.file_w = None
+        h.init_send("H", NONCE.encode())
+        frames = [h.read_frame(), h.read_frame(), h.read_frame()]
+        self.assertEqual([f[0] for f in frames], [2, 2, 0])
+        self.assertEqual((frames[0][2][1], frames[0][2][2], frames[0][2][4:]), (FILE_OUT, 0, b"final\n"))
+        self.assertEqual((frames[1][2][1], frames[1][2][2], frames[1][2][4:]), (FILE_OUT, 1, b""))
+        self.assertEqual(frames[2][2], ('{"v":1,"t":"halting","stopNonce":"%s"}' % NONCE).encode())
+        self.assertEqual(h.init_read(), ("f", b""))
+
+    def drain_to_halting(self, h):
+        h.send(control(1, RelayTests.drain_text(None)))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        self.assertEqual(h.read_frame()[0:2], (0, 1))                 # drain_ack
+
+    def test_file_outs_end_is_framed_even_when_the_service_has_not_closed_its_side(self):
+        h = self.start()
+        self.open_all(h)
+        self.drain_to_halting(h)
+        h.init_send("H", NONCE.encode())
+        cls, _, payload = h.read_frame()
+        self.assertEqual((cls, payload[1], payload[2], payload[4:]), (2, FILE_OUT, 1, b""))
+        self.assertEqual(h.read_frame()[0], 0)                        # halting, after it
+
+    def test_no_file_out_end_is_framed_for_a_guest_without_a_file_service_or_before_runtime_ready(self):
+        h = self.start()
+        self.open_all(h, bits=1)                                      # no file service
+        self.drain_to_halting(h)
+        h.init_send("H", NONCE.encode())
+        self.assertEqual(h.read_frame()[0], 0)                        # halting is the very next frame
+        h = self.start()
+        h.init_send("G", b"\x03")                                     # a file service, but `runtime_ready` was never framed
+        time.sleep(0.1)
+        self.drain_to_halting(h)
+        h.init_send("H", NONCE.encode())
+        self.assertEqual(h.read_frame()[0], 0)
+
+    def test_the_go_byte_has_two_bits_and_nothing_else(self):
+        for value in (4, 7, 255):
+            h = self.start()
+            h.init_send("G", bytes([value]))
+            self.assertEqual(h.wait_exit(), EXIT_STATE, value)
+
+    def test_a_file_out_that_ended_earlier_is_not_ended_twice(self):
+        h = self.start()
+        self.open_all(h)
+        os.close(h.file_w)
+        h.file_w = None
+        cls, _, payload = h.read_frame()
+        self.assertEqual((cls, payload[1], payload[2]), (2, FILE_OUT, 1))
+        h.send(control(1, RelayTests.drain_text(None)))
+        h.init_read()
+        h.init_send("K", NONCE.encode())
+        h.read_frame()
+        h.init_send("H", NONCE.encode())
+        self.assertEqual(h.read_frame()[0], 0)                        # halting follows at once: no second end frame
 
 
 if __name__ == "__main__":
