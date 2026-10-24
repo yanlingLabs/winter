@@ -436,6 +436,7 @@ def main():
     package_tree=tree;tree=Tree();base='opt/winter/environment/base'
     for name,node in sorted(package_tree.nodes.items()):
         for origin in node['origins']:tree.add(base+'/'+name,node['kind'],node['data'],node['mode']==0o555 and node['kind']=='file',origin)
+    # (the top-level `etc` becomes a symlink to opt/winter/environment/base/etc: a literal etc/... cpio member would be written THROUGH that symlink, which is why verify.py refuses an etc/gitconfig entry)
     for name in ['bin','lib','lib64','sbin','usr','etc']:
         if base+'/'+name in tree.nodes:tree.add(name,'symlink',(base+'/'+name).encode(),origin='derived:immutable-environment-root-alias')
     env=os.environ.copy();env['BUN_MAX_THREADS']='2'

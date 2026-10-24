@@ -37,7 +37,9 @@ def image_summary(folder):
     folder = Path(folder)
     receipt = read_json(folder / "receipt.json")
     return {"cpioSha256": sha256_file(folder / "immutable-root.cpio"), "cpioBytes": (folder / "immutable-root.cpio").stat().st_size,
-            "rootManifestSha256": sha256_file(folder / "root.manifest.json"), "runtimeSha256": receipt["runtimeSha256"], "initSha256": receipt["initSha256"], "packageLockSha256": receipt.get("packageLockSha256"),
+            "rootManifestSha256": sha256_file(folder / "root.manifest.json"), "runtimeSha256": receipt["runtimeSha256"], "initSha256": receipt["initSha256"], "relaySha256": receipt["relaySha256"], "packageLockSha256": receipt.get("packageLockSha256"),
+            # the guest binaries are pinned only when pins.json holds a digest and it is the one this build produced (a null pin, or a stale one, is false): the post-build pin step reads both digests here
+            "initPinned": PINS["guest"]["programs"]["init"]["binarySha256"] == receipt["initSha256"], "relayPinned": PINS["guest"]["programs"]["winter-guest-relay"]["binarySha256"] == receipt["relaySha256"],
             "reproducibilityPinned": receipt.get("reproducibilityPinned")}
 
 
@@ -69,6 +71,9 @@ def problems(digests):
         out.append("the two image builds differ")
     if digests["image"]["imageExitStatus"] != [0, 0]:
         out.append(f"image.py exited {digests['image']['imageExitStatus']} (3 means a built digest differs from pins.json)")
+    for name, key, pinned in (("init", "initSha256", "initPinned"), ("winter-guest-relay", "relaySha256", "relayPinned")):
+        if digests["image"].get(pinned) is False:
+            out.append(f"pins.json guest.programs.{name}.binarySha256 is null or does not hold (digests.json image.{key} is what this build produced)")
     out += [f"pins.json {name} does not hold" for name, held in digests["image"]["pinsHold"].items() if not held]
     return out
 

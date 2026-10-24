@@ -108,7 +108,7 @@ static int make_one(int workspace, const char *source, gid_t gid, const struct w
         }
         int rc = ops->fchown_fd(current, owner, gid, ops->ctx);
         if (rc == 0) rc = fchmod(current, ROOT_MODE);               /* after the chown: a chown clears the setgid bit */
-        if (rc == 0 && (fstat(current, &st) != 0 || st.st_uid != owner || st.st_gid != gid)) rc = -1;   /* what the descriptor now says, not what the calls returned */
+        if (rc == 0 && (fstat(current, &st) != 0 || st.st_uid != owner || st.st_gid != gid || (st.st_mode & 07777) != ROOT_MODE)) rc = -1;   /* what the descriptor now says (owner, group, every mode bit including setgid), not what the calls returned */
         close(current);
         return rc;
     }
@@ -129,7 +129,7 @@ static int make_plan_dir(int parent, const char *name, uid_t uid, gid_t gid, mod
     if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;   /* made by PID 1 (root) or by an earlier boot of it; never somebody else's */
     if (rc == 0) rc = ops->fchown_fd(fd, uid, gid, ops->ctx);
     if (rc == 0) rc = fchmod(fd, mode);                                                  /* after the chown: a chown clears the setgid bit; mkdirat's mode is filtered by umask(077) */
-    if (rc == 0 && (fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid || (st.st_mode & 07777) != mode)) rc = -1;   /* the bits read back, as make_one does */
+    if (rc == 0 && (fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid || (st.st_mode & 07777) != mode)) rc = -1;   /* the bits read back (setgid and sticky included), as make_one does for a root and its parents */
     if (rc != 0) { close(fd); return -1; }
     return fd;
 }
