@@ -121,27 +121,33 @@ static void put32(uint8_t *out, size_t *at, uint32_t v) { out[(*at)++] = (uint8_
 struct spec {
     unsigned profile;
     int extended;
-    uint32_t runtime_uid, browse_uid, gid;
+    uint32_t runtime_uid, tool_uid, browse_uid, gid;
     unsigned roots;
     int zero_roots;         /* a conversation that claims no roots at all */
+    int second;             /* a second conversation `s2` (then profile 0: a profile means exactly one) */
+    uint32_t second_runtime, second_tool;
     const char *source;     /* every root */
     const char *json;
 };
 static size_t payload_of(uint8_t *out, const struct spec *s) {
     size_t at = 0;
     out[at++] = (uint8_t)(s->profile | (s->extended ? WG_PAYLOAD_EXTENDED : 0));
-    out[at++] = 1;
+    out[at++] = s->second ? 2 : 1;
     put32(out, &at, s->runtime_uid ? s->runtime_uid : 20001);
     out[at++] = 2; out[at++] = 's'; out[at++] = '1';
+    if (s->second) { put32(out, &at, s->second_runtime ? s->second_runtime : 20003); out[at++] = 2; out[at++] = 's'; out[at++] = '2'; }
     if (s->extended) {
         put32(out, &at, s->browse_uid);
-        put32(out, &at, s->gid ? s->gid : 30001);
-        unsigned roots = s->zero_roots ? 0 : s->roots ? s->roots : 1;
-        out[at++] = (uint8_t)roots;
-        for (unsigned r = 0; r < roots; r++) {
-            const char *source = s->source ? s->source : "/workspace/repos/r1";
-            out[at++] = (uint8_t)strlen(source);
-            memcpy(out + at, source, strlen(source)); at += strlen(source);
+        for (unsigned c = 0; c < (s->second ? 2u : 1u); c++) {
+            put32(out, &at, c ? (s->second_tool ? s->second_tool : 20004) : (s->tool_uid ? s->tool_uid : 20002));
+            put32(out, &at, s->gid ? s->gid : 30001);
+            unsigned roots = s->zero_roots ? 0 : s->roots ? s->roots : 1;
+            out[at++] = (uint8_t)roots;
+            for (unsigned r = 0; r < roots; r++) {
+                const char *source = s->source ? s->source : "/workspace/repos/r1";
+                out[at++] = (uint8_t)strlen(source);
+                memcpy(out + at, source, strlen(source)); at += strlen(source);
+            }
         }
     }
     const char *json = s->json ? s->json : ITEMS;
@@ -173,7 +179,7 @@ static void test_the_extended_payload_carries_the_browse_uid_the_gid_and_the_roo
     struct spec s = good();
     s.roots = 3; s.source = "/workspace/repos/r1";
     CHECK(parses(&s, &set) == 0);
-    CHECK(set.browse_uid == 40001 && set.workspace_gid[0] == 30001 && set.root_count[0] == 3 && set.runtime_uid[0] == 20001);
+    CHECK(set.browse_uid == 40001 && set.tool_uid[0] == 20002 && set.workspace_gid[0] == 30001 && set.root_count[0] == 3 && set.runtime_uid[0] == 20001);
     CHECK(strcmp(set.root_source[0][2], "/workspace/repos/r1") == 0);
     CHECK(strncmp(set.json, ITEMS, strlen(ITEMS)) == 0 && set.json_length == strlen(ITEMS));
     s.browse_uid = 0;
@@ -196,6 +202,26 @@ static void test_every_departure_in_the_extension_is_refused(void) {
     s = good(); s.browse_uid = 30001; s.gid = 30001;        /* the workspace gid */
     CHECK(parses(&s, &set) != 0);
     s = good(); s.gid = 20001;                               /* a group id equal to a uid is that user's private group */
+    CHECK(parses(&s, &set) != 0);
+    for (unsigned i = 0; i < sizeof bad_ids / sizeof bad_ids[0]; i++) {   /* the tool uid is a unix id like the others */
+        s = good(); s.tool_uid = bad_ids[i];
+        CHECK(parses(&s, &set) != 0);
+    }
+    s = good(); s.tool_uid = 20001;                          /* the runtime uid of the same conversation */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.browse_uid = 20002;                        /* the tool uid: the plan view's owner is nobody else's */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.gid = 20002;                               /* a group id equal to the tool uid */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.profile = 0; s.second = 1;                 /* two conversations, every id of the set apart: fine */
+    CHECK(parses(&s, &set) == 0 && set.count == 2 && set.tool_uid[0] == 20002 && set.tool_uid[1] == 20004);
+    s.second_tool = 20002;                                   /* the other conversation's tool uid: its plan view would be shared */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.profile = 0; s.second = 1; s.second_tool = 20001;   /* the other conversation's runtime uid */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.profile = 0; s.second = 1; s.tool_uid = 20003;      /* ... and the first one's tool uid is the second's runtime uid */
+    CHECK(parses(&s, &set) != 0);
+    s = good(); s.profile = 0; s.second = 1; s.gid = 20004;           /* a workspace group that is the other conversation's tool uid */
     CHECK(parses(&s, &set) != 0);
     s = good(); s.roots = 17;
     CHECK(parses(&s, &set) != 0);

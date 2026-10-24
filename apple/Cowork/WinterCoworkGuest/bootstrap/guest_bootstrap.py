@@ -1259,11 +1259,11 @@ def conversations_payload(message):
         sid = item["logicalSessionId"].encode("ascii")
         out += struct.pack("<IB", item["runtimeUid"], len(sid)) + sid
     if REVISION_THREE:
-        # The file channel's part (boot.h wg_conversation_set under WG_FILE_CHANNEL_V1): the workspace's browse uid (0 = none), then per conversation its workspace gid and the
-        # `source` of every root, which PID 1 makes as root:workspaceGid 02770 directories on the data volume.
+        # The file channel's part (boot.h wg_conversation_set under WG_FILE_CHANNEL_V1): the workspace's browse uid (0 = none), then per conversation its tool uid, its workspace gid and the
+        # `source` of every root, which PID 1 makes as root:workspaceGid 02770 directories on the data volume (the plan view is the exception: the tool uid's own, 0700).
         out += struct.pack("<I", message["browseUid"] or 0)
         for item in message["conversations"]:
-            out += struct.pack("<IB", item["workspaceGid"], len(item["roots"]))
+            out += struct.pack("<IIB", item["toolUid"], item["workspaceGid"], len(item["roots"]))
             for root in item["roots"]:
                 source = root["source"].encode("ascii")
                 out += struct.pack("<B", len(source)) + source

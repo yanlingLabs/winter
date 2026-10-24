@@ -1639,9 +1639,10 @@ class ConversationSetTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), message["browseUid"] or 0)
         at += 4
         item = message["conversations"][0]
-        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["workspaceGid"])
-        self.assertEqual(payload[at + 4], len(item["roots"]))
-        at += 5
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["toolUid"])            # the owner of the conversation's plan view
+        self.assertEqual(int.from_bytes(payload[at + 4:at + 8], "little"), item["workspaceGid"])
+        self.assertEqual(payload[at + 8], len(item["roots"]))
+        at += 9
         for root in item["roots"]:
             source = root["source"].encode()
             self.assertEqual((payload[at], payload[at + 1:at + 1 + len(source)]), (len(source), source))
