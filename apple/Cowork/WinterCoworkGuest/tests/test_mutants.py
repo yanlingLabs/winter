@@ -306,6 +306,16 @@ MUTANTS = [
     ('init/shares.c', 'return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, WG_SHARE_MOUNT_DATA);', 'return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, "dax=always");', 'shmod'),
     ('init/init_linux.c', '#ifndef SHARES_OWNER\n#define SHARES_OWNER 0\n#endif', '#ifndef SHARES_OWNER\n#define SHARES_OWNER 1000\n#endif', 'shprod'),
     ('build.py', 'FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1"', 'FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1 -DSHARES_OWNER=1000"', 'shprod'),
+    # ---- SH6 second fold: the not-yet-a-mount-point check and the alias owner check (root only: CI's root step runs them), the payload's path length, two
+    # mountinfo parser rules, and the module guard that keeps the root step from passing with its tests skipped
+    ('init/shares.c', '        if (ok && last) ok = st.st_dev == parent.st_dev;\n', '', 'shroot'),
+    ('init/shares.c', '|| !S_ISLNK(st.st_mode) || st.st_uid != owner)) rc = -1;', '|| !S_ISLNK(st.st_mode))) rc = -1;', 'shroot'),
+    ('init/boot.c', 'if (path_length > WG_SHARE_PATH_MAX || length - at < path_length) return -1;', 'if (path_length > WG_SHARE_PATH_MAX) return -1;', 'shboot'),
+    ('init/shares.c', '        if (end < n && at == n) return -1;                 /* a trailing space */\n', '', 'shmod'),
+    ('init/shares.c', 'if (separator < 0 || separator + 4 != count) return -1;', 'if (separator < 0 || separator + 4 > count) return -1;', 'shmod'),
+    ('init/shares.c', 'if (separator < 0 || separator + 4 != count) return -1;', 'if (separator < 0) return -1;', 'shmod'),
+    ('tests/test_pid1_linux.py', '    if problem:\n        raise RuntimeError(', '    if False:\n        raise RuntimeError(', 'shskip'),
+    ('tests/test_pid1_linux.py', '    if environ.get("WG_REQUIRE_REALMOUNT") != "1":\n        return None', '    if True:\n        return None', 'shskip'),
 ]
 
 SUITES = {
@@ -326,6 +336,8 @@ SUITES = {
     "shmod": ("tests", "test_shares.py", ["-k", "ShareModuleTests"]),
     "shboot": ("tests", "test_shares.py", ["-k", "BootShareTests"]),
     "shprod": ("tests", "test_shares.py", ["-k", "ProductionHasNoShareStepTests"]),
+    "shskip": ("tests", "test_pid1_linux.py", ["-k", "test_the_requirement_names_every_reason", "-k", "test_the_module_fails_rather_than_skips"]),
+    "shroot": ("tests", "test_pid1_linux.py", ["-k", "realmount"]),
 }
 
 
@@ -354,12 +366,28 @@ def run_mutant(mutant):
 @unittest.skipUnless(CC, "no C compiler")
 class MutantTests(unittest.TestCase):
     def test_every_mutant_is_caught_by_its_suite(self):
-        runnable = [m for m in MUTANTS if m[3] not in ("pid1", "fcpid1") or LINUX]
+        runnable = [m for m in MUTANTS if m[3] != "shroot" and (m[3] not in ("pid1", "fcpid1") or LINUX)]
         with ThreadPoolExecutor(4) as pool:
             outcomes = list(pool.map(run_mutant, runnable))
         for mutant, outcome in zip(runnable, outcomes):
             with self.subTest(file=mutant[0], old=mutant[1].strip()[:60], new=mutant[2].strip()[:30]):
                 self.assertEqual(outcome, "KILLED")
+
+
+@unittest.skipUnless(CC, "no C compiler")
+class RootMutantTests(unittest.TestCase):
+    """The mutants only a real mount can catch (suite `shroot`). CI's root step runs this with WG_REQUIRE_REALMOUNT=1, where it must run, not skip."""
+
+    def test_realmount_every_root_only_mutant_is_caught(self):
+        if not (LINUX and os.geteuid() == 0 and shutil.which("unshare")):
+            if os.environ.get("WG_REQUIRE_REALMOUNT") == "1":
+                self.fail("the root-only mutants must run as root on Linux with unshare(1)")
+            self.skipTest("needs root on Linux (CI's root step)")
+        runnable = [m for m in MUTANTS if m[3] == "shroot"]
+        self.assertGreaterEqual(len(runnable), 2)
+        for mutant in runnable:
+            with self.subTest(file=mutant[0], old=mutant[1].strip()[:60]):
+                self.assertEqual(run_mutant(mutant), "KILLED")
 
 
 if __name__ == "__main__":

@@ -22,8 +22,55 @@ import subprocess
 from test_native import CC, ROOT, build
 
 LINUX = sys.platform.startswith("linux")
+
+
+def realmount_requirement_problem(environ, linux, cc, euid, unshare):
+    """Why CI's root step could not run the `realmount` tests here, or None. Only with WG_REQUIRE_REALMOUNT=1: elsewhere they may skip."""
+    if environ.get("WG_REQUIRE_REALMOUNT") != "1":
+        return None
+    if not linux or not cc:
+        return "needs Linux and a C compiler"
+    if euid != 0:
+        return "needs root"
+    if not unshare:
+        return "needs unshare(1)"
+    return None
+
+
+def setUpModule():
+    """The class decorators below skip on a machine without Linux or a compiler before any test body runs, so `-k realmount` would pass with every test skipped.
+    Under WG_REQUIRE_REALMOUNT=1 that is an error of the whole module instead."""
+    problem = realmount_requirement_problem(os.environ, LINUX, CC, os.geteuid(), shutil.which("unshare"))
+    if problem:
+        raise RuntimeError("WG_REQUIRE_REALMOUNT=1 but the real-mount tests cannot run: " + problem)
 INIT = ROOT / "init"
 PATH_ENV = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
+
+
+class RealmountRequirementTests(unittest.TestCase):
+    """Runs everywhere: CI's root step cannot pass with its real-mount tests skipped."""
+
+    def test_the_requirement_names_every_reason_the_root_tests_could_not_run(self):
+        required = {"WG_REQUIRE_REALMOUNT": "1"}
+        self.assertIsNone(realmount_requirement_problem({}, False, None, 1000, None))                  # not required: they may skip
+        self.assertIsNone(realmount_requirement_problem(required, True, "cc", 0, "/usr/bin/unshare"))
+        self.assertEqual(realmount_requirement_problem(required, False, "cc", 0, "/usr/bin/unshare"), "needs Linux and a C compiler")
+        self.assertEqual(realmount_requirement_problem(required, True, None, 0, "/usr/bin/unshare"), "needs Linux and a C compiler")
+        self.assertEqual(realmount_requirement_problem(required, True, "cc", 1000, "/usr/bin/unshare"), "needs root")
+        self.assertEqual(realmount_requirement_problem(required, True, "cc", 0, None), "needs unshare(1)")
+
+    def test_the_module_fails_rather_than_skips_when_the_requirement_is_not_met(self):
+        import unittest.mock
+        module = sys.modules[__name__]
+        with unittest.mock.patch.dict(os.environ, {"WG_REQUIRE_REALMOUNT": "1"}), unittest.mock.patch.object(module, "LINUX", False):
+            with self.assertRaises(RuntimeError):
+                setUpModule()
+        with unittest.mock.patch.dict(os.environ, {"WG_REQUIRE_REALMOUNT": "0"}), unittest.mock.patch.object(module, "LINUX", False):
+            setUpModule()
+
+    def test_the_root_step_sets_the_requirement(self):
+        workflow = (ROOT.parents[2] / ".github/workflows/cowork-guest-boot.yml").read_text()
+        self.assertRegex(workflow, r"WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_pid1_linux.py' -k realmount")
 
 
 class LinuxToolSubcommandTests(unittest.TestCase):
@@ -555,7 +602,7 @@ class SharesPid1Tests(unittest.TestCase):
         self.fake_sysfs([self.tag_of(s) for s in specs])
         out = self.private("realstep", "tmpfs", "nr_inodes=4096", *specs)
         lines = out.splitlines()
-        self.assertEqual(lines[0], "rc=0 mounted=31", out)
+        self.assertEqual(lines[0], "rc=0 mounted=31 mounts=5", out)
         for spec, line in zip(specs, lines[1:6]):
             kind, ro, tag, _ = spec.split(":", 3)
             fields = dict(part.split("=", 1) for part in line.split(" "))
@@ -576,8 +623,20 @@ class SharesPid1Tests(unittest.TestCase):
         out = self.private("realstep", "tmpfs", "nr_inodes=4096", self.FOLDER, self.OUTPUTS,
                            shell=f'mount -t tmpfs stray "{self.root}/workspace/outputs" && exec "$@"')
         lines = out.splitlines()
-        self.assertEqual(lines[0], "rc=2 mounted=0", out)
-        self.assertTrue(lines[1].startswith("share=src-0 count=0 "), out)            # the folder was never mounted
+        # refused by the walk (the mount point is not on its parent's filesystem) before any mount(2): not mounted and rolled back, never mounted at all
+        self.assertEqual(lines[0], "rc=2 mounted=0 mounts=0", out)
+        self.assertTrue(lines[1].startswith("share=src-0 count=0 "), out)
+
+    def test_realmount_an_alias_that_is_the_right_link_but_not_pid_1s_is_refused(self):
+        """The alias owner check needs a link owned by someone else, which only root can make (lchown)."""
+        self.need_root()
+        alias = self.root / "workspace/.winter/WINTER.md"
+        alias.symlink_to("/run/winter/shared-instructions/WINTER.md")
+        os.lchown(alias, 12345, 12345)
+        self.assertEqual(self.run_tool("alias").strip(), "rc=-1")
+        self.assertEqual(alias.lstat().st_uid, 12345)                                    # refused, and left as it is
+        os.lchown(alias, 0, 0)
+        self.assertEqual(self.run_tool("alias").strip(), "rc=0")
 
     def test_realmount_virtiofs_itself_is_reached_and_refused_for_the_missing_device(self):
         """The production call, mount(tag, /proc/self/fd/<n>, "virtiofs", flags, "dax=never"), as root on a machine with no virtio-fs device: the kernel refuses it

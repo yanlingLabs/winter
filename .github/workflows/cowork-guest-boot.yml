@@ -31,7 +31,9 @@ jobs:
         run: python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_*.py' -v
       - name: "Real mounts as root, each in a private mount namespace (SH6: the whole share step on tmpfs, ext4 with dax=never, the refused virtio-fs mount)"
         # WG_REQUIRE_REALMOUNT=1: a realmount test that cannot run here fails instead of skipping
-        run: sudo -E env "PATH=$PATH" WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_pid1_linux.py' -k realmount -v
+        run: |
+          sudo -E env "PATH=$PATH" WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_pid1_linux.py' -k realmount -v
+          sudo -E env "PATH=$PATH" WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_mutants.py' -k realmount -v
       - name: "Artifact scripts and kernel pins"
         run: |
           python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact -p 'test_*.py' -v

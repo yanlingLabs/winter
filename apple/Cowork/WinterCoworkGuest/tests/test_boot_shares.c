@@ -127,6 +127,15 @@ static const struct item FOUR[4] = {
     { WG_SHARE_FOLDER, 0, "src-0", "/workspace/folders/notes" }, { WG_SHARE_GUIDANCE, 1, "winter-guidance", "/run/winter/shared-instructions" },
     { WG_SHARE_MEMORY, 0, "winter-memory", "/workspace/.winter/memory" }, { WG_SHARE_OUTPUTS, 0, "winter-outputs", "/workspace/outputs" },
 };
+/* The parser on exactly `n` bytes of `bytes`, in a heap block of exactly that size: a read past the payload is an address-sanitizer error, never a lucky byte. */
+static int parses_exactly(const uint8_t *bytes, size_t n) {
+    uint8_t *exact = malloc(n ? n : 1);
+    memcpy(exact, bytes, n);
+    static struct wg_share_set set;
+    int rc = wg_parse_share_payload(exact, n, &set);
+    free(exact);
+    return rc;
+}
 static int parses(const struct item *items, unsigned count) {
     uint8_t scratch[4096];
     size_t n = share_payload(scratch, items, count);
@@ -170,7 +179,13 @@ static void test_the_payload_carries_every_share_with_its_kind_mode_tag_and_path
     CHECK(set.item[3].kind == WG_SHARE_OUTPUTS && !set.item[3].read_only);
     struct item ro_folder = { WG_SHARE_FOLDER, 1, "src-1", "/workspace/folders/photos" };
     CHECK(parses(&ro_folder, 1) == 0);   /* a folder is read-only or read-write as its grant says */
-    for (unsigned cut = 0; cut < n; cut++) CHECK(wg_parse_share_payload(payload, cut, &set) != 0);   /* every truncation */
+    for (unsigned cut = 0; cut < n; cut++) CHECK(parses_exactly(payload, cut) != 0);   /* every truncation, each in a block of exactly its own size */
+    /* a path length that claims more than the payload still holds (the payload ends inside the last path) */
+    struct item one = { WG_SHARE_FOLDER, 0, "src-0", "/workspace/folders/notes" };
+    uint8_t single[256];
+    size_t m = share_payload(single, &one, 1);
+    single[m - strlen(one.path) - 1] = (uint8_t)(strlen(one.path) + 1);
+    CHECK(parses_exactly(single, m) != 0);
     payload[n] = 0;
     CHECK(wg_parse_share_payload(payload, n + 1, &set) != 0);   /* a byte after the last share */
 }

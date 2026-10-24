@@ -167,7 +167,10 @@ class ShareModuleTests(unittest.TestCase):
         fields = dict(line.split("=", 1) for line in out[1:])
         self.assertEqual(fields, {"root": "/", "mount_point": "@ROOT@/workspace/folders/notes", "options": "rw,nosuid,nodev,relatime", "fstype": "virtiofs", "source": "src-0", "super": "rw,dax=never"})
         self.assertEqual(self.run_tool("find", path, "/proc").splitlines()[0], "1")
-        for broken in ("1 0 0:2 / / rw rootfs rootfs rw\n", "1 0 0:2 / / rw - rootfs rootfs\n", "1 0 0:2 / /  rw - rootfs rootfs rw\n", "1 0 0:2 / / rw - rootfs rootfs rw"):
+        for broken in ("1 0 0:2 / / rw rootfs rootfs rw\n", "1 0 0:2 / / rw - rootfs rootfs\n", "1 0 0:2 / /  rw - rootfs rootfs rw\n", "1 0 0:2 / / rw - rootfs rootfs rw",
+                       "1 0 0:2 / / rw - rootfs rootfs rw \n",                  # a trailing space
+                       "1 0 0:2 / / rw - rootfs rootfs rw extra\n",             # a field after the super options
+                       "1 0 0:2 / / rw shared:1 - rootfs rootfs\n"):           # ten fields, but no super options after the separator
             with self.subTest(broken):
                 path.write_text(broken)
                 self.assertEqual(self.run_tool("find", path, "/").splitlines()[0], "-1")

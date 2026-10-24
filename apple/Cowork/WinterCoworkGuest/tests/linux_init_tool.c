@@ -38,6 +38,13 @@ static int fsync_fail(int fd) { (void)fd; fsync_calls++; return -1; }
 #ifdef WG_FILE_CHANNEL_V1
 static int own_chown(int fd, uid_t uid, gid_t gid, void *ctx) { (void)ctx; return fchown(fd, uid, gid); }
 
+/* The real mount(2), counted: a test can then tell a step that refused before mounting from one whose mounts were rolled back. */
+static int mount_calls;
+static int counting_mount(void *ctx, const char *source, const char *target, const char *fstype, unsigned long flags, const char *data) {
+    mount_calls++;
+    return mop_mount(ctx, source, target, fstype, flags, data);
+}
+
 /* KIND:RO:TAG:PATH arguments (KIND folder|guidance|memory|outputs) into a share set. */
 static int share_set(int argc, char **argv, int first, struct wg_share_set *set) {
     memset(set, 0, sizeof *set);
@@ -201,6 +208,10 @@ int main(int argc, char **argv) {
         printf("rc=%d mounted=%u errno=%d\n", rc, mounted, saved);
         return 0;
     }
+    if (argc == 2 && strcmp(argv[1], "alias") == 0) {        /* wg_share_guidance_alias below SHARES_ROOT, as SHARES_OWNER */
+        printf("rc=%d\n", wg_share_guidance_alias(SHARES_ROOT, (uid_t)SHARES_OWNER));
+        return 0;
+    }
     if (argc == 3 && strcmp(argv[1], "umountshare") == 0) {  /* GUEST_PATH below SHARES_ROOT */
         printf("rc=%d\n", op_umount_share(NULL, argv[2]));
         return 0;
@@ -218,10 +229,10 @@ int main(int argc, char **argv) {
     if (argc >= 5 && strcmp(argv[1], "realstep") == 0) {     /* FSTYPE DATA SHARE...: the whole share step for real (root, in a private mount namespace), then every share unmounted */
         static struct wg_share_set set;
         if (share_set(argc, argv, 4, &set) != 0) return 2;
-        const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
+        const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, counting_mount, sop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
         unsigned mounted = 99;
         int rc = wg_mount_shares_as(&ops, &set, &mounted, argv[2], argv[3]);
-        printf("rc=%d mounted=%u\n", rc, mounted);
+        printf("rc=%d mounted=%u mounts=%d\n", rc, mounted, mount_calls);   /* mount_calls: how many mount(2) calls the step made at all */
         static char table[WG_MOUNTINFO_MAX];
         for (unsigned i = 0; i < set.count; i++) {
             char where[WG_SHARE_PATH_MAX + 4096];

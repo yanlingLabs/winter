@@ -490,16 +490,18 @@ static long sop_read_mountinfo(void *ctx, char *out, size_t capacity) {
     close(fd);
     return (long)have;
 }
+/* A share's unmount (the step's rollback and the drain) never follows a symbolic link in the last component: it takes off the mount at that path or nothing. */
+static int sop_umount(void *ctx, const char *target) { (void)ctx; return umount2(target, UMOUNT_NOFOLLOW); }
 static int op_mount_shares(void *ctx, const struct wg_share_set *set, unsigned *mounted) {
     (void)ctx;
-    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
+    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, sop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
     return wg_mount_shares(&ops, set, mounted);
 }
 static int op_umount_share(void *ctx, const char *guest_path) {
     (void)ctx;
     char where[WG_SHARE_PATH_MAX + 4096];
     if (snprintf(where, sizeof where, "%s%s", SHARES_ROOT, guest_path) >= (int)sizeof where) return -1;
-    return umount2(where, 0);
+    return sop_umount(NULL, where);
 }
 #endif
 static int op_read_base_config(void *ctx, char *out, size_t capacity, size_t *length) {
