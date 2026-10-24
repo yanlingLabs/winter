@@ -1,7 +1,7 @@
 """Prepare and hash-check the isolated libkrun production-profile source. Offline; never builds or launches a VM.
 
 Composes the pristine pinned libkrun tree (out/libkrun, made by fetch_inputs.py) with the patch queue
-0004..0013 (the admitted two-disk fixture) and 0014..0023 (the production profile), in order, then proves:
+0004..0013 (the admitted two-disk fixture) and 0014..0024 (the production profile), in order, then proves:
   * every patch hash and the composed full-diff hash are the pinned ones;
   * each production patch is exactly the git diff between two successive composed states;
   * the production patches stay inside their declared file scope and add no device or GPIO attach;
