@@ -99,7 +99,17 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_
     # image.py writes a full receipt with reproducibilityPinned false (and exits 3) while expectedArtifact is null: such a root is evidence of a build, not an accepted artifact
     if receipt.get('reproducibilityPinned') is not True and not allow_unpinned:raise ValueError('receipt is not reproducibility-pinned')
     manifest=json.loads((root/'root.manifest.json').read_text())
-    if pinned_init is None and require_init:pinned_init=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']['binarySha256']
+    init_pinned=True
+    if pinned_init is None and require_init:
+        init_pins=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']
+        if 'binarySha256' not in init_pins:raise ValueError('pins.json has no init binarySha256 key (null means unpinned; a missing key is an error)')
+        pinned_init=init_pins['binarySha256']
+        if pinned_init is None:
+            # An explicit null is a build that has not been pinned yet. It is only ever read back in the one-run build's allow_unpinned mode (an evidence read of a root image.py reported
+            # UNPINNED), against the init digest that root's own receipt claims; the receipt and the cpio must still agree. Without allow_unpinned it is refused.
+            if not allow_unpinned:raise ValueError('the init binary is not pinned in pins.json (binarySha256 is null)')
+            init_pinned=False;pinned_init=receipt.get('initSha256')
+            if not isinstance(pinned_init,str) or not re.fullmatch(r'[0-9a-f]{64}',pinned_init):raise ValueError('receipt carries no init digest to read an unpinned init back against')
     startup={};records={};config_bytes=None
     expected={entry['path'].lstrip('/'):entry for entry in manifest};seen=set();inodes=set();count=0
     with (root/'immutable-root.cpio').open('rb') as stream:
@@ -156,6 +166,6 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_
         pinned=json.loads((HERE/'pins.json').read_text())['environment']['gitconfigSha256']
         if receipt['environment'].get('gitconfigSha256')!=pinned:raise ValueError('receipt does not describe the pinned environment gitconfig')
         environment=check_environment_gitconfig(records,pinned)
-    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'runtimeArtifacts':runtime}
+    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'initPinned':init_pinned,'runtimeArtifacts':runtime}
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');parser.add_argument('--no-environment',action='store_true',help='a root built before the environment gitconfig existed: its receipt need not claim it');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned,require_environment=not args.no_environment),sort_keys=True))

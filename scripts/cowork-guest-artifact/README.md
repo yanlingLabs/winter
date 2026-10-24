@@ -24,4 +24,6 @@ Bun runtime compile calls the corrected canonical SDK builder through a thin wra
 
 The gzip companion uses empty filename, mtime 0, level 9 and records the zlib version. Its decompressed hash must equal canonical cpio. Both companions repeated here; cross-zlib compressed reproducibility is not assumed. Inspected pinned-kernel configs include CONFIG_RD_GZIP=y, but this payload has no boot/admission proof. Compression does not remove the expanded root's guest RAM cost. Runtime/root/helpers remain immutable candidate inputs, separate from future writable data/environment disks; no backend device was changed or added.
 
+The guest `init` and `winter-guest-relay` binary pins (`guest.programs.*.binarySha256`) may be an explicit `null`: the build then reports the digest it produced, ends at exit 3 UNPINNED like the other unpinned fields, and `verify.py` reads such a root back only with `--allow-unpinned` (against the init digest its own receipt claims; never accepted). A pin that is set and differs from the build is a hard failure, and a missing key is an error.
+
 Updating the SDK/provider source, compiler, distro snapshot, packages or helpers requires an explicit new artifact/pin/receipt review. The unchanged SDK package semver is never a substitute for source and binary identity. No release/consumer SDK pin is performed here.

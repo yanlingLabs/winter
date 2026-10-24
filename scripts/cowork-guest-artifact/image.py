@@ -379,11 +379,18 @@ def build_guest(zig,out,pins):
     receipt=json.loads((out/'receipt.json').read_text());pinned=pins['guest']
     for name,entry in pinned['programs'].items():
         built=receipt['programs'][name]
-        if built['binarySha256']!=entry['binarySha256']:raise ValueError('guest program '+name+' is not the pinned build')
+        if 'binarySha256' not in entry:raise ValueError('guest program '+name+' has no binarySha256 key in pins.json (null means unpinned; a missing key is an error)')
+        # An explicit null is an UNPINNED binary (guest_binary_problems reports the built digest and the build ends at exit 3); a pin that is set must be exactly the built one, as ever.
+        if entry['binarySha256'] is not None and built['binarySha256']!=entry['binarySha256']:raise ValueError('guest program '+name+' is not the pinned build')
         if built['sourceSha256']!=entry['sourceSha256']:raise ValueError('guest program '+name+' source drifted from the pin')
     for name,entry in pinned['scripts'].items():
         if receipt['scripts'][name]['sha256']!=entry['sha256']:raise ValueError('guest script '+name+' is not the pinned one')
     return {name:(out/name).read_bytes() for name in pinned['programs']},{name:(GUEST/path).read_bytes() for name,path in pinned['scriptPaths'].items()},receipt
+
+def guest_binary_problems(receipt,pins):
+    """UNPINNED entries for the guest programs whose pins.json binarySha256 is an explicit null, each with the digest this build produced (build_guest has already refused every
+    non-null pin that differs and every missing key). Empty when all are pinned."""
+    return ['guest program '+name+' binarySha256 is not pinned (built '+receipt['programs'][name]['binarySha256']+')' for name,entry in pins['guest']['programs'].items() if entry['binarySha256'] is None]
 
 def source_snapshot(sdk,commit,destination):
     actual=subprocess.check_output(['git','-C',str(sdk),'rev-parse',commit],text=True).strip()
@@ -477,7 +484,7 @@ def main():
     tree.add(verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',gitconfig,False,'pinned:scripts/cowork-guest-artifact/environment/gitconfig')
     tree.add(verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory',origin='derived:empty-git-template-directory')
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
-    check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
+    check_startup(tree,pins['guest']['programs']['init']['binarySha256'] or sha(programs['init']))   # (a null pin: the init of the tree is still exactly the one just built, and it is the only startup program)
     records=verify_elfs(tree)
     refuse_blkid(tree)
     refuse_provider_bridge(tree)
@@ -492,7 +499,7 @@ def main():
     tree.materialize(out/'root');tree.cpio(out/'immutable-root.cpio')
     manifest=tree.manifest();(out/'root.manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n');(out/'elf-dependencies.json').write_text(json.dumps(records,sort_keys=True,indent=2)+'\n')
     receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
-    problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems
+    problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems+guest_binary_problems(guest_receipt,pins)
     receipt['packageLockSha256']=lock_sha
     receipt['environment']={'gitconfigPath':'/etc/gitconfig','gitconfigSha256':sha(gitconfig)}
     (out/'packages.lock.json').write_bytes(lock_bytes)
