@@ -89,7 +89,7 @@ def check_environment_gitconfig(files,expected_sha256):
     if any(path.startswith(GIT_TEMPLATE_DIRECTORY+'/') for path in files):raise ValueError('git template directory is not empty')
     return expected_sha256
 
-def verify(root,pinned_init=None,require_init=True,allow_unpinned=False):
+def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_environment=False):
     """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
     uid/gid 0 whose bytes hash to the digest pinned in pins.json (or `pinned_init`). `require_init=False` is for roots built
     before slice S5, which must still have NO startup program."""
@@ -146,10 +146,13 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False):
         runtime=check_runtime_artifacts(records,config_bytes)
         if runtime!={key:value['sha256'] for key,value in receipt['hostQuery']['artifacts'].items()}:raise ValueError('receipt does not describe the runtime artifacts')
     environment=None
+    # The gitconfig is not optional where it matters: a root that carries the file must have a receipt that claims it (a receipt cannot hide a file the cpio ships), and the command line
+    # (the image build's own check) requires the claim of every root it verifies; only a root built before the gitconfig existed (--no-environment) may have neither.
+    if receipt.get('environment') is None and (require_environment or ENVIRONMENT_GITCONFIG_PATH in records):raise ValueError('receipt does not describe the environment gitconfig')
     if receipt.get('environment') is not None:   # a root built with the environment's gitconfig must carry exactly the pinned one
         pinned=json.loads((HERE/'pins.json').read_text())['environment']['gitconfigSha256']
         if receipt['environment'].get('gitconfigSha256')!=pinned:raise ValueError('receipt does not describe the pinned environment gitconfig')
         environment=check_environment_gitconfig(records,pinned)
     return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'runtimeArtifacts':runtime}
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned),sort_keys=True))
+    parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');parser.add_argument('--no-environment',action='store_true',help='a root built before the environment gitconfig existed: its receipt need not claim it');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned,require_environment=not args.no_environment),sort_keys=True))

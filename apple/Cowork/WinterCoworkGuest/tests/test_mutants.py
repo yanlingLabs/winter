@@ -4,7 +4,8 @@ copy of this tree, and the test that is meant to catch it must fail on the copy.
 The Linux-only mutants (init_linux.c, exercised by test_pid1_linux.py) run only where that suite runs. Two guards are deliberately absent because
 they cannot change behaviour: `!S_ISDIR` on a descriptor opened with O_DIRECTORY, and `!S_ISREG` next to the size, mode and link-count checks
 (a replacement would need to be a non-regular file of the same size, mode and link count; the open of a FIFO there would block, which the
-function's single caller never meets because it created the file itself a moment earlier).
+function's single caller never meets because it created the file itself a moment earlier). Likewise the out-of-memory and descriptor-exhaustion
+returns of the plan walk (`dup`, `fdopendir`, a failed `open_component` whose descriptor the next `fstat` would reject anyway) are not mutated.
 """
 import os
 import shutil
@@ -223,6 +224,30 @@ MUTANTS = [
     ('init/dataroots.c', 'if (strncmp(source, WORKSPACE_PREFIX, sizeof WORKSPACE_PREFIX - 1) != 0) { rc = -1; break; }', '', 'fcroots'),
     ('init/dataroots.c', 'if (length > 64) { close(current); return -1; }', 'if (length == 0) { close(current); return -1; }', 'fcroots'),
     ('init/dataroots.c', 'if (wg_data_root_is_share_mount(source)) continue;', '', 'fcroots'),
+    ('init/dataroots.c', 'if (epoch < 0) { rc = -1; break; }', '', 'fcroots'),
+    ('init/dataroots.c', 'if (plan_epoch_is_current(current, epoch, ops) != 0) { close(current); return -1; }', '', 'fcroots'),
+    ('init/dataroots.c', 'if (result == 0 && errno != 0) result = -1;', '', 'fcroots'),
+    ('init/dataroots.c', '    errno = 0;\n    while ((entry', '    while ((entry', 'fcroots'),
+    ('init/dataroots.c', 'ops->read_entry ? ops->read_entry(directory, ops->ctx) : readdir(directory)', 'readdir(directory)', 'fcroots'),
+    ('init/dataroots.c', 'if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;', '', 'fcroots'),
+    ('init/dataroots.c', 'if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;', 'if (rc == 0 && st.st_uid != ops->parent_owner) rc = -1;', 'fcroots'),
+    ('init/dataroots.c', 'if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;', 'if (rc == 0 && st.st_uid != want_uid) rc = -1;', 'fcroots'),
+    ('init/dataroots.c', 'if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;', 'if (rc == 0 && (st.st_uid != ops->parent_owner || st.st_uid != want_uid)) rc = -1;', 'fcroots'),
+    ('init/dataroots.c', '    if (rc == 0) rc = ops->fchown_fd(fd, uid, gid, ops->ctx);\n', '', 'fcroots'),
+    ('init/dataroots.c', '    if (rc == 0) rc = fchmod(fd, mode);', '', 'fcroots'),
+    ('init/dataroots.c', '(fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid)) rc = -1;', '(fstat(fd, &st) != 0 || st.st_gid != want_gid)) rc = -1;', 'fcroots'),
+    ('init/dataroots.c', '(fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid)) rc = -1;', '(fstat(fd, &st) != 0 || st.st_uid != want_uid)) rc = -1;', 'fcroots'),
+    ('init/dataroots.c', '    if (rc != 0) { close(fd); return -1; }\n    return fd;', '    return fd;', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops)', 'make_plan_dir(current, names[level], ops->owner, ops->owner_group, 0700, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops)', 'make_plan_dir(current, names[level], ops->owner, ops->owner_group, 0777, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops)', 'make_plan_dir(current, names[level], (uid_t)tool_uid, (gid_t)tool_uid, PARENT_MODE, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops)', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)0, PLAN_MODE, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops)', 'make_plan_dir(current, epoch_name, (uid_t)0, (gid_t)tool_uid, PLAN_MODE, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops)', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, 0750, ops)', 'fcroots'),
+    ('init/dataroots.c', 'make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops)', 'make_plan_dir(current, epoch_name, ops->owner, ops->owner_group, PLAN_MODE, ops)', 'fcroots'),
+    ('init/dataroots.c', 'const char *names[2] = { &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], session_id };', 'const char *names[2] = { &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1] };', 'fcroots'),
+    ('init/dataroots.c', '    close(current);\n    if (made < 0) return -1;', '    close(current);', 'fcroots'),
+    ('init/dataroots.c', '#define PLAN_MODE 0700', '#define PLAN_MODE 0770', 'fcroots'),
     ('init/dataroots.c', '            } else if (plan_only) {\n                continue;\n            }', '            }', 'fcroots'),
     ('init/dataroots.c', "if (strncmp(at, session_id, id_length) != 0 || at[id_length] != '/') return -1;", "if (at[id_length] != '/') return -1;", 'fcroots'),
     ('init/dataroots.c', "if (strncmp(at, session_id, id_length) != 0 || at[id_length] != '/') return -1;", 'if (strncmp(at, session_id, id_length) != 0) return -1;', 'fcroots'),
@@ -231,8 +256,6 @@ MUTANTS = [
     ('init/dataroots.c', "if (digits[i] < '0' || digits[i] > '9') return -1;", "if (digits[i] < '0') return -1;", 'fcroots'),
     ('init/dataroots.c', 'if (i == n && value > epoch) { result = -1; break; }', 'if (i == n && value >= epoch) { result = -1; break; }', 'fcroots'),
     ('init/dataroots.c', 'if (i == n && value > epoch) { result = -1; break; }', 'if (i == n && value > epoch + 1000) { result = -1; break; }', 'fcroots'),
-    ('init/dataroots.c', 'if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops) != 0) { rc = -1; break; }', 'if (epoch < 0) { rc = -1; break; }', 'fcroots'),
-    ('init/dataroots.c', 'if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops) != 0) { rc = -1; break; }', 'if (plan_epoch_is_current(workspace, set->session_id[i], epoch, ops) != 0) { rc = -1; break; }', 'fcroots'),
     ('init/dataroots.c', '            if (under(source, PLAN_ROOT)) {', '            if (under(source, PLAN_ROOT "/")) {', 'fcroots'),
     ('bootstrap/guest_bootstrap.py', 'if REVISION_THREE and (type(parsed.get("v")) is not int or parsed["v"] != BOOTSTRAP_VERSION):', 'if False:', 'bootstrap'),
     ('bootstrap/guest_bootstrap.py', 'MAX_ENDED_BOOTS = 4', 'MAX_ENDED_BOOTS = 5', 'bootstrap'),

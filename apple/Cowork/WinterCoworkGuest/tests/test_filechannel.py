@@ -203,11 +203,12 @@ class DataRootTests(unittest.TestCase):
             if os.environ.get("WG_REQUIRE_ROOT"):
                 self.fail("WG_REQUIRE_ROOT is set but this is not root: the identity half would silently not run")
             self.skipTest("the real-identity half needs root (cowork-guest-boot.yml runs it with sudo)")
+        shared = 42000                                   # the workspace group both conversations share: not root's group, and not either tool uid's
         # a workspace the tool uids can walk down to (the temporary directory may be under a home they cannot enter)
         self.dir = Path(tempfile.mkdtemp(prefix="guest-ids-", dir="/tmp"))
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
         os.chmod(self.dir, 0o755)
-        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", "--", self.gid, "/workspace/plan/conv-0002/3", DATAROOTS_REAL_IDS="1"), "0")
+        self.assertEqual(self.run_env(shared, "/workspace/plan/conv-0001/5", "--", shared, "/workspace/plan/conv-0002/3", DATAROOTS_REAL_IDS="1"), "0")
         st = (self.dir / "plan/conv-0001/5").stat()
         self.assertEqual((st.st_uid, st.st_gid), (41001, 41001))
         self.assertEqual(((self.dir / "plan/conv-0001").stat().st_uid, (self.dir / "plan").stat().st_uid), (0, 0))
@@ -217,7 +218,7 @@ class DataRootTests(unittest.TestCase):
             if pid == 0:
                 code = 99
                 try:
-                    os.setgroups([self.gid])                         # the workspace group, as every tool process of the workspace may have
+                    os.setgroups([shared])                           # the workspace group (a real one, not root's 0), as every tool process of the workspace may have
                     os.setresgid(uid, uid, uid)
                     os.setresuid(uid, uid, uid)
                     action()
@@ -259,7 +260,9 @@ class DataRootTests(unittest.TestCase):
         self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")                  # the same directory is fine for its own owner
 
     def test_the_result_of_making_an_epoch_directory_is_checked_not_the_return_values(self):
-        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_STORED_UID=self.foreign_id() + 5000), "-1")     # the owner is not the one asked for
+        log = self.chown_requests()
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_STORED_UID=self.foreign_id() + 5000, DATAROOTS_LOG=log), "-1")     # the owner is not the one asked for
+        self.assertIn("41001:41001", log.read_text())                                                  # (a directory PID 1 made itself is let through to the chown; it is the result that fails)
         self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_STORED_GID=os.getgid() + 5000), "-1")          # nor is the group
         self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/7"), "0")
 
