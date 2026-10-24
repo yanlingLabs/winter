@@ -434,7 +434,7 @@ static int make_private_dir(const char *parent_path, const char *name, uid_t uid
  * a file channel (a browse uid). */
 static const struct wg_dataroots_ops *dataroots_ops = &wg_dataroots_production;   /* the native tests, which run as an ordinary user, point it at their own owner */
 static int prepare_data_roots(const struct wg_conversation_set *set) {
-    if (set->browse_uid == 0) return 0;
+    if (set->browse_uid == 0) return wg_make_plan_views(WG_WORKSPACE_PATH, set, dataroots_ops);   /* no browse uid: no data roots, but a plan view is PID 1's to make */
     return wg_make_data_roots(WG_WORKSPACE_PATH, set, dataroots_ops);
 }
 #endif

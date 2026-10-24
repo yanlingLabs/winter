@@ -304,7 +304,8 @@ def _workspace_path(value):
     return _guest_path(value) and value.startswith("/workspace/")
 
 
-ROOT_SOURCE_COMPONENT = re.compile(r"[A-Za-z0-9._-]+")
+ROOT_SOURCE_COMPONENT = re.compile(r"[A-Za-z0-9._-]{1,64}")
+PLAN_EPOCH = re.compile(r"0|[1-9][0-9]{0,8}")
 
 
 def _root_source(value):
@@ -321,7 +322,13 @@ def _allowed_view(path, session_id):
     return ((len(parts) >= 3 and parts[1] in ("folders", "repos"))
             or (len(parts) == 3 and parts[1] == ".winter" and parts[2] == "memory")
             or (len(parts) == 4 and parts[1] == ".winter" and parts[2] == "scratch" and parts[3] == session_id)
-            or (len(parts) == 3 and parts[1] == "outputs" and parts[2] == session_id))
+            or (len(parts) == 3 and parts[1] == "outputs" and parts[2] == session_id)
+            # The plan view (contract 12.5): this conversation's own scratch for one epoch, a canonical decimal of at most nine digits, exactly that path.
+            or (len(parts) == 4 and parts[1] == "plan" and parts[2] == session_id and PLAN_EPOCH.fullmatch(parts[3]) is not None))
+
+
+def _is_plan_view(path):
+    return path.startswith("/workspace/plan/")
 
 
 def _public_metadata(node, depth):
@@ -419,10 +426,16 @@ def _conversation(item):
     # The nested checks run in the order protocol.ts runs them, so that a value with several defects names the same category.
     if not _roots(item["roots"], session_id) or not _runtime(item["runtime"]):
         return False
+    # The plan view exists only under the plan policy, at most once, writable; under plan it is the ONLY writable root (protocol.ts conversationOf, mirrored).
+    plan_views = [root for root in item["roots"] if _is_plan_view(root["guestPath"])]
+    if len(plan_views) > 1 or any(item["policy"] != "plan" or root["readOnly"] for root in plan_views):
+        return False
+    if item["policy"] == "plan" and any(not root["readOnly"] and not _is_plan_view(root["guestPath"]) for root in item["roots"]):
+        return False
     runtime = item["runtime"]
     if runtime is not None:
         for root in item["roots"]:
-            if root["guestPath"] == "/workspace/.winter" or root["guestPath"].startswith("/workspace/.winter/") or (item["policy"] == "plan" and not root["readOnly"]):
+            if root["guestPath"] == "/workspace/.winter" or root["guestPath"].startswith("/workspace/.winter/"):
                 return False
         scope, selection = runtime["provider"]["scope"], runtime["provider"]["selection"]
         if (scope["workspaceId"] != authority["workspaceId"] or scope["sessionId"] != session_id or scope["backendSessionId"] != authority["sessionId"]
@@ -1246,11 +1259,11 @@ def conversations_payload(message):
         sid = item["logicalSessionId"].encode("ascii")
         out += struct.pack("<IB", item["runtimeUid"], len(sid)) + sid
     if REVISION_THREE:
-        # The file channel's part (boot.h wg_conversation_set under WG_FILE_CHANNEL_V1): the workspace's browse uid (0 = none), then per conversation its workspace gid and the
-        # `source` of every root, which PID 1 makes as root:workspaceGid 02770 directories on the data volume.
+        # The file channel's part (boot.h wg_conversation_set under WG_FILE_CHANNEL_V1): the workspace's browse uid (0 = none), then per conversation its tool uid, its workspace gid and the
+        # `source` of every root, which PID 1 makes as root:workspaceGid 02770 directories on the data volume (the plan view is the exception: the tool uid's own, 0700).
         out += struct.pack("<I", message["browseUid"] or 0)
         for item in message["conversations"]:
-            out += struct.pack("<IB", item["workspaceGid"], len(item["roots"]))
+            out += struct.pack("<IIB", item["toolUid"], item["workspaceGid"], len(item["roots"]))
             for root in item["roots"]:
                 source = root["source"].encode("ascii")
                 out += struct.pack("<B", len(source)) + source

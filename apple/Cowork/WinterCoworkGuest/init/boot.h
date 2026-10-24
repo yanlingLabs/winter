@@ -39,8 +39,9 @@
 #ifdef WG_FILE_CHANNEL_V1
 /* Image with the runtime capability `file-channel-v1` only. The helper (started with --file-channel-v1) sends the payload below with the profile byte's bit 7 set:
  *   u8 profile | 0x80, u8 count, per conversation {u32 runtimeUid, u8 id length, id}, then
- *   u32 LE browseUid (0 = the workspace has none; otherwise 1000 to 65533, never a runtime uid or a workspace gid of the set),
- *   per conversation {u32 LE workspaceGid (1000 to 65533, never a runtime uid of the set), u8 root count (1 to 16), per root {u8 length (11 to 255), the root's `source` path}},
+ *   u32 LE browseUid (0 = the workspace has none; otherwise 1000 to 65533, never a runtime or tool uid or a workspace gid of the set),
+ *   per conversation {u32 LE toolUid (1000 to 65533, distinct from every runtime and tool uid of the set: the owner of the conversation's plan view),
+ *   u32 LE workspaceGid (1000 to 65533, never a runtime or tool uid of the set), u8 root count (1 to 16), per root {u8 length (11 to 255), the root's `source` path}},
  *   then the items JSON. A payload without bit 7 is the plain one and means "no file channel". */
 #define WG_PAYLOAD_EXTENDED 0x80u
 #define WG_ROOTS_MAX 16u
@@ -55,6 +56,7 @@ struct wg_conversation_set {
     size_t json_length;
 #ifdef WG_FILE_CHANNEL_V1
     uint32_t browse_uid;                                              /* 0 = no file channel for this set */
+    uint32_t tool_uid[WG_CONVERSATIONS_MAX];
     uint32_t workspace_gid[WG_CONVERSATIONS_MAX];
     unsigned root_count[WG_CONVERSATIONS_MAX];
     char root_source[WG_CONVERSATIONS_MAX][WG_ROOTS_MAX][WG_ROOT_SOURCE_MAX + 1];
