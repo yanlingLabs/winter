@@ -107,7 +107,7 @@
     "programs": {
       "init": {
         "binarySha256": "dede7fd9ddc9eb954c29cb989b689e059f6f3b223618c4f66a392f13aee6f498",
-        "sourceSha256": "b55d1acc77eb2f8bd4a18a7fb6f60d334573b4870ec29ae4ee0d8803e0f36dea"
+        "sourceSha256": "3c33fdb489997bd94be20a9a1c4f89891b4b963c7a7be04069bad14a4725bb84"
       },
       "winter-guest-relay": {
         "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",

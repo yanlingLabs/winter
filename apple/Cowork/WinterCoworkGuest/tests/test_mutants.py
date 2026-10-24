@@ -269,18 +269,18 @@ MUTANTS = [
     ('init/boot.c', 'if (kind != WG_SHARE_FOLDER && share->read_only != (kind == WG_SHARE_GUIDANCE)) return -1;', '', 'shboot'),
     ('init/boot.c', 'share->read_only = (flags & 1u) != 0;', 'share->read_only = 0;', 'shboot'),
     ('bootstrap/guest_bootstrap.py', '1 if share["readOnly"] else 0', '0', 'bootstrap'),
-    ('init/shares.c', 'WG_SHARE_FSTYPE, wg_share_mount_flags(&set->item[i]), WG_SHARE_MOUNT_DATA) != 0) goto rollback;', 'WG_SHARE_FSTYPE, wg_share_mount_flags(&set->item[i]), NULL) != 0) goto rollback;', 'shmod'),
-    ('init/shares.c', 'if (options_named(entry.super_options, WG_SHARE_MOUNT_DATA, 0) != 1 || options_named(entry.super_options, "dax", 1) != 1) return -1;', 'if (options_named(entry.super_options, "dax", 1) != 1) return -1;', 'shmod'),
-    ('init/shares.c', 'if (options_named(entry.super_options, WG_SHARE_MOUNT_DATA, 0) != 1 || options_named(entry.super_options, "dax", 1) != 1) return -1;', 'if (options_named(entry.super_options, WG_SHARE_MOUNT_DATA, 0) != 1) return -1;', 'shmod'),
+    ('init/shares.c', 'return wg_mount_shares_as(ops, set, mounted, WG_SHARE_FSTYPE, WG_SHARE_MOUNT_DATA);', 'return wg_mount_shares_as(ops, set, mounted, WG_SHARE_FSTYPE, "dax=inode");', 'shmod'),
+    ('init/shares.c', 'if (options_named(entry.super_options, data_option, 0) != 1 || options_named(entry.super_options, key, 1) != 1) return -1;', 'if (options_named(entry.super_options, key, 1) != 1) return -1;', 'shmod'),
+    ('init/shares.c', 'if (options_named(entry.super_options, data_option, 0) != 1 || options_named(entry.super_options, key, 1) != 1) return -1;', 'if (options_named(entry.super_options, data_option, 0) != 1) return -1;', 'shmod'),
     ('init/shares.c', 'if (wg_mountinfo_find(text, length, where, &entry) != 1) return -1;', 'if (wg_mountinfo_find(text, length, where, &entry) < 1) return -1;', 'shmod'),
     ('init/shares.c', 'strcmp(entry.root, "/") != 0 || ', '', 'shmod'),
-    ('init/shares.c', 'strcmp(entry.fstype, WG_SHARE_FSTYPE) != 0 || ', '', 'shmod'),
-    ('init/shares.c', '|| strcmp(entry.source, share->tag) != 0) return -1;', ') return -1;', 'shmod'),
+    ('init/shares.c', 'strcmp(entry.fstype, fstype) != 0 || ', '', 'shmod'),
+    ('init/shares.c', '|| strcmp(entry.source, source) != 0) return -1;', ') return -1;', 'shmod'),
     ('init/shares.c', '    if (options_named(entry.options, "ro", 0) != (share->read_only ? 1 : 0) || options_named(entry.options, "rw", 0) != (share->read_only ? 0 : 1)) return -1;\n', '', 'shmod'),
     ('init/shares.c', '    if (options_named(entry.options, "nosuid", 0) != 1 || options_named(entry.options, "nodev", 0) != 1) return -1;\n', '', 'shmod'),
     ('init/shares.c', '    if (options_named(entry.options, "noexec", 0) != (share->kind != WG_SHARE_FOLDER ? 1 : 0)) return -1;\n', '', 'shmod'),
-    ('init/shares.c', '    if (scan(text, length, NULL, share->tag, NULL) != 1) return -1;', '', 'shmod'),
-    ('init/shares.c', '|| wg_share_mountinfo_ok(mountinfo, (size_t)length, where, &set->item[i]) != 0) goto rollback;', ') goto rollback;', 'shmod'),
+    ('init/shares.c', '    if (scan(text, length, NULL, fstype, source, NULL) != 1) return -1;', '', 'shmod'),
+    ('init/shares.c', '|| wg_mountinfo_entry_ok(mountinfo, (size_t)length, where, &set->item[i], fstype, set->item[i].tag, data) != 0) goto rollback;', ') goto rollback;', 'shmod'),
     ('bootstrap/guest_bootstrap.py', '    if not shares_bound(message, plan_message):', '    if False:', 'bootstrap'),
     ('bootstrap/guest_bootstrap.py', 'return message["operationId"] == plan_message["operationId"] and message["nonce"] == plan_message["nonce"]', 'return message["operationId"] == plan_message["operationId"]', 'bootstrap'),
     ('bootstrap/guest_bootstrap.py', 'return message["operationId"] == plan_message["operationId"] and message["nonce"] == plan_message["nonce"]', 'return message["nonce"] == plan_message["nonce"]', 'bootstrap'),
@@ -300,6 +300,12 @@ MUTANTS = [
     ('bootstrap/guest_bootstrap.py', '        if len(self.pending) != already:', '        if False:', 'bootstrap'),
     ('bootstrap/guest_bootstrap.py', '                    self._fault(operation, nonce, "share_mount_failed")\n                    shares = "failed"', '                    self._fault(operation, nonce, "share_mount_failed")', 'bootstrap'),
     ('bootstrap/guest_bootstrap.py', '        if result[0] == SHARES_MOUNTED:', '        if True:', 'bootstrap'),
+    # ---- SH6 review fold: the mount lands on the checked descriptor; the virtio-fs wrapper's dax=never; the test-build-only owner override
+    ('init/shares.c', '"/proc/self/fd/%d", fds[i]) >= (int)sizeof target) goto rollback;', '"/proc/self/fd/%d", fds[0]) >= (int)sizeof target) goto rollback;', 'shmod'),
+    ('init/shares.c', 'if (snprintf(target, sizeof target, "/proc/self/fd/%d", fds[i]) >= (int)sizeof target) goto rollback;\n        if (ops->mount(ops->ctx, set->item[i].tag, target,', 'if (where_of(ops, &set->item[i], where, sizeof where) != 0) goto rollback;\n        if (ops->mount(ops->ctx, set->item[i].tag, where,', 'shmod'),
+    ('init/shares.c', 'return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, WG_SHARE_MOUNT_DATA);', 'return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, "dax=always");', 'shmod'),
+    ('init/init_linux.c', '#ifndef SHARES_OWNER\n#define SHARES_OWNER 0\n#endif', '#ifndef SHARES_OWNER\n#define SHARES_OWNER 1000\n#endif', 'shprod'),
+    ('build.py', 'FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1"', 'FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1 -DSHARES_OWNER=1000"', 'shprod'),
 ]
 
 SUITES = {
@@ -319,6 +325,7 @@ SUITES = {
     "fcpid1": ("tests", "test_pid1_linux.py", ["-k", "FileChannelPid1Tests"]),
     "shmod": ("tests", "test_shares.py", ["-k", "ShareModuleTests"]),
     "shboot": ("tests", "test_shares.py", ["-k", "BootShareTests"]),
+    "shprod": ("tests", "test_shares.py", ["-k", "ProductionHasNoShareStepTests"]),
 }
 
 

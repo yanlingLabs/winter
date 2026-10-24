@@ -8,10 +8,12 @@
  *   inventory SYS SHARE...                    wg_share_inventory: rc
  *   find MOUNTINFO WHERE                      wg_mountinfo_find on a file: count, then the fields of the entry
  *   check MOUNTINFO WHERE SHARE               wg_share_mountinfo_ok: rc
+ *   checkas MOUNTINFO WHERE SHARE FS SRC DATA wg_mountinfo_entry_ok: rc
  *   point ROOT SHARE                          wg_share_mount_point as the invoking user: rc
  *   alias ROOT                                wg_share_guidance_alias as the invoking user: rc
  *   step ROOT SYS MOUNTINFO FAIL SHARE...     wg_mount_shares; FAIL is `-`, `mount:N` (the Nth mount fails), `umount` (every unmount fails) or `mountinfo` (it cannot be
- *                                             read). MOUNTINFO is read as the table after the mounts, with @ROOT@ replaced by ROOT. Prints every effect, then rc and the mask.
+ *                                             read). MOUNTINFO is read as the table after the mounts, with @ROOT@ replaced by ROOT. Prints every effect (a
+ *                                             mount with the inode of the directory its /proc/self/fd/<n> target holds), then rc and the mask.
  */
 #define _GNU_SOURCE
 #include "../init/boot.h"
@@ -19,6 +21,7 @@
 #include "../init/shares.h"
 
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -68,7 +71,21 @@ struct record {
 static int r_mount(void *c, const char *source, const char *target, const char *fstype, unsigned long flags, const char *data) {
     struct record *r = c;
     r->mounts++;
-    printf("mount %s %s %s %lu %s\n", source, target, fstype, flags, data ? data : "(null)");
+    /* a target of the form /proc/self/fd/<n> is a descriptor of this process: report the directory it holds, so the test can see which one was mounted on */
+    int fd = -1;
+    char extra = 0;
+    struct stat st;
+    unsigned long long inode = 0;
+    /* SHARES_SWAP=PATH: before the first mount, the directory at PATH is renamed aside and a new one made in its place (a swap after the walk checked it) */
+    const char *swap = getenv("SHARES_SWAP");
+    if (swap && r->mounts == 1) {
+        char aside[4096];
+        snprintf(aside, sizeof aside, "%s.aside", swap);
+        if (rename(swap, aside) != 0 || mkdir(swap, 0700) != 0) { printf("swap-failed\n"); exit(3); }
+    }
+    if (sscanf(target, "/proc/self/fd/%d%c", &fd, &extra) == 1) { if (fstat(fd, &st) == 0) inode = (unsigned long long)st.st_ino; }
+    else if (stat(target, &st) == 0) inode = (unsigned long long)st.st_ino;   /* a path target: whatever the path names now */
+    printf("mount %s %s %s %lu %s ino=%llu\n", source, target, fstype, flags, data ? data : "(null)", inode);
     return r->fail_mount == r->mounts ? -1 : 0;
 }
 static int r_umount(void *c, const char *target) {
@@ -141,6 +158,14 @@ int main(int argc, char **argv) {
         struct wg_share share;
         if (!text || parse_share(argv[4], &share) != 0) return 2;
         printf("%d\n", wg_share_mountinfo_ok(text, length, argv[3], &share));
+        return 0;
+    }
+    if (argc == 8 && strcmp(argv[1], "checkas") == 0) {     /* MOUNTINFO WHERE SHARE FSTYPE SOURCE DATA: wg_mountinfo_entry_ok, the check for any filesystem */
+        size_t length = 0;
+        const char *text = slurp(argv[2], &length);
+        struct wg_share share;
+        if (!text || parse_share(argv[4], &share) != 0) return 2;
+        printf("%d\n", wg_mountinfo_entry_ok(text, length, argv[3], &share, argv[5], argv[6], argv[7]));
         return 0;
     }
     if (argc == 4 && strcmp(argv[1], "point") == 0) {

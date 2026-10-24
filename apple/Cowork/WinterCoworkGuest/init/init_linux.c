@@ -460,7 +460,8 @@ static int op_read_data_device(void *ctx, uint64_t *device) {
 }
 #endif
 #ifdef WG_FILE_CHANNEL_V1
-/* Host-backed shares (shares.c). The three paths below may be overridden only by the native test build (tests/linux_init_tool.c); PID 1 uses the real ones. */
+/* Host-backed shares (shares.c). The three paths and the owner below may be overridden only by the native test build (tests/linux_init_tool.c); PID 1 uses the real
+ * ones, and root (0) owns every directory on the way to a mount point. An ordinary test process passes its own uid, so its run reaches the real mount(2). */
 #ifndef SHARES_ROOT
 #define SHARES_ROOT ""
 #endif
@@ -469,6 +470,9 @@ static int op_read_data_device(void *ctx, uint64_t *device) {
 #endif
 #ifndef MOUNTINFO_PATH
 #define MOUNTINFO_PATH "/proc/self/mountinfo"
+#endif
+#ifndef SHARES_OWNER
+#define SHARES_OWNER 0
 #endif
 static long sop_read_mountinfo(void *ctx, char *out, size_t capacity) {
     (void)ctx;
@@ -488,7 +492,7 @@ static long sop_read_mountinfo(void *ctx, char *out, size_t capacity) {
 }
 static int op_mount_shares(void *ctx, const struct wg_share_set *set, unsigned *mounted) {
     (void)ctx;
-    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, 0 };
+    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
     return wg_mount_shares(&ops, set, mounted);
 }
 static int op_umount_share(void *ctx, const char *guest_path) {

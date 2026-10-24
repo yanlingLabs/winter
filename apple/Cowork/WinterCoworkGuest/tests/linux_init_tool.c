@@ -37,6 +37,21 @@ static int fsync_fail(int fd) { (void)fd; fsync_calls++; return -1; }
 
 #ifdef WG_FILE_CHANNEL_V1
 static int own_chown(int fd, uid_t uid, gid_t gid, void *ctx) { (void)ctx; return fchown(fd, uid, gid); }
+
+/* KIND:RO:TAG:PATH arguments (KIND folder|guidance|memory|outputs) into a share set. */
+static int share_set(int argc, char **argv, int first, struct wg_share_set *set) {
+    memset(set, 0, sizeof *set);
+    for (int i = first; i < argc && set->count < WG_SHARES_MAX; i++) {
+        struct wg_share *share = &set->item[set->count++];
+        char kind[16];
+        int ro = 0, used = 0;
+        if (sscanf(argv[i], "%15[a-z]:%d:%32[a-z0-9-]:%n", kind, &ro, share->tag, &used) != 3 || used == 0) return -1;
+        snprintf(share->guest_path, sizeof share->guest_path, "%s", argv[i] + used);
+        share->read_only = ro;
+        share->kind = strcmp(kind, "folder") == 0 ? WG_SHARE_FOLDER : strcmp(kind, "guidance") == 0 ? WG_SHARE_GUIDANCE : strcmp(kind, "memory") == 0 ? WG_SHARE_MEMORY : WG_SHARE_OUTPUTS;
+    }
+    return set->count ? 0 : -1;
+}
 #endif
 
 static int open_descriptors(void) {
@@ -176,35 +191,68 @@ int main(int argc, char **argv) {
         printf("rc=%d\n", op_prepare_conversation_dirs(NULL, &set));
         return 0;
     }
-    if (argc >= 3 && strcmp(argv[1], "shares") == 0) {       /* KIND:RO:TAG:PATH...: op_mount_shares with SHARES_ROOT and SHARES_SYS_ROOT test paths (-D), the real mount(2) */
+    if (argc >= 3 && strcmp(argv[1], "shares") == 0) {       /* SHARE...: op_mount_shares with SHARES_ROOT, SHARES_SYS_ROOT and SHARES_OWNER test values (-D), the real mount(2) */
         static struct wg_share_set set;
-        memset(&set, 0, sizeof set);
-        for (int i = 2; i < argc && set.count < WG_SHARES_MAX; i++) {
-            struct wg_share *share = &set.item[set.count++];
-            char kind[16];
-            int ro = 0, used = 0;
-            if (sscanf(argv[i], "%15[a-z]:%d:%32[a-z0-9-]:%n", kind, &ro, share->tag, &used) != 3 || used == 0) return 2;
-            snprintf(share->guest_path, sizeof share->guest_path, "%s", argv[i] + used);
-            share->read_only = ro;
-            share->kind = strcmp(kind, "folder") == 0 ? WG_SHARE_FOLDER : strcmp(kind, "guidance") == 0 ? WG_SHARE_GUIDANCE : strcmp(kind, "memory") == 0 ? WG_SHARE_MEMORY : WG_SHARE_OUTPUTS;
-        }
+        if (share_set(argc, argv, 2, &set) != 0) return 2;
         unsigned mounted = 99;
+        errno = 0;
         int rc = op_mount_shares(NULL, &set, &mounted);
+        int saved = errno;                                    /* what the refused mount(2) said: nothing after it touches errno when nothing was mounted */
+        printf("rc=%d mounted=%u errno=%d\n", rc, mounted, saved);
+        return 0;
+    }
+    if (argc >= 5 && strcmp(argv[1], "realstep") == 0) {     /* FSTYPE DATA SHARE...: the whole share step for real (root, in a private mount namespace), then every share unmounted */
+        static struct wg_share_set set;
+        if (share_set(argc, argv, 4, &set) != 0) return 2;
+        const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, mop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
+        unsigned mounted = 99;
+        int rc = wg_mount_shares_as(&ops, &set, &mounted, argv[2], argv[3]);
         printf("rc=%d mounted=%u\n", rc, mounted);
+        static char table[WG_MOUNTINFO_MAX];
+        for (unsigned i = 0; i < set.count; i++) {
+            char where[WG_SHARE_PATH_MAX + 4096];
+            snprintf(where, sizeof where, "%s%s", SHARES_ROOT, set.item[i].guest_path);
+            long length = sop_read_mountinfo(NULL, table, sizeof table);
+            struct wg_mountinfo_entry entry;
+            memset(&entry, 0, sizeof entry);
+            int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, where, &entry);
+            printf("share=%s count=%d options=%s fstype=%s source=%s super=%s\n", set.item[i].tag, count, entry.options, entry.fstype, entry.source, entry.super_options);
+        }
+        char alias[WG_SHARE_PATH_MAX + 4096], text[128];
+        snprintf(alias, sizeof alias, "%s%s/%s", SHARES_ROOT, WG_SHARE_GUIDANCE_ALIAS_DIRECTORY, WG_SHARE_GUIDANCE_ALIAS_NAME);
+        ssize_t n = readlink(alias, text, sizeof text - 1);
+        printf("alias=%.*s\n", n < 0 ? 0 : (int)n, text);
+        for (unsigned i = set.count; i-- > 0;) if (mounted & (1u << i)) printf("umount=%s:%d\n", set.item[i].tag, op_umount_share(NULL, set.item[i].guest_path));
+        long length = sop_read_mountinfo(NULL, table, sizeof table);
+        int left = 0;
+        for (unsigned i = 0; i < set.count; i++) {
+            char where[WG_SHARE_PATH_MAX + 4096];
+            snprintf(where, sizeof where, "%s%s", SHARES_ROOT, set.item[i].guest_path);
+            left += length < 0 ? 1 : wg_mountinfo_find(table, (size_t)length, where, NULL);
+        }
+        printf("left=%d\n", left);
         return 0;
     }
-    if (argc == 3 && strcmp(argv[1], "umountshare") == 0) {  /* GUEST_PATH below SHARES_ROOT */
-        printf("rc=%d\n", op_umount_share(NULL, argv[2]));
-        return 0;
-    }
-    if (argc == 3 && strcmp(argv[1], "mountinfo") == 0) {    /* WHERE: this process's real mount table, read and parsed as PID 1 does */
+    if (argc == 10 && strcmp(argv[1], "realcheck") == 0) {   /* FSTYPE SOURCE DATA SHARE  CHECK_FSTYPE CHECK_SOURCE CHECK_DATA CHECK_SHARE (root, private mount namespace) */
+        static struct wg_share_set mounted_set, checked_set;
+        char *mount_argv[] = { argv[0], argv[5] }, *check_argv[] = { argv[0], argv[9] };
+        if (share_set(2, mount_argv, 1, &mounted_set) != 0 || share_set(2, check_argv, 1, &checked_set) != 0) return 2;
+        const struct wg_share *share = &mounted_set.item[0];
+        char where[WG_SHARE_PATH_MAX + 4096], target[64];
+        snprintf(where, sizeof where, "%s%s", SHARES_ROOT, share->guest_path);
+        int fd = open(where, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);   /* through the descriptor, as the step mounts */
+        if (fd < 0) { printf("open-failed\n"); return 0; }
+        snprintf(target, sizeof target, "/proc/self/fd/%d", fd);
+        if (mop_mount(NULL, argv[3], target, argv[2], wg_share_mount_flags(share), argv[4]) != 0) { printf("mount-failed errno=%d\n", errno); close(fd); return 0; }
+        close(fd);
         static char table[WG_MOUNTINFO_MAX];
         long length = sop_read_mountinfo(NULL, table, sizeof table);
         struct wg_mountinfo_entry entry;
         memset(&entry, 0, sizeof entry);
-        int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, argv[2], &entry);
-        printf("count=%d\n", count);
-        if (count > 0) printf("root=%s\nmount_point=%s\noptions=%s\nfstype=%s\nsource=%s\nsuper=%s\n", entry.root, entry.mount_point, entry.options, entry.fstype, entry.source, entry.super_options);
+        int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, where, &entry);
+        int ok = length < 0 ? -2 : wg_mountinfo_entry_ok(table, (size_t)length, where, &checked_set.item[0], argv[6], argv[7], argv[8]);
+        printf("count=%d check=%d\noptions=%s\nfstype=%s\nsource=%s\nsuper=%s\n", count, ok, entry.options, entry.fstype, entry.source, entry.super_options);
+        printf("umount=%d\n", umount2(where, 0));
         return 0;
     }
     if (argc == 3 && strcmp(argv[1], "realmount") == 0) {    /* TARGET: inside a user and mount namespace, a real tmpfs mount with a share's flags, then its own table */

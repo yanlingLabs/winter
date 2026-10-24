@@ -117,8 +117,8 @@ static int copy(char *out, size_t capacity, const char *text, size_t n) {
     return 0;
 }
 
-/* Counts the entries at `where` (when not NULL) or of fstype virtiofs with source `tag` (when not NULL); the last entry at `where` goes to *entry. */
-static int scan(const char *text, size_t length, const char *where, const char *tag, struct wg_mountinfo_entry *entry) {
+/* Counts the entries at `where` (when not NULL) or of `fstype` with source `source` (when `source` is not NULL); the last entry at `where` goes to *entry. */
+static int scan(const char *text, size_t length, const char *where, const char *fstype, const char *source, struct wg_mountinfo_entry *entry) {
     int found = 0;
     size_t at = 0;
     while (at < length) {
@@ -135,7 +135,7 @@ static int scan(const char *text, size_t length, const char *where, const char *
         for (int i = 6; i < count; i++) if (same(field[i], size[i], "-")) { separator = i; break; }
         if (separator < 0 || separator + 4 != count) return -1;
         int at_where = where != NULL && same(field[4], size[4], where);
-        int of_tag = tag != NULL && same(field[separator + 1], size[separator + 1], WG_SHARE_FSTYPE) && same(field[separator + 2], size[separator + 2], tag);
+        int of_tag = source != NULL && same(field[separator + 1], size[separator + 1], fstype) && same(field[separator + 2], size[separator + 2], source);
         if (!at_where && !of_tag) continue;
         found++;
         if (at_where && entry != NULL) {
@@ -149,7 +149,7 @@ static int scan(const char *text, size_t length, const char *where, const char *
 }
 
 int wg_mountinfo_find(const char *text, size_t length, const char *where, struct wg_mountinfo_entry *entry) {
-    return scan(text, length, where, NULL, entry);
+    return scan(text, length, where, NULL, NULL, entry);
 }
 
 /* How many comma-separated options of `list` are exactly `word` (with `prefix`: start with it). */
@@ -165,17 +165,29 @@ static int options_named(const char *list, const char *word, int prefix) {
     return found;
 }
 
-int wg_share_mountinfo_ok(const char *text, size_t length, const char *where, const struct wg_share *share) {
+int wg_mountinfo_entry_ok(const char *text, size_t length, const char *where, const struct wg_share *share, const char *fstype, const char *source, const char *data_option) {
     struct wg_mountinfo_entry entry;
-    if (wg_mountinfo_find(text, length, where, &entry) != 1) return -1;   /* nothing there, or something mounted over (or under) it */
-    if (strcmp(entry.root, "/") != 0 || strcmp(entry.fstype, WG_SHARE_FSTYPE) != 0 || strcmp(entry.source, share->tag) != 0) return -1;
+    /* exactly one mount at the path: none means the share is not mounted; two or more means it is stacked on, or under, another mount at the same point */
+    if (wg_mountinfo_find(text, length, where, &entry) != 1) return -1;
+    if (strcmp(entry.root, "/") != 0 || strcmp(entry.fstype, fstype) != 0 || strcmp(entry.source, source) != 0) return -1;
     if (options_named(entry.options, "ro", 0) != (share->read_only ? 1 : 0) || options_named(entry.options, "rw", 0) != (share->read_only ? 0 : 1)) return -1;
     if (options_named(entry.options, "nosuid", 0) != 1 || options_named(entry.options, "nodev", 0) != 1) return -1;
     if (options_named(entry.options, "noexec", 0) != (share->kind != WG_SHARE_FOLDER ? 1 : 0)) return -1;
-    /* R6: no DAX. The fuse client prints the DAX mode it runs with; it must be `never`, and nothing else may name DAX. */
-    if (options_named(entry.super_options, WG_SHARE_MOUNT_DATA, 0) != 1 || options_named(entry.super_options, "dax", 1) != 1) return -1;
-    if (scan(text, length, NULL, share->tag, NULL) != 1) return -1;       /* the tag is mounted here and nowhere else */
+    /* R6 for a share: the fuse client prints the DAX mode it runs with; it must be exactly `never`, and no other option may name DAX. In general: the mount's own data
+     * option, exactly once, and no other option with its key. */
+    const char *equals = strchr(data_option, '=');
+    char key[64];
+    size_t key_length = equals ? (size_t)(equals - data_option) : strlen(data_option);
+    if (key_length == 0 || key_length >= sizeof key) return -1;
+    memcpy(key, data_option, key_length);
+    key[key_length] = '\0';
+    if (options_named(entry.super_options, data_option, 0) != 1 || options_named(entry.super_options, key, 1) != 1) return -1;
+    if (scan(text, length, NULL, fstype, source, NULL) != 1) return -1;   /* the source is mounted here and nowhere else */
     return 0;
+}
+
+int wg_share_mountinfo_ok(const char *text, size_t length, const char *where, const struct wg_share *share) {
+    return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, WG_SHARE_MOUNT_DATA);
 }
 
 /* ------------------------------------------------------------------------------------------------ mount points and the alias */
@@ -213,12 +225,17 @@ static int open_chain(const char *root, const char *directory, uid_t owner, int 
     return current;
 }
 
-int wg_share_mount_point(const char *root, const struct wg_share *share, uid_t owner) {
+/* The checked mount point, held open: the mount goes through this descriptor, so nothing between the check and the mount can swap the directory. */
+static int mount_point_fd(const char *root, const struct wg_share *share, uid_t owner) {
     /* Only a folder's mount point may be made here, and only directly below the skeleton's /workspace/folders; the Winter ones are the skeleton's own. */
     int create = share->kind == WG_SHARE_FOLDER;
     if (create && (strncmp(share->guest_path, WG_SHARE_FOLDERS_PREFIX, sizeof WG_SHARE_FOLDERS_PREFIX - 1) != 0 ||
                    strchr(share->guest_path + sizeof WG_SHARE_FOLDERS_PREFIX - 1, '/') != NULL)) return -1;
-    int fd = open_chain(root, share->guest_path, owner, create);
+    return open_chain(root, share->guest_path, owner, create);
+}
+
+int wg_share_mount_point(const char *root, const struct wg_share *share, uid_t owner) {
+    int fd = mount_point_fd(root, share, owner);
     if (fd < 0) return -1;
     close(fd);
     return 0;
@@ -250,31 +267,41 @@ static int where_of(const struct wg_share_ops *ops, const struct wg_share *share
     return join(out, capacity, ops->root, share->guest_path);
 }
 
-int wg_mount_shares(const struct wg_share_ops *ops, const struct wg_share_set *set, unsigned *mounted) {
+int wg_mount_shares_as(const struct wg_share_ops *ops, const struct wg_share_set *set, unsigned *mounted, const char *fstype, const char *data) {
     *mounted = 0;
     if (wg_share_inventory(ops->sys_root, set) != 0) return WG_SHARES_INVENTORY;
-    char where[WG_SHARE_PATH_MAX + 4096];
+    char where[WG_SHARE_PATH_MAX + 4096], target[64];
+    int fds[WG_SHARES_MAX];
     int result = WG_SHARES_MOUNT_FAILED;
+    for (unsigned i = 0; i < WG_SHARES_MAX; i++) fds[i] = -1;
     for (unsigned i = 0; i < set->count; i++)
-        if (wg_share_mount_point(ops->root, &set->item[i], ops->owner) != 0) return WG_SHARES_MOUNT_FAILED;
+        if ((fds[i] = mount_point_fd(ops->root, &set->item[i], ops->owner)) < 0) goto done;
     for (unsigned i = 0; i < set->count; i++) {
-        if (where_of(ops, &set->item[i], where, sizeof where) != 0) goto rollback;
-        if (ops->mount(ops->ctx, set->item[i].tag, where, WG_SHARE_FSTYPE, wg_share_mount_flags(&set->item[i]), WG_SHARE_MOUNT_DATA) != 0) goto rollback;
+        /* the mount lands on the directory the walk checked (its descriptor, as /proc/self/fd/<n>), never on a path resolved again */
+        if (snprintf(target, sizeof target, "/proc/self/fd/%d", fds[i]) >= (int)sizeof target) goto rollback;
+        if (ops->mount(ops->ctx, set->item[i].tag, target, fstype, wg_share_mount_flags(&set->item[i]), data) != 0) goto rollback;
         *mounted |= 1u << i;
     }
     long length = ops->read_mountinfo(ops->ctx, mountinfo, sizeof mountinfo);
     if (length < 0) goto rollback;
     for (unsigned i = 0; i < set->count; i++) {
-        if (where_of(ops, &set->item[i], where, sizeof where) != 0 || wg_share_mountinfo_ok(mountinfo, (size_t)length, where, &set->item[i]) != 0) goto rollback;
+        if (where_of(ops, &set->item[i], where, sizeof where) != 0 || wg_mountinfo_entry_ok(mountinfo, (size_t)length, where, &set->item[i], fstype, set->item[i].tag, data) != 0) goto rollback;
     }
     for (unsigned i = 0; i < set->count; i++)
         if (set->item[i].kind == WG_SHARE_GUIDANCE && wg_share_guidance_alias(ops->root, ops->owner) != 0) goto rollback;
-    return WG_SHARES_MOUNTED;
+    result = WG_SHARES_MOUNTED;
+    goto done;
 rollback:
     for (unsigned i = set->count; i-- > 0;) {
         if (!(*mounted & (1u << i))) continue;
         if (where_of(ops, &set->item[i], where, sizeof where) == 0 && ops->umount(ops->ctx, where) == 0) *mounted &= ~(1u << i);
     }
+done:
+    for (unsigned i = 0; i < WG_SHARES_MAX; i++) if (fds[i] >= 0) close(fds[i]);
     return result;
+}
+
+int wg_mount_shares(const struct wg_share_ops *ops, const struct wg_share_set *set, unsigned *mounted) {
+    return wg_mount_shares_as(ops, set, mounted, WG_SHARE_FSTYPE, WG_SHARE_MOUNT_DATA);
 }
 #endif

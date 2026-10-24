@@ -8,6 +8,7 @@ was handed (command line, environment, signal state, every open descriptor).
 Only what needs another user, a mount, a device or the real python3 stays untested here (see docs/research/2026-10-17-cowork-n2-guest-boot.md):
 the root-only effect of chown to the runtime uid, the real `sync()`/`reboot`, and the real supervisor's startup.
 """
+import errno
 import os
 import shutil
 import stat
@@ -415,21 +416,29 @@ class FileChannelPid1Tests(unittest.TestCase):
 
 @unittest.skipUnless(CC and LINUX, "needs Linux and a C compiler")
 class SharesPid1Tests(unittest.TestCase):
-    """init_linux.c's share step (SH6) with its real system calls: the sysfs and mount table readers, mount(2) and umount2(2). As an ordinary process the mount itself is
-    refused, so the success path of the step is test_shares.py's (recording operations); here the real refusal must undo the step, a real mount table must parse, and,
-    where the runner allows an unprivileged user namespace, a real mount made with a share's flags must read back as the check expects."""
+    """init_linux.c's share step (SH6) with its real system calls: the sysfs and mount table readers, mount(2) through the checked descriptor and umount2(2).
+
+    As an ordinary process the mount is refused (EPERM), which must undo the step. The tests whose names hold `realmount` need root and run in CI's root step
+    (`.github/workflows/cowork-guest-boot.yml`, with WG_REQUIRE_REALMOUNT=1 so they fail rather than skip), each in a private mount namespace: the whole step for real
+    on tmpfs (this runner has no virtio-fs device, so virtio-fs itself is reached and refused, and the live virtio-fs mount is G7's), a mount point that already holds
+    a mount, and the mountinfo reader and every flag and data-option check on the kernel's own output, including ext4 mounted with dax=never."""
     FOLDER = "folder:0:src-0:/workspace/folders/notes"
+    PHOTOS = "folder:1:src-1:/workspace/folders/photos"
+    GUIDANCE = "guidance:1:winter-guidance:/run/winter/shared-instructions"
     MEMORY = "memory:0:winter-memory:/workspace/.winter/memory"
+    OUTPUTS = "outputs:0:winter-outputs:/workspace/outputs"
 
     @classmethod
     def setUpClass(cls):
         cls.folder = Path(tempfile.mkdtemp(prefix="guest-pid1-shares-"))
+        os.chmod(cls.folder, 0o755)
         cls.root = cls.folder / "root"
         cls.sys = cls.folder / "sys"
         sources = [ROOT / "tests/linux_init_tool.c", INIT / "boot.c", INIT / "discover.c", INIT / "ext4sb.c", INIT / "mounts.c", INIT / "skeleton.c",
                    INIT / "trusted_config.c", INIT / "dataroots.c", INIT / "shares.c", ROOT / "common/wmx.c", ROOT / "common/ctl.c"]
-        cls.tool = build(sources, cls.folder / "linux-init-tool", extra=["-DWG_FILE_CHANNEL_V1", f'-DSHARES_ROOT="{cls.root}"', f'-DSHARES_SYS_ROOT="{cls.sys}"'])
-        cls.real_sys_tool = build(sources, cls.folder / "linux-init-tool-real-sys", extra=["-DWG_FILE_CHANNEL_V1", f'-DSHARES_ROOT="{cls.root}"'])
+        owner = f"-DSHARES_OWNER={os.getuid()}"        # test build only: the walk then accepts this process's own directories and reaches the real mount(2)
+        cls.tool = build(sources, cls.folder / "linux-init-tool", extra=["-DWG_FILE_CHANNEL_V1", f'-DSHARES_ROOT="{cls.root}"', f'-DSHARES_SYS_ROOT="{cls.sys}"', owner])
+        cls.real_sys_tool = build(sources, cls.folder / "linux-init-tool-real-sys", extra=["-DWG_FILE_CHANNEL_V1", f'-DSHARES_ROOT="{cls.root}"', owner])
 
     @classmethod
     def tearDownClass(cls):
@@ -448,6 +457,23 @@ class SharesPid1Tests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         return result.stdout
 
+    def need_root(self):
+        """A `realmount` test: root and unshare(1), or (in CI's root step, WG_REQUIRE_REALMOUNT=1) a failure instead of a skip."""
+        unshare = shutil.which("unshare")
+        if os.geteuid() == 0 and unshare:
+            return unshare
+        if os.environ.get("WG_REQUIRE_REALMOUNT") == "1":
+            self.fail("the real-mount step must run as root with unshare(1)")
+        self.skipTest("needs root (CI's root step)")
+
+    def private(self, *args, shell=None):
+        """The tool (or a shell line ending in it) as root in a private mount namespace: every mount it makes is gone when it exits."""
+        unshare = self.need_root()
+        command = [unshare, "-m", "--propagation", "private"] + (["/bin/sh", "-c", shell, "sh", str(self.tool), *map(str, args)] if shell else [str(self.tool), *map(str, args)])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        return result.stdout
+
     def fake_sysfs(self, tags):
         (self.sys / "fs/virtiofs").mkdir(parents=True)
         (self.sys / "bus/virtio/devices").mkdir(parents=True)
@@ -462,25 +488,35 @@ class SharesPid1Tests(unittest.TestCase):
 
     @staticmethod
     def fields(text):
-        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line and " " not in line.split("=", 1)[0])
+
+    @staticmethod
+    def tag_of(spec):
+        return spec.split(":")[2]
+
+    # ---- as an ordinary process
 
     def test_an_inventory_that_does_not_match_fails_the_real_step_before_anything_is_made(self):
         self.fake_sysfs(["src-0"])
         before = self.modes()
-        out = self.run_tool("shares", self.FOLDER, self.MEMORY).strip()
-        self.assertEqual(out, "rc=1 mounted=0")
+        self.assertTrue(self.run_tool("shares", self.FOLDER, self.MEMORY).startswith("rc=1 mounted=0 "))
         self.assertEqual(self.modes(), before)
 
     def test_on_this_machine_the_real_sysfs_has_none_of_the_declared_devices(self):
-        self.assertEqual(self.run_tool("shares", self.FOLDER, tool=self.real_sys_tool).strip(), "rc=1 mounted=0")
+        self.assertTrue(self.run_tool("shares", self.FOLDER, tool=self.real_sys_tool).startswith("rc=1 mounted=0 "))
 
     def test_a_refused_real_mount_undoes_the_step_and_changes_no_mode(self):
+        if os.geteuid() == 0:
+            self.skipTest("root may mount: the refusal under test is the ordinary user's EPERM")
         self.fake_sysfs(["src-0", "winter-memory"])
         before = self.modes()
-        self.assertEqual(self.run_tool("shares", self.FOLDER, self.MEMORY).strip(), "rc=2 mounted=0")   # an ordinary user may not mount, and there is no such device
+        # the walk accepts the test's own directories (SHARES_OWNER, test build only), makes the folder's mount point, and reaches mount(2), which refuses
+        self.assertEqual(self.run_tool("shares", self.FOLDER, self.MEMORY).strip(), f"rc=2 mounted=0 errno={errno.EPERM}")
         after = self.modes()
         self.assertEqual(after.pop("workspace/folders/notes"), 0o700)                    # the one directory the step made: the folder's mount point, root-only
         self.assertEqual(after, before)
+        for path in ("/workspace/folders/notes", "/workspace/.winter/memory"):
+            self.assertEqual(self.fields(self.run_tool("mountinfo", str(self.root) + path))["count"], "0")   # nothing is left mounted
         self.assertEqual(self.run_tool("umountshare", "/workspace/outputs").strip(), "rc=-1")   # nothing is mounted there
 
     def test_the_real_mount_table_is_read_whole_and_parsed(self):
@@ -489,12 +525,95 @@ class SharesPid1Tests(unittest.TestCase):
         self.assertEqual((out["fstype"], out["root"], out["mount_point"]), ("proc", "/", "/proc"))
         self.assertEqual(self.fields(self.run_tool("mountinfo", str(self.root / "nowhere")))["count"], "0")
 
-    def test_a_real_mount_with_a_shares_flags_reads_back_as_the_check_expects(self):
+    # ---- as root, in a private mount namespace (CI's root step)
+
+    def test_realmount_the_whole_share_step_runs_for_real_through_the_checked_descriptors(self):
+        specs = [self.FOLDER, self.PHOTOS, self.GUIDANCE, self.MEMORY, self.OUTPUTS]
+        self.need_root()
+        self.fake_sysfs([self.tag_of(s) for s in specs])
+        out = self.private("realstep", "tmpfs", "nr_inodes=4096", *specs)
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "rc=0 mounted=31", out)
+        for spec, line in zip(specs, lines[1:6]):
+            kind, ro, tag, _ = spec.split(":", 3)
+            fields = dict(part.split("=", 1) for part in line.split(" "))
+            options = fields["options"].split(",")
+            self.assertEqual((fields["share"], fields["count"], fields["fstype"], fields["source"]), (tag, "1", "tmpfs", tag), out)
+            self.assertEqual(("ro" in options, "rw" in options), (ro == "1", ro != "1"), out)
+            self.assertIn("nosuid", options)
+            self.assertIn("nodev", options)
+            self.assertEqual("noexec" in options, kind != "folder", out)
+            self.assertIn("nr_inodes=4096", fields["super"].split(","), out)
+        self.assertIn("alias=/run/winter/shared-instructions/WINTER.md", lines)
+        self.assertEqual([line for line in lines if line.startswith("umount=")], [f"umount={self.tag_of(s)}:0" for s in reversed(specs)])
+        self.assertEqual(lines[-1], "left=0")
+
+    def test_realmount_a_mount_point_that_already_holds_a_mount_is_refused_before_anything_is_mounted(self):
+        self.need_root()
+        self.fake_sysfs([self.tag_of(self.FOLDER), self.tag_of(self.OUTPUTS)])
+        out = self.private("realstep", "tmpfs", "nr_inodes=4096", self.FOLDER, self.OUTPUTS,
+                           shell=f'mount -t tmpfs stray "{self.root}/workspace/outputs" && exec "$@"')
+        lines = out.splitlines()
+        self.assertEqual(lines[0], "rc=2 mounted=0", out)
+        self.assertTrue(lines[1].startswith("share=src-0 count=0 "), out)            # the folder was never mounted
+
+    def test_realmount_virtiofs_itself_is_reached_and_refused_for_the_missing_device(self):
+        """The production call, mount(tag, /proc/self/fd/<n>, "virtiofs", flags, "dax=never"), as root on a machine with no virtio-fs device: the kernel refuses it
+        (EINVAL, `tag not found`; ENODEV where the driver is absent) and the step is undone. The live virtio-fs mount is G7's."""
+        self.need_root()
+        self.fake_sysfs([self.tag_of(self.FOLDER), self.tag_of(self.MEMORY)])
+        out = self.private("shares", self.FOLDER, self.MEMORY).strip()
+        rc, mounted, err = (part.split("=")[1] for part in out.split(" "))
+        self.assertEqual((rc, mounted), ("2", "0"), out)
+        self.assertIn(int(err), (errno.EINVAL, errno.ENODEV), out)
+
+    def test_realmount_the_mountinfo_reader_and_every_flag_check_hold_on_the_kernels_own_output(self):
+        self.need_root()
+        same = ("tmpfs", "winter-memory", "nr_inodes=4096", self.MEMORY)
+        cases = {
+            "as mounted": (same, same, "0"),
+            "read-only expected": (same, ("tmpfs", "winter-memory", "nr_inodes=4096", "guidance:1:winter-memory:/workspace/.winter/memory"), "-1"),
+            "exec mounted, noexec expected": (("tmpfs", "winter-memory", "nr_inodes=4096", "folder:0:winter-memory:/workspace/.winter/memory"), same, "-1"),
+            "another data option": (same, ("tmpfs", "winter-memory", "nr_inodes=8192", self.MEMORY), "-1"),
+            "another source": (same, ("tmpfs", "winter-outputs", "nr_inodes=4096", self.MEMORY), "-1"),
+            "another fstype": (same, ("virtiofs", "winter-memory", "nr_inodes=4096", self.MEMORY), "-1"),
+        }
+        for name, (mounted, checked, expected) in cases.items():
+            with self.subTest(name):
+                out = self.private("realcheck", *mounted, *checked)
+                fields = self.fields(out)
+                self.assertEqual((fields["count"].split()[0], out.split("check=")[1].split()[0], fields["umount"]), ("1", expected, "0"), out)
+
+    def test_realmount_ext4_mounted_with_dax_never_reads_back_as_the_dax_rule_expects(self):
+        """A real `dax=never` line from this kernel: ext4 (which prints its DAX mode the way the fuse client does) on a loop device, checked by the same rule."""
+        self.need_root()
+        losetup, mke2fs = shutil.which("losetup"), shutil.which("mke2fs")
+        if not (losetup and mke2fs):
+            self.fail("losetup and mke2fs are part of the runner")
+        image = self.folder / "dax.img"
+        with open(image, "wb") as handle:
+            handle.truncate(32 * 1024 * 1024)
+        subprocess.run([mke2fs, "-q", "-F", "-t", "ext4", str(image)], check=True, capture_output=True)
+        device = subprocess.run([losetup, "-f", "--show", str(image)], check=True, capture_output=True, text=True).stdout.strip()
+        self.addCleanup(subprocess.run, [losetup, "-d", device], capture_output=True)
+        out = self.private("realcheck", "ext4", device, "dax=never", self.MEMORY, "ext4", device, "dax=never", self.MEMORY)
+        self.assertIn("check=0", out)
+        self.assertIn("dax=never", self.fields(out)["super"].split(","), out)
+        out = self.private("realcheck", "ext4", device, "dax=never", self.MEMORY, "ext4", device, "dax=always", self.MEMORY)
+        self.assertIn("check=-1", out)
+
+    def test_realmount_a_tmpfs_with_a_shares_flags_reads_back_in_a_namespace_of_its_own(self):
+        """The same probe as an ordinary user, where the runner allows an unprivileged user namespace; as root, in a private mount namespace."""
         unshare = shutil.which("unshare")
-        if not unshare or subprocess.run([unshare, "-Urm", "true"], capture_output=True).returncode != 0:
-            self.skipTest("this runner allows no unprivileged user and mount namespace")
+        if os.geteuid() == 0 and unshare:
+            command = [unshare, "-m", "--propagation", "private"]
+        elif unshare and subprocess.run([unshare, "-Urm", "true"], capture_output=True).returncode == 0:
+            command = [unshare, "-Urm"]
+        else:
+            self.need_root()
+            return
         target = self.root / "workspace/outputs"
-        result = subprocess.run([unshare, "-Urm", str(self.tool), "realmount", str(target)], capture_output=True, text=True, timeout=60)
+        result = subprocess.run(command + [str(self.tool), "realmount", str(target)], capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, 0, result.stderr)
         out = self.fields(result.stdout)
         self.assertEqual(out["count"], "1", result.stdout)
@@ -504,7 +623,6 @@ class SharesPid1Tests(unittest.TestCase):
             self.assertIn(option, options)
         self.assertNotIn("rw", options)
         self.assertIn("size=1024k", out["super"].split(","))
-
 
 if __name__ == "__main__":
     unittest.main()

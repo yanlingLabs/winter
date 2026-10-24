@@ -299,8 +299,12 @@ class ShareModuleTests(unittest.TestCase):
         for spec in ALL:
             kind, ro, tag, path = share_fields(spec)
             flags = MS_NOSUID | MS_NODEV | (MS_RDONLY if ro else 0) | (MS_NOEXEC if kind != "folder" else 0)
-            expected.append(f"mount {tag} {self.root}{path} virtiofs {flags} dax=never")
-        self.assertEqual(events, expected + ["mountinfo"])
+            expected.append((tag, "virtiofs", str(flags), "dax=never", (self.root / path.lstrip("/")).stat().st_ino))
+        mounts = [event.split(" ") for event in events if event.startswith("mount ")]
+        self.assertEqual([(m[1], m[3], m[4], m[5], int(m[6].split("=")[1])) for m in mounts], expected)
+        # each target is the descriptor of the mount point the walk checked, never a path resolved again
+        self.assertTrue(all(re.fullmatch(r"/proc/self/fd/\d+", m[2]) for m in mounts), events)
+        self.assertEqual(events[-1], "mountinfo")
         self.assertEqual(os.readlink(self.root / "workspace/.winter/WINTER.md"), "/run/winter/shared-instructions/WINTER.md")
         after = self.modes()
         for made in ("workspace/folders/notes", "workspace/folders/photos", "workspace/.winter/WINTER.md"):
@@ -349,6 +353,19 @@ class ShareModuleTests(unittest.TestCase):
         self.assertEqual((rc, mounted), (2, 0))
         self.assertEqual(len([e for e in events if e.startswith("umount")]), len(ALL))
 
+    def test_a_mount_point_swapped_after_the_walk_is_not_what_gets_mounted(self):
+        """The descriptor pins the directory the walk checked: what a path would name at mount time does not matter."""
+        self.fake_sysfs(self.tags([FOLDER]))
+        point = self.root / "workspace/folders/notes"
+        point.mkdir()
+        checked = point.stat().st_ino
+        env = dict(os.environ, SHARES_SWAP=str(point))
+        out = self.run_tool("step", self.root, self.sys, self.table([FOLDER]), "-", FOLDER, env=env).splitlines()
+        mount = next(event for event in out if event.startswith("mount "))
+        self.assertNotEqual(point.stat().st_ino, checked)                                # the path now names another directory
+        self.assertEqual(int(mount.split(" ")[6].split("=")[1]), checked)                 # and the mount still landed on the checked one
+        self.assertNotIn(str(self.root), mount)
+
     def test_without_the_guidance_share_no_alias_is_made(self):
         specs = [FOLDER, MEMORY]
         self.fake_sysfs(self.tags(specs))
@@ -365,6 +382,33 @@ class ShareModuleTests(unittest.TestCase):
         # the one directory it may make is a folder's mount point, and only through mkdirat in the descriptor walk
         self.assertEqual(len(re.findall(r"\bmkdirat\(", code)), 1)
         self.assertEqual(len(re.findall(r"\bsymlinkat\(", code)), 1)
+
+    def test_the_derived_virtio_fs_table_passes_and_its_dax_line_is_what_the_check_needs(self):
+        """tests/virtiofs-mountinfo-v6.18.json: the table PID 1 should read, assembled from the v6.18 source of the functions that print it (NOT captured: G7 checks
+        the live table). Every share passes as it is, and fails once its DAX option is anything but `never`."""
+        fixture = json.loads((HERE / "virtiofs-mountinfo-v6.18.json").read_text())
+        self.assertIs(fixture["captured"], False)
+        self.assertEqual({entry["file"] for entry in fixture["derivedFrom"]}, {"fs/proc_namespace.c", "fs/fuse/inode.c", "fs/fuse/virtio_fs.c", "fs/fuse/dax.c"})
+        path = self.dir / "fixture"
+        path.write_text("".join(line + "\n" for line in fixture["lines"]))
+        for spec in ALL:
+            with self.subTest(spec):
+                self.assertEqual(self.run_tool("check", path, share_fields(spec)[3], spec).strip(), "0")
+        for replacement in ("dax=always", "dax=inode", "dax"):
+            path.write_text("".join(line.replace("dax=never", replacement) + "\n" for line in fixture["lines"]))
+            for spec in ALL:
+                self.assertEqual(self.run_tool("check", path, share_fields(spec)[3], spec).strip(), "-1", (replacement, spec))
+
+    def test_the_check_for_any_filesystem_holds_its_data_option_to_one_value(self):
+        path = self.dir / "mi"
+        path.write_text(BASE_TABLE + mountinfo_line(0, MEMORY, fstype="tmpfs", super="rw,nr_inodes=4096,inode64"))
+        where = "@ROOT@/workspace/.winter/memory"
+        self.assertEqual(self.run_tool("checkas", path, where, MEMORY, "tmpfs", "winter-memory", "nr_inodes=4096").strip(), "0")
+        for fstype, source, data in (("tmpfs", "winter-memory", "nr_inodes=8192"), ("virtiofs", "winter-memory", "nr_inodes=4096"), ("tmpfs", "winter-outputs", "nr_inodes=4096"),
+                                     ("tmpfs", "winter-memory", "=4096")):
+            self.assertEqual(self.run_tool("checkas", path, where, MEMORY, fstype, source, data).strip(), "-1", (fstype, source, data))
+        path.write_text(BASE_TABLE + mountinfo_line(0, MEMORY, fstype="tmpfs", super="rw,nr_inodes=4096,nr_inodes=8192"))
+        self.assertEqual(self.run_tool("checkas", path, where, MEMORY, "tmpfs", "winter-memory", "nr_inodes=4096").strip(), "-1")
 
     def test_the_helper_and_pid_1_read_the_same_share_set(self):
         vectors = {v["name"]: bytes.fromhex(v["hex"]) for v in json.loads((ROOT / "vectors/mux-frames.json").read_text())["positive"]}
@@ -406,11 +450,31 @@ class ProductionHasNoShareStepTests(unittest.TestCase):
                 for name in self.NAMES:
                     self.assertNotIn(name, line, f"{relative}:{number} names {name} outside WG_FILE_CHANNEL_V1")
 
-    def test_the_share_paths_are_the_real_ones_unless_the_native_test_build_overrides_them(self):
+    def test_the_share_paths_and_owner_are_the_real_ones_unless_the_native_test_build_overrides_them(self):
+        """SHARES_OWNER (and the three paths) exist for tests/linux_init_tool.c only: PID 1's walk accepts root's directories and nothing else, and the image build
+        passes no override (build.py, whose flags are the only ones the image's programs are compiled with)."""
         init = (ROOT / "init/init_linux.c").read_text()
         for name, value in (("SHARES_ROOT", ""), ("SHARES_SYS_ROOT", "/sys"), ("MOUNTINFO_PATH", "/proc/self/mountinfo")):
             self.assertIn(f'#ifndef {name}\n#define {name} "{value}"\n#endif', init)
-        self.assertNotRegex((ROOT / "build.py").read_text(), r"-D\s*(SHARES_ROOT|SHARES_SYS_ROOT|MOUNTINFO_PATH)")
+        self.assertIn("#ifndef SHARES_OWNER\n#define SHARES_OWNER 0\n#endif", init)
+        self.assertEqual(len(re.findall(r"#define SHARES_OWNER\b", init)), 1)
+        self.assertIn("sop_read_mountinfo, (uid_t)SHARES_OWNER };", init)
+        build_py = (ROOT / "build.py").read_text()
+        self.assertNotRegex(build_py, r"SHARES_ROOT|SHARES_SYS_ROOT|MOUNTINFO_PATH|SHARES_OWNER")
+        self.assertNotIn("-D", re.search(r"COMMON_FLAGS = \[(.*?)\]", build_py).group(1))
+        self.assertEqual(re.search(r'FILE_CHANNEL_FLAG = "(.*?)"', build_py).group(1), "-DWG_FILE_CHANNEL_V1")
+
+    def test_pid_1_mounts_shares_only_as_virtio_fs_with_dax_never(self):
+        """wg_mount_shares_as (another filesystem type and data option) exists for the root-only CI test; PID 1 calls wg_mount_shares, which is virtiofs and dax=never."""
+        init = re.sub(r"/\*.*?\*/", "", (ROOT / "init/init_linux.c").read_text(), flags=re.S)
+        self.assertNotIn("wg_mount_shares_as", init)
+        self.assertEqual(len(re.findall(r"\bwg_mount_shares\(", init)), 1)
+        shares = (INIT / "shares.c").read_text()
+        self.assertIn("return wg_mount_shares_as(ops, set, mounted, WG_SHARE_FSTYPE, WG_SHARE_MOUNT_DATA);", shares)
+        self.assertIn("return wg_mountinfo_entry_ok(text, length, where, share, WG_SHARE_FSTYPE, share->tag, WG_SHARE_MOUNT_DATA);", shares)
+        header = (INIT / "shares.h").read_text()
+        self.assertIn('#define WG_SHARE_FSTYPE "virtiofs"', header)
+        self.assertIn('#define WG_SHARE_MOUNT_DATA "dax=never"', header)
 
     def test_the_share_step_is_under_the_no_network_scan(self):
         """test_hygiene.py's scan for any network bring-up (no socket, no AF_VSOCK, no interface) covers the new module too: shares are virtio-fs, never a NIC or vsock."""

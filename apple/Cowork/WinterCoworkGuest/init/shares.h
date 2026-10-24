@@ -8,7 +8,7 @@
  *   2. checks or makes each mount point. The three Winter mount points are the skeleton's (made with the data volume and /run); a folder's
  *      /workspace/folders/<name> is created when missing, root's, mode 0700 (PID 1's umask), below the skeleton's /workspace/folders, and never chowned or
  *      chmodded. Every component is opened without following a link;
- *   3. mounts each tag: mount(tag, guestPath, "virtiofs", MS_NOSUID|MS_NODEV [|MS_RDONLY when read-only] [|MS_NOEXEC on guidance, memory and outputs],
+ *   3. mounts each tag on the checked mount point's descriptor (/proc/self/fd/<n>, so the path is never resolved a second time): mount(tag, guestPath, "virtiofs", MS_NOSUID|MS_NODEV [|MS_RDONLY when read-only] [|MS_NOEXEC on guidance, memory and outputs],
  *      "dax=never"). Folder sources keep exec: builds run there;
  *   4. checks every mount in /proc/self/mountinfo: exactly one mount at the guest path, the whole share (root "/"), fstype virtiofs, source the tag, `ro`
  *      exactly when read-only, nosuid and nodev, noexec exactly on a Winter share, and `dax=never` as the only DAX option; and no other mount of the tag;
@@ -60,6 +60,9 @@ struct wg_mountinfo_entry {
 int wg_mountinfo_find(const char *text, size_t length, const char *where, struct wg_mountinfo_entry *entry);
 /* 0 when `text` shows `share` mounted at `where` exactly as step 4 requires. */
 int wg_share_mountinfo_ok(const char *text, size_t length, const char *where, const struct wg_share *share);
+/* The same check for any filesystem: `fstype`, mount source `source`, and the mount's one data option `data_option` (KEY=VALUE: present once, no other KEY option).
+ * wg_share_mountinfo_ok is this with virtiofs, the tag and dax=never; the root-only CI tests run it on the kernel's own output for a real mount. */
+int wg_mountinfo_entry_ok(const char *text, size_t length, const char *where, const struct wg_share *share, const char *fstype, const char *source, const char *data_option);
 
 /* Step 2 for one share. 0 when the mount point is in place. */
 int wg_share_mount_point(const char *root, const struct wg_share *share, uid_t owner);
@@ -67,8 +70,12 @@ int wg_share_mount_point(const char *root, const struct wg_share *share, uid_t o
 /* Step 5. 0 when the alias exists and is exactly the expected link. */
 int wg_share_guidance_alias(const char *root, uid_t owner);
 
-/* Steps 1 to 5. Returns WG_SHARES_MOUNTED, WG_SHARES_INVENTORY or WG_SHARES_MOUNT_FAILED; *mounted as in boot.h's mount_shares. */
+/* Steps 1 to 5. Returns WG_SHARES_MOUNTED, WG_SHARES_INVENTORY or WG_SHARES_MOUNT_FAILED; *mounted as in boot.h's mount_shares. Each mount's target is the
+ * descriptor of the mount point the walk checked (/proc/self/fd/<n>). PID 1 calls only this. */
 int wg_mount_shares(const struct wg_share_ops *ops, const struct wg_share_set *set, unsigned *mounted);
+/* The same step with another filesystem type and data option: wg_mount_shares is this with virtiofs and dax=never. Only the root-only CI test calls it, to run the
+ * whole step for real (tmpfs) on a runner that has no virtio-fs device. */
+int wg_mount_shares_as(const struct wg_share_ops *ops, const struct wg_share_set *set, unsigned *mounted, const char *fstype, const char *data);
 #endif
 
 #endif
