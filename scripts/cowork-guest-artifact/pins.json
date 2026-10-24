@@ -116,16 +116,16 @@
     "programs": {
       "init": {
         "binarySha256": "dede7fd9ddc9eb954c29cb989b689e059f6f3b223618c4f66a392f13aee6f498",
-        "sourceSha256": "b8b3689243aa4ff7e7ebdae2747c7e98d29af021d02798db4f92da8c9fe33fb2"
+        "sourceSha256": "8ab71797f549a3c399f1ae496eaad4d86be7bb30616b31fdb7a212f2227bfeae"
       },
       "winter-guest-relay": {
         "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
-        "sourceSha256": "0c5ed130f351a651604cbb4bd5b966d6a316101e52e31bdb38cbdbaca7dfc627"
+        "sourceSha256": "26234a4bb90861f2f067a75547fa6195e42af6e155a55ce685b06a3dfa7cf03a"
       }
     },
     "scripts": {
       "guest_bootstrap.py": {
-        "sha256": "e17e25aa41a0a2cce57aefddeb54982958b8d8a41d59b8d5cd1ecdf784722d0d"
+        "sha256": "6969ff0a155afb1d8d1d57113085d7af90aaacaf5e4c645fe073229d975588c8"
       }
     },
     "scriptPaths": {

@@ -1,0 +1,51 @@
+{
+  "what": "The mount table (/proc/self/mountinfo) PID 1 should read after the share step, for the five kinds of share, as Linux v6.18 prints it.",
+  "captured": false,
+  "provenance": "NOT captured from a running guest: no VM may be started from this lane. Each virtio-fs line is assembled from the v6.18 source of the functions that print it (below), with PID 1's mount flags. The live table of a booted guest is gate G7's check and replaces these lines then.",
+  "kernel": "Linux v6.18 tag (the guest kernel pin is 6.18.35; scripts/cowork-guest-artifact/kernel/base-apple-6.18.35.config has CONFIG_FUSE_DAX=y and CONFIG_VIRTIO_FS=y)",
+  "derivedFrom": [
+    {
+      "file": "fs/proc_namespace.c",
+      "functions": "show_mountinfo, show_vfsmnt_opts",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/v6.18/fs/proc_namespace.c",
+      "sha256": "fd82c0db52055ae807ee0b46c7c9bc5d47a9239805eb8ca5c47d2ba81d695776",
+      "says": "ID PARENT MAJ:MIN ROOT MOUNTPOINT then ro|rw and ,nosuid ,nodev ,noexec ,relatime (in that order), optional tags, ' - ', the type, the source (r->mnt_devname: virtio-fs has no show_devname), then ro|rw and the filesystem's show_options"
+    },
+    {
+      "file": "fs/fuse/inode.c",
+      "functions": "fuse_show_options",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/v6.18/fs/fuse/inode.c",
+      "sha256": "0fab2aac1d31eca9b214c2986722347769be28d8e8f43e8136d24c5ee9aa6499",
+      "says": "user_id, group_id and the other legacy options only when fc->legacy_opts_show; under CONFIG_FUSE_DAX, ',dax=never' when fc->dax_mode == FUSE_DAX_NEVER"
+    },
+    {
+      "file": "fs/fuse/virtio_fs.c",
+      "functions": "virtio_fs_init_fs_context, virtio_fs_parse_param, virtio_fs_get_tree",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/v6.18/fs/fuse/virtio_fs.c",
+      "sha256": "7f2cea3b37f661f29a39c28d3b0f3f0c92dc340ea47c912e5db27f6b82d7ee60",
+      "says": "the context is kzalloc'ed (legacy_opts_show false: no legacy options are printed); 'dax=never' parses to FUSE_DAX_NEVER; the source is the tag, and an unknown tag is -EINVAL"
+    },
+    {
+      "file": "fs/fuse/dax.c",
+      "functions": "fuse_dax_conn_alloc",
+      "url": "https://raw.githubusercontent.com/torvalds/linux/v6.18/fs/fuse/dax.c",
+      "sha256": "84ce29f5380e6b3bf96ddd1af843f5b9efb9638481fc5425e79d483797c13859",
+      "says": "fc->dax_mode = dax_mode, before any DAX device check"
+    }
+  ],
+  "lines": [
+    "1 1 0:2 / / rw - rootfs rootfs rw",
+    "15 1 0:5 / /dev rw,nosuid,noexec,relatime - devtmpfs devtmpfs rw,size=1000k,nr_inodes=250,mode=755",
+    "16 1 0:20 / /proc rw,nosuid,nodev,noexec,relatime - proc proc rw",
+    "17 1 0:21 / /sys rw,nosuid,nodev,noexec,relatime - sysfs sysfs rw",
+    "18 1 0:22 / /run rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=32768k",
+    "19 1 0:23 / /tmp rw,nosuid,nodev,noexec,relatime - tmpfs tmpfs rw,size=65536k",
+    "20 1 254:0 / /workspace rw,nosuid,nodev,noatime - ext4 /dev/vda rw,noinit_itable,errors=remount-ro",
+    "21 20 0:30 / /workspace/folders/notes rw,nosuid,nodev,relatime - virtiofs src-0 rw,dax=never",
+    "22 20 0:31 / /workspace/folders/photos ro,nosuid,nodev,relatime - virtiofs src-1 ro,dax=never",
+    "23 18 0:32 / /run/winter/shared-instructions ro,nosuid,nodev,noexec,relatime - virtiofs winter-guidance ro,dax=never",
+    "24 20 0:33 / /workspace/.winter/memory rw,nosuid,nodev,noexec,relatime - virtiofs winter-memory rw,dax=never",
+    "25 20 0:34 / /workspace/outputs rw,nosuid,nodev,noexec,relatime - virtiofs winter-outputs rw,dax=never"
+  ],
+  "contextLines": "Only the five virtio-fs lines are judged; the other lines (the pseudo-filesystems and the data volume, as PID 1 mounts them) are context, and their filesystem-specific options are illustrative."
+}

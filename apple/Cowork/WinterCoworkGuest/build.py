@@ -32,10 +32,10 @@ PROGRAMS = {
 # under their own names, with -DWG_FILE_CHANNEL_V1; the production profile compiles none of it, so the production binaries and the pins.json entries above are unchanged by it.
 FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1"
 FILE_CHANNEL_PROGRAMS = {
-    "init-file-channel": PROGRAMS["init"] + ["init/dataroots.c"],
+    "init-file-channel": PROGRAMS["init"] + ["init/dataroots.c", "init/shares.c"],
     "winter-guest-relay-file-channel": PROGRAMS["winter-guest-relay"] + ["common/fileflow.c"],
 }
-FILE_CHANNEL_HEADERS = ["common/fileflow.h", "init/dataroots.h"]
+FILE_CHANNEL_HEADERS = ["common/fileflow.h", "init/dataroots.h", "init/shares.h"]
 HEADERS = [
     "common/ctl.h", "common/ring.h", "common/wmx.h", "init/boot.h", "init/discover.h", "init/ext4sb.h", "init/mounts.h",
     "init/skeleton.h", "init/trusted_config.h",

@@ -1154,6 +1154,11 @@ TAG_MOUNT_RESULT = ord("m")
 TAG_CONVERSATIONS = ord("C")
 TAG_CONVERSATIONS_RESULT = ord("r")
 RESULT_READY, RESULT_BAD_CONVERSATIONS, RESULT_SUPERVISOR_FAILED = 0, 1, 2
+# Host-backed shares (revision 3 only): the validated, bound set to PID 1, and its one-byte answer (boot.h WG_SHARES_*).
+TAG_SHARES = ord("S")
+TAG_SHARES_RESULT = ord("s")
+SHARES_MOUNTED, SHARES_INVENTORY, SHARES_MOUNT_FAILED = 0, 1, 2
+SHARE_KIND_CODES = {"folder": 0, "guidance": 1, "memory": 2, "outputs": 3}
 
 
 def ctl_encode(tag, payload=b""):
@@ -1278,6 +1283,20 @@ def conversations_payload(message):
     return bytes(out)
 
 
+def shares_bound(message, plan_message):
+    """A share set answers the plan of this exchange: its operation and nonce, exactly as a conversation set must (conversations_bound)."""
+    return message["operationId"] == plan_message["operationId"] and message["nonce"] == plan_message["nonce"]
+
+
+def shares_payload(message):
+    """The 'S' message to PID 1 (boot.h wg_share_set): count, then per share kind, flags (bit 0 read-only), tag and guest path, each with a length byte."""
+    out = bytearray([len(message["shares"])])
+    for share in message["shares"]:
+        tag, path = share["tag"].encode("ascii"), share["guestPath"].encode("ascii")
+        out += bytes([SHARE_KIND_CODES[share["kind"]], 1 if share["readOnly"] else 0, len(tag)]) + tag + bytes([len(path)]) + path
+    return bytes(out)
+
+
 class Session:
     """The bootstrap-class conversation, driven from main() and, with fakes, from the tests."""
 
@@ -1377,8 +1396,13 @@ class Session:
         """After `mounted` the helper stays up for the one conversation set of the incarnation (contract section 6.1). A valid, bound set goes
         to PID 1, which makes the directories, writes the trusted config and starts the supervisor; this process answers `runtime_ready` or
         a bootstrap fault. A second set is `second_conversations`. The guest stays up after a fault, waiting for the drain, which shows here
-        as the end of the channel. Returns 0 at that end, 2 when the channel breaks."""
+        as the end of the channel. Returns 0 at that end, 2 when the channel breaks.
+
+        Revision 3: before the set the host may send ONE share set (design 2026-10-18 section 2.5). PID 1 mounts it and the helper answers `shares_mounted` or
+        a share fault; a set that follows a share step that did not end in `shares_mounted` is `bad_conversations`, so no conversation ever starts over a
+        share set that is not mounted and checked."""
         seen = False
+        shares = None   # None: no share set yet; "mounted"; "failed"
         self.pending = []
         while True:
             try:
@@ -1397,10 +1421,15 @@ class Session:
                 if re.search(rb'"t":"conversations"', body[:96]) and len(body) <= MAX_BOOTSTRAP_PAYLOAD:
                     self._fault(operation, nonce, "second_conversations" if seen else "bad_conversations")
                     seen = True
+                elif REVISION_THREE and re.search(rb'"t":"shares"', body[:96]) and len(body) <= MAX_BOOTSTRAP_PAYLOAD:
+                    # a broken share set is answered too: the host waits for `shares_mounted`, and none will come
+                    self._fault(operation, nonce, "share_mount_failed")
+                    shares = "failed"
                 continue
             if message["t"] == "shares":
-                # Host-backed shares are not implemented in this guest: it says so with the share inventory fault and mounts nothing.
-                self._fault(operation, nonce, "share_inventory")
+                shares = self.serve_shares(message, plan_message, operation, nonce, seen, shares)
+                if shares is None:
+                    return 2
                 continue
             if message["t"] != "conversations":
                 continue
@@ -1408,6 +1437,10 @@ class Session:
                 self._fault(operation, nonce, "second_conversations")
                 continue
             seen = True
+            if shares == "failed":
+                # the host sent a share set that is not mounted: no conversation may start without it
+                self._fault(operation, nonce, "bad_conversations")
+                continue
             if not conversations_bound(message, plan_message, self.boot_id):
                 self._fault(operation, nonce, "bad_conversations")
                 continue
@@ -1428,8 +1461,37 @@ class Session:
             else:
                 self._fault(operation, nonce, "supervisor_failed" if status == RESULT_SUPERVISOR_FAILED else "bad_conversations")
 
-    def _await_conversations_result(self):
-        """PID 1's answer to 'C'. Host messages that arrive meanwhile are kept, in order, for the loop in serve_conversations."""
+    def serve_shares(self, message, plan_message, operation, nonce, seen, state):
+        """One `shares` message (revision 3). Returns the share state that follows: "mounted" (PID 1 mounted and checked every share and the helper said
+        `shares_mounted`), "failed" (a fault was said; nothing stays mounted that the drain does not unmount), or None when the channel to PID 1 broke.
+        The host's order is checked here as the contract's coworkNativeBootstrapOrder states it: a share set only after `mounted` (the helper is past that),
+        before any conversation set, at most once, and nothing more from the host until it has seen `shares_mounted`."""
+        if seen or state is not None:
+            self._fault(operation, nonce, "share_mount_failed")   # after the set, or a second share set: mount nothing
+            return "failed"
+        if not shares_bound(message, plan_message):
+            self._fault(operation, nonce, "share_mount_failed")   # not this plan's: mount nothing
+            return "failed"
+        if self.channel.has_pending():
+            self._fault(operation, nonce, "share_mount_failed")   # the host spoke again before it could have seen `shares_mounted`: mount nothing
+            return "failed"
+        already = len(self.pending)
+        self.channel.send(TAG_SHARES, shares_payload(message))
+        result = self._await_result(TAG_SHARES_RESULT, 1)
+        if result is None:
+            return None
+        if len(self.pending) != already:
+            # the host spoke while PID 1 was mounting, before it could have seen `shares_mounted`: say no, and no set follows (the drain unmounts what is there)
+            self._fault(operation, nonce, "share_mount_failed")
+            return "failed"
+        if result[0] == SHARES_MOUNTED:
+            self._send_up({"t": "shares_mounted", "operationId": operation, "nonce": nonce})
+            return "mounted"
+        self._fault(operation, nonce, "share_inventory" if result[0] == SHARES_INVENTORY else "share_mount_failed")
+        return "failed"
+
+    def _await_result(self, result_tag, length):
+        """PID 1's answer to 'C' or 'S'. Host messages that arrive meanwhile are kept, in order, for the loop in serve_conversations."""
         while True:
             try:
                 item = self.channel.receive()
@@ -1438,11 +1500,16 @@ class Session:
             if item is None:
                 return None
             tag, body = item
-            if tag == TAG_CONVERSATIONS_RESULT and len(body) == 2:
-                return body[0], body[1]
+            if tag == result_tag and len(body) == length:
+                return body
             if tag != TAG_DOWN:
                 return None
             self.pending.append(body)
+
+    def _await_conversations_result(self):
+        """PID 1's answer to 'C': (status, count)."""
+        body = self._await_result(TAG_CONVERSATIONS_RESULT, 2)
+        return None if body is None else (body[0], body[1])
 
 
 # ---------------------------------------------------------------------------------------------------- entry point

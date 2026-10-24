@@ -1,7 +1,8 @@
 name: Cowork guest boot (N2 S5, unprivileged)
 # Source-only checks of the guest's PID 1, relay and bootstrap helper, and of the artifact scripts and kernel pins.
-# No root (but ONE step below: the plan view's identity test, which needs to become a tool uid), no mount, no loop device, no container, no VM, no package installation, no network. The ext4 tools used are the
-# ones already on the runner, against regular files in a temporary directory.
+# No container, no VM, no package installation, no network. The ext4 tools used are the ones already on the runner, against regular
+# files in a temporary directory. Two steps run as root: the plan view's identity test (it needs to become a tool uid), and SH6's real mounts,
+# each test in a private mount namespace below a temporary directory; this runner has no virtio-fs device, so the live virtio-fs mount is gate G7's.
 on:
   workflow_dispatch:
   pull_request:
@@ -34,6 +35,11 @@ jobs:
         env:
           WG_REQUIRE_ROOT: "1"
         run: sudo -E env "PATH=$PATH" python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_filechannel.py' -k sibling -v
+      - name: "Real mounts as root, each in a private mount namespace (SH6: the whole share step on tmpfs, ext4 with dax=never, the refused virtio-fs mount)"
+        # WG_REQUIRE_REALMOUNT=1: a realmount test that cannot run here fails instead of skipping
+        run: |
+          sudo -E env "PATH=$PATH" WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_pid1_linux.py' -k realmount -v
+          sudo -E env "PATH=$PATH" WG_REQUIRE_REALMOUNT=1 python3 -I -S -B -m unittest discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_mutants.py' -k realmount -v
       - name: "Artifact scripts and kernel pins"
         run: |
           python3 -I -S -B -m unittest discover -s scripts/cowork-guest-artifact -p 'test_*.py' -v
