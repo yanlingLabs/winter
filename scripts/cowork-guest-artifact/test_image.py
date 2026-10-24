@@ -186,8 +186,8 @@ class PinTests(unittest.TestCase):
         self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
         self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
         self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
-        self.assertEqual(PINS['sdkCommit'],'7511bbaedd734c7379bdafdc68c13027f60fe398')
-        for number in (29,30,42,43,44):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
+        self.assertEqual(PINS['sdkCommit'],'524ce04b033e0bcad1e06d97ab7cab7c36e7aa2d')
+        for number in (29,30,42,43,44,49):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
         self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
     def test_the_current_artifact_is_pinned_and_the_last_real_one_before_the_re_pin_is_kept(self):
         self.assertEqual(set(PINS['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
@@ -475,6 +475,20 @@ class RuntimeArtifactTests(unittest.TestCase):
             bare=Tree();bare.add('init','file',b'INIT',True)
             missing=Path(folder)/'missing';write(missing,{'hostQuery':{'artifacts':{}}},bare)
             with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'))
+            # the environment gitconfig: a receipt that claims the pinned one must find exactly it in the cpio
+            git=(HERE/'environment'/'gitconfig').read_bytes()
+            def with_git(data):
+                withgit=Tree();withgit.add('init','file',b'INIT',True);withgit.add(cpio_verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',data);withgit.add(cpio_verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory')
+                return withgit
+            claim={'environment':{'gitconfigSha256':PINS['environment']['gitconfigSha256']}}
+            gitgood=Path(folder)/'gitgood';write(gitgood,claim,with_git(git))
+            cpio_verify.verify(gitgood,pinned_init=sha(b'INIT'))
+            gitbad=Path(folder)/'gitbad';write(gitbad,claim,with_git(git+b'# changed\n'))
+            with self.assertRaisesRegex(ValueError,'do not match their pin'):cpio_verify.verify(gitbad,pinned_init=sha(b'INIT'))
+            gitlying=Path(folder)/'gitlying';write(gitlying,{'environment':{'gitconfigSha256':'0'*64}},with_git(git))
+            with self.assertRaisesRegex(ValueError,'does not describe the pinned environment gitconfig'):cpio_verify.verify(gitlying,pinned_init=sha(b'INIT'))
+            gitabsent=Path(folder)/'gitabsent';write(gitabsent,claim,bare)
+            with self.assertRaisesRegex(ValueError,'missing or not a regular file'):cpio_verify.verify(gitabsent,pinned_init=sha(b'INIT'))
             # a root without a host-query claim is unaffected
             plain=Path(folder)/'plain';write(plain,{},bare)
             self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'))['runtimeArtifacts'])
@@ -529,6 +543,56 @@ class ProviderBridgeAbsenceTests(unittest.TestCase):
             text=path.read_text()
             self.assertNotIn('provider.sock',text,path.name)
             self.assertNotIn('AF_UNIX',text.replace('/* AF_UNIX */',''),path.name)
+
+class EnvironmentGitconfigTests(unittest.TestCase):
+    """The environment image's fixed system gitconfig (agent-sdk SH6b mounts it read-only into the process worker): safe defaults only, pinned bytes."""
+    TEXT=(HERE/'environment'/'gitconfig').read_bytes()
+    def files(self,**changes):
+        files={cpio_verify.ENVIRONMENT_GITCONFIG_PATH:{'kind':'file','mode':0o444,'uid':0,'gid':0,'nlink':1,'size':len(self.TEXT),'sha256':sha(self.TEXT)},
+               cpio_verify.GIT_TEMPLATE_DIRECTORY:{'kind':'directory','mode':0o555,'uid':0,'gid':0,'nlink':1,'size':0,'sha256':sha(b'')}}
+        for path,patch in changes.items():
+            key={'file':cpio_verify.ENVIRONMENT_GITCONFIG_PATH,'template':cpio_verify.GIT_TEMPLATE_DIRECTORY}[path]
+            files[key]=None if patch is None else {**files[key],**patch}
+        return files
+    def test_the_pinned_file_is_exactly_the_allowed_settings_and_its_bytes_are_the_pin(self):
+        self.assertEqual(sha(self.TEXT),PINS['environment']['gitconfigSha256'])
+        self.assertEqual(cpio_verify.check_gitconfig_text(self.TEXT),cpio_verify.GITCONFIG_SETTINGS)
+        self.assertEqual(cpio_verify.GITCONFIG_SETTINGS[('init','templatedir')],'/usr/share/winter/git-empty-template')
+        self.assertTrue(cpio_verify.GIT_TEMPLATE_DIRECTORY.endswith(cpio_verify.GITCONFIG_SETTINGS[('init','templatedir')]))
+        self.assertEqual(cpio_verify.check_environment_gitconfig(self.files(),sha(self.TEXT)),sha(self.TEXT))
+    def test_anything_beyond_the_allowed_settings_is_refused(self):
+        base=self.TEXT.decode()
+        extras=['[include]\n\tpath = /x\n','[includeIf "gitdir:/"]\n\tpath = /x\n','[alias]\n\tco = checkout\n','[core]\n\tfsmonitor = /usr/bin/x\n','[core]\n\tsshCommand = x\n','[core]\n\tpager = x\n',
+                '[credential]\n\thelper = store\n','[url "https://x/"]\n\tinsteadOf = y\n','[safe]\n\tdirectory = *\n','[core]\n\thooksPath = /tmp/hooks\n','[init]\n\ttemplateDir = /tmp/t\n',
+                '[protocol "ext"]\n\tallow = always\n','[core]\n\tfsmonitor = false\n','[user]\n\tname = x\n']
+        for extra in extras:
+            with self.subTest(extra):
+                with self.assertRaises(ValueError):cpio_verify.check_gitconfig_text((base+extra).encode())
+        for label,text in (('a value changed',base.replace('fsmonitor = false','fsmonitor = true')),('a setting missing',base.replace('\thooksPath = /dev/null\n','')),
+                           ('a continuation',base.replace('/dev/null','/dev/\\\nnull')),('a quoted value',base.replace('= never','= "never"')),('CRLF',base.replace('\n','\r\n')),
+                           ('no final newline',base.rstrip('\n')),('non-ASCII',base+'# \u00e9\n'),('a line outside any section','x = y\n'+base),('a bare section',base+'[core\n'),('a backslash in a comment',base+'# a comment\\\n'),('empty','')):
+            with self.subTest(label):
+                with self.assertRaises(ValueError):cpio_verify.check_gitconfig_text(text.encode())
+        with self.assertRaises(ValueError):cpio_verify.check_gitconfig_text(b'#'*(64*1024)+b'\n'+self.TEXT)
+    def test_the_file_and_the_template_directory_must_be_as_the_launcher_and_git_need_them(self):
+        pin=sha(self.TEXT)
+        for label,changes in (('missing',{'file':None}),('a symlink',{'file':{'kind':'symlink'}}),('group writable',{'file':{'mode':0o464}}),('other writable',{'file':{'mode':0o446}}),
+                              ('not root',{'file':{'uid':1000}}),('not root group',{'file':{'gid':1000}}),('two links',{'file':{'nlink':2}}),('empty',{'file':{'size':0}}),
+                              ('too big',{'file':{'size':64*1024+1}}),('other bytes',{'file':{'sha256':'0'*64}}),('template missing',{'template':None}),('template a file',{'template':{'kind':'file'}}),
+                              ('template group writable',{'template':{'mode':0o575}}),('template other writable',{'template':{'mode':0o557}}),('template not root',{'template':{'uid':1000}})):
+            with self.subTest(label):
+                with self.assertRaises(ValueError):cpio_verify.check_environment_gitconfig(self.files(**changes),pin)
+        crowded=self.files();crowded[cpio_verify.GIT_TEMPLATE_DIRECTORY+'/hooks']={'kind':'directory','mode':0o555,'uid':0,'gid':0,'nlink':1,'size':0,'sha256':sha(b'')}
+        with self.assertRaises(ValueError):cpio_verify.check_environment_gitconfig(crowded,pin)
+        with self.assertRaises(ValueError):cpio_verify.check_environment_gitconfig(self.files(),'0'*64)
+    def test_the_image_builder_adds_exactly_the_pinned_file_and_the_empty_directory(self):
+        text=(HERE/'image.py').read_text()
+        for needle in ("verify.check_gitconfig_text(gitconfig)","pins['environment']['gitconfigSha256']","tree.add(verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',gitconfig,False",
+                       "tree.add(verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory'","verify.check_environment_gitconfig(tree_files(tree),pins['environment']['gitconfigSha256'])",
+                       "receipt['environment']={'gitconfigPath':'/etc/gitconfig','gitconfigSha256':sha(gitconfig)}"):
+            self.assertIn(needle,text)
+        tree=Tree();tree.add(cpio_verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',self.TEXT,False,'pinned');tree.add(cpio_verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory')
+        self.assertEqual(cpio_verify.check_environment_gitconfig(image.tree_files(tree),sha(self.TEXT)),sha(self.TEXT))   # the encoder's modes (0444 file, 0555 directory) are accepted
 
 class RuntimeArtifactPinTests(unittest.TestCase):
     """pins.json, the file the image writes for PID 1, and the supervisor's own reading of it must say the same thing."""

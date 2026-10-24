@@ -13,7 +13,7 @@ permissions:
   contents: read
 env:
   REVIEWED_HEAD: '0000000000000000000000000000000000000000'
-  AGENT_SDK_HEAD: '7511bbaedd734c7379bdafdc68c13027f60fe398'
+  AGENT_SDK_HEAD: '524ce04b033e0bcad1e06d97ab7cab7c36e7aa2d'
   BUILDER_HEAD: '180d3effd7ddbb9406aeea0912f76c78ef20cf75'
   BUN_ARCHIVE_URL: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip'
   BUN_ARCHIVE_SHA256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b'
