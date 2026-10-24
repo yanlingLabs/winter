@@ -262,7 +262,7 @@ MUTANTS = [
     ('init/init_linux.c', 'if (with_files) { sources[count++] = G.file_in_r; sources[count++] = G.file_out_w; }', 'if (with_files) { sources[count++] = G.file_out_w; sources[count++] = G.file_in_r; }', 'fcpid1'),
     ('init/init_linux.c', '#ifdef WG_FILE_CHANNEL_V1\n    release_file_ends();\n#endif\n    G.supervisor = pid;', '    G.supervisor = pid;', 'fcpid1'),
     ('init/init_linux.c', 'if (with_files && (!fifo_end_ok(G.file_in_r) || !fifo_end_ok(G.file_out_w))) {', 'if (0) {', 'fcpid1'),
-    ('init/init_linux.c', 'if (set->browse_uid == 0) return 0;', '', 'fcpid1'),
+    ('init/init_linux.c', 'if (set->browse_uid == 0) return wg_make_plan_views(WG_WORKSPACE_PATH, set, dataroots_ops);', '', 'fcpid1'),
     ('init/init_linux.c', 'if (prepare_data_roots(set) != 0) return -1;', '', 'fcpid1'),
     ('init/init_linux.c', 'return pipe2(pair, O_CLOEXEC | O_NONBLOCK);', 'return pipe2(pair, O_CLOEXEC);', 'fcpid1'),
     ('init/init_linux.c', 'int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);', 'int fd = open(path, O_WRONLY | O_CLOEXEC);', 'fcpid1'),
