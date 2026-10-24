@@ -34,6 +34,11 @@ extern const struct wg_dataroots_ops wg_dataroots_production;
  * different groups ends up with the later one's: the other conversation's file service then refuses it (`file_unavailable`), which fails closed. `workspace_path` is where the
  * data volume is mounted; `ops` is mandatory. */
 int wg_make_data_roots(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops);
+
+/* Only the plan views (/workspace/plan/<sid>/<epoch>, contract 12.5) of the set, for a workspace without a browse uid (wg_make_data_roots makes them too, with every other root): each is
+ * this conversation's own, the epoch canonical (at most nine digits) and not below one already on the disk (the data disk is the record of the epochs ever made, an earlier epoch is
+ * never made again or touched), made root:workspaceGid 02770 below parents 0711 like any data root. 0 or -1. */
+int wg_make_plan_views(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops);
 #endif
 
 #endif

@@ -2,6 +2,7 @@
 #include "dataroots.h"
 
 #ifdef WG_FILE_CHANNEL_V1
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <string.h>
@@ -11,10 +12,60 @@
 #define WORKSPACE_PREFIX "/workspace/"
 #define ROOT_MODE 02770
 #define PARENT_MODE 0711
+#define PLAN_ROOT "/workspace/plan"
 
 static int under(const char *source, const char *directory) {
     size_t n = strlen(directory);
     return strncmp(source, directory, n) == 0 && (source[n] == '\0' || source[n] == '/');
+}
+
+/* The plan view (contract 12.5): `source` is exactly /workspace/plan/<sid>/<epoch>, <sid> this conversation's own logicalSessionId, <epoch> a canonical decimal of at most nine digits
+ * (no sign, no leading zero, nothing deeper). Returns the epoch, or -1 for anything else that is at or under /workspace/plan. */
+static long plan_view_epoch(const char *source, const char *session_id) {
+    static const char prefix[] = "/workspace/plan/";
+    size_t id_length = strlen(session_id);
+    if (strncmp(source, prefix, sizeof prefix - 1) != 0) return -1;
+    const char *at = source + sizeof prefix - 1;
+    if (strncmp(at, session_id, id_length) != 0 || at[id_length] != '/') return -1;
+    const char *digits = at + id_length + 1;
+    size_t n = strlen(digits);
+    if (n < 1 || n > 9 || (n > 1 && digits[0] == '0')) return -1;
+    long epoch = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (digits[i] < '0' || digits[i] > '9') return -1;
+        epoch = epoch * 10 + (digits[i] - '0');
+    }
+    return epoch;
+}
+
+/* The data disk is the record of which epochs were ever made: an epoch below one that already exists beside it is stale and is never made again (the supervisor refuses it too).
+ * The walk never follows a link and an unreadable parent refuses. A missing /workspace/plan or /workspace/plan/<sid> means no earlier epoch. 0 = fine, -1 = refuse. */
+static int plan_epoch_is_current(int workspace, const char *session_id, long epoch, uid_t parent_owner) {
+    int plan = openat(workspace, &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (plan < 0) return errno == ENOENT ? 0 : -1;
+    int parent = openat(plan, session_id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    int saved = errno;
+    close(plan);
+    if (parent < 0) return saved == ENOENT ? 0 : -1;
+    struct stat st;
+    if (fstat(parent, &st) != 0 || st.st_uid != parent_owner) { close(parent); return -1; }
+    DIR *directory = fdopendir(parent);
+    if (!directory) { close(parent); return -1; }
+    int result = 0;
+    struct dirent *entry;
+    errno = 0;
+    while ((entry = readdir(directory)) != NULL) {
+        const char *name = entry->d_name;
+        size_t n = strlen(name);
+        if (n < 1 || n > 9 || (n > 1 && name[0] == '0')) continue;       /* not a canonical epoch name */
+        long value = 0;
+        size_t i = 0;
+        for (; i < n && name[i] >= '0' && name[i] <= '9'; i++) value = value * 10 + (name[i] - '0');
+        if (i == n && value > epoch) { result = -1; break; }
+    }
+    if (result == 0 && errno != 0) result = -1;                          /* a read error is not "no later epoch" */
+    closedir(directory);
+    return result;
 }
 
 int wg_data_root_is_share_mount(const char *source) {
@@ -67,7 +118,7 @@ static int make_one(int workspace, const char *source, gid_t gid, const struct w
     }
 }
 
-int wg_make_data_roots(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops) {
+static int make_roots(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops, int plan_only) {
     int workspace = open(workspace_path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (workspace < 0) return -1;
     int rc = 0;
@@ -76,10 +127,24 @@ int wg_make_data_roots(const char *workspace_path, const struct wg_conversation_
             const char *source = set->root_source[i][r];
             if (strncmp(source, WORKSPACE_PREFIX, sizeof WORKSPACE_PREFIX - 1) != 0) { rc = -1; break; }
             if (wg_data_root_is_share_mount(source)) continue;
+            if (under(source, PLAN_ROOT)) {
+                long epoch = plan_view_epoch(source, set->session_id[i]);
+                if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops->parent_owner) != 0) { rc = -1; break; }
+            } else if (plan_only) {
+                continue;
+            }
             rc = make_one(workspace, source, (gid_t)set->workspace_gid[i], ops);
         }
     }
     close(workspace);
     return rc;
+}
+
+int wg_make_data_roots(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops) {
+    return make_roots(workspace_path, set, ops, 0);
+}
+
+int wg_make_plan_views(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops) {
+    return make_roots(workspace_path, set, ops, 1);
 }
 #endif

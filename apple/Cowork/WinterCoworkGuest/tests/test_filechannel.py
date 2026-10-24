@@ -161,6 +161,62 @@ class DataRootTests(unittest.TestCase):
         self.assertEqual(self.run_tool(self.gid, "/workspace/folders-x"), "0")             # a sibling that merely starts the same way is a root
         self.assertEqual(self.mode_of("folders-x"), 0o2770)
 
+    def test_the_plan_view_is_made_for_this_conversation_only_owned_by_the_workspace_group_and_02770(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        self.assertEqual((self.mode_of("plan"), self.mode_of("plan/conv-0001"), self.mode_of("plan/conv-0001/5")), (0o711, 0o711, 0o2770))
+        st = (self.dir / "plan/conv-0001/5").stat()
+        self.assertEqual((st.st_uid, st.st_gid), (os.getuid(), self.gid))
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")           # idempotent
+        self.assertEqual(sorted(p.name for p in (self.dir / "plan/conv-0001").iterdir()), ["5"])
+        # the second conversation of a set gets its own folder under its own id
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6", "--", self.gid, "/workspace/plan/conv-0002/0"), "0")
+        self.assertTrue((self.dir / "plan/conv-0002/0").is_dir())
+
+    def test_a_plan_path_that_is_not_exactly_the_conversations_own_epoch_view_is_refused_and_nothing_is_made(self):
+        for source in ("/workspace/plan", "/workspace/plan/conv-0001", "/workspace/plan/conv-0002/1", "/workspace/plan/conv-0001/01", "/workspace/plan/conv-0001/1234567890",
+                       "/workspace/plan/conv-0001/x", "/workspace/plan/conv-0001/1/deeper", "/workspace/plan/conv-00011/1", "/workspace/plan/conv-000112"):
+            with self.subTest(source):
+                self.assertEqual(self.run_tool(self.gid, source), "-1")
+        self.assertFalse((self.dir / "plan").exists())
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/123456789"), "0")     # nine digits is fine
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/0"), "-1")             # ... but 0 is below 123456789 now
+        self.assertEqual(self.run_tool(self.gid, "/workspace/planning/x"), "0")                    # a sibling name that merely starts the same way is an ordinary root
+
+    def test_an_earlier_epoch_is_never_made_again_and_is_left_untouched(self):
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        (self.dir / "plan/conv-0001/5/note").write_text("kept")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "0")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/4"), "-1")             # below 6: stale
+        self.assertFalse((self.dir / "plan/conv-0001/4").exists())
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "0")              # the same epoch again is fine
+        self.assertEqual((self.dir / "plan/conv-0001/5/note").read_text(), "kept")                  # the earlier epoch is not re-created or emptied
+        self.assertEqual(self.mode_of("plan/conv-0001/5"), 0o2770)
+
+    def test_without_a_browse_uid_only_the_plan_view_is_made(self):
+        env = dict(os.environ, DATAROOTS_PLAN_ONLY="1")
+        def run(*sources):
+            return subprocess.run([str(self.tool), "dataroots", str(self.dir), str(self.gid), *sources], capture_output=True, text=True, env=env, timeout=60).stdout.strip()
+        self.assertEqual(run("/workspace/repos/r1", "/workspace/plan/conv-0001/2"), "0")
+        self.assertTrue((self.dir / "plan/conv-0001/2").is_dir())
+        self.assertFalse((self.dir / "repos/r1").exists())                                          # an ordinary data root is not made without a browse uid
+        self.assertEqual(run("/workspace/plan/conv-0001/1"), "-1")                                  # the staleness rule holds on this path too
+        self.assertEqual(run("/workspace/plan/conv-0002/1"), "-1")                                  # and the own-conversation rule
+
+    def test_a_plan_parent_that_is_a_symlink_or_not_a_directory_is_refused(self):
+        outside = Path(tempfile.mkdtemp(prefix="guest-outside-"))
+        self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
+        (self.dir / "plan").symlink_to(outside)
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
+        self.assertEqual(list(outside.iterdir()), [])
+        (self.dir / "plan").unlink()
+        (self.dir / "plan").mkdir(mode=0o711)
+        (self.dir / "plan/conv-0001").symlink_to(outside)
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
+        self.assertEqual(list(outside.iterdir()), [])
+        (self.dir / "plan/conv-0001").unlink()
+        (self.dir / "plan/conv-0001").write_text("a file where the parent belongs")
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/1"), "-1")
+
     def test_a_symlink_anywhere_on_the_path_is_refused_and_nothing_is_followed(self):
         outside = Path(tempfile.mkdtemp(prefix="guest-outside-"))
         self.addCleanup(shutil.rmtree, outside, ignore_errors=True)
