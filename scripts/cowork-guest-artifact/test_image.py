@@ -291,18 +291,18 @@ class CpioReadbackTests(unittest.TestCase):
     def test_a_root_with_exactly_the_pinned_init_verifies(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
-            result=cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            result=cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             self.assertTrue(result['startupPresent']);self.assertEqual(result['startupEntries'],['init'])
     def test_an_unpinned_receipt_is_refused_unless_the_flag_names_it(self):
         with tempfile.TemporaryDirectory() as folder:
             for value in (False, None, 'true', 1):
                 root=Path(folder)/str(value);self.write(root,self.tree(self.INIT),pinned=value)
-                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
-                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True)['startupPresent'])
+                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
+                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True,require_environment=False)['startupPresent'])
             root=Path(folder)/'missing';self.write(root,self.tree(self.INIT));receipt=json.loads((root/'receipt.json').read_text());del receipt['reproducibilityPinned'];(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'ok';self.write(root,self.tree(self.INIT))
-            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT))['startupPresent'])
+            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)['startupPresent'])
     def test_the_command_line_needs_the_named_flag_for_an_unpinned_receipt(self):
         script=Path(cpio_verify.__file__)
         with tempfile.TemporaryDirectory() as folder:
@@ -316,46 +316,46 @@ class CpioReadbackTests(unittest.TestCase):
     def test_a_different_init_missing_init_or_extra_startup_entry_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree(b'other'))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'b';self.write(root,self.tree())
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             tree=self.tree(self.INIT);tree.add('linuxrc','file',b'#!/bin/sh',True);root=Path(folder)/'c';self.write(root,tree)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_receipt_that_does_not_describe_the_init_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree(self.INIT),init_digest='0'*64)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'b';self.write(root,self.tree(self.INIT),present=False)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_the_no_init_mode_still_demands_that_there_is_none(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree())
-            self.assertFalse(cpio_verify.verify(root,require_init=False)['startupPresent'])
+            self.assertFalse(cpio_verify.verify(root,require_init=False,require_environment=False)['startupPresent'])
             root=Path(folder)/'b';self.write(root,self.tree(self.INIT))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,require_init=False)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,require_init=False,require_environment=False)
     def test_an_init_that_is_not_executable_is_refused_even_with_the_pinned_bytes(self):
         with tempfile.TemporaryDirectory() as folder:
             tree=self.tree();tree.add('init','file',self.INIT,False)   # same bytes, mode 0444
             root=Path(folder);self.write(root,tree)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_member_whose_bytes_changed_is_caught_even_when_the_whole_file_digest_was_updated(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_changed_member_other_than_init_is_caught_by_its_own_digest(self):
         # init is also held to the pinned digest by the startup rule, so only a member the rule does not cover shows that each member is read back
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(b'tool-content')]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_tampered_cpio_byte_is_caught(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
 
 
 
@@ -463,18 +463,18 @@ class RuntimeArtifactTests(unittest.TestCase):
             (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':sha(b'INIT'),'initPresent':True,'reproducibilityPinned':True,**receipt_extra}))
         with tempfile.TemporaryDirectory() as folder:
             good=Path(folder)/'good';write(good,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}})
-            self.assertEqual(cpio_verify.verify(good,pinned_init=sha(b'INIT'))['runtimeArtifacts'],digests)
+            self.assertEqual(cpio_verify.verify(good,pinned_init=sha(b'INIT'),require_environment=False)['runtimeArtifacts'],digests)
             lying=Path(folder)/'lying';write(lying,{'hostQuery':{'artifacts':{key:{'sha256':'0'*64} for key in digests}}})
-            with self.assertRaisesRegex(ValueError,'receipt does not describe'):cpio_verify.verify(lying,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'receipt does not describe'):cpio_verify.verify(lying,pinned_init=sha(b'INIT'),require_environment=False)
             # an artifact whose bytes no longer match the pin in the same cpio
             other=Tree()
             for node_path,node in tree.nodes.items():other.add(node_path,node['kind'],node['data'] if node_path!=cpio_verify.RUNTIME_ARTIFACT_PATHS['executable'].lstrip('/') else b'tampered',node['kind']=='file' and node['mode']==0o555)
             tampered=Path(folder)/'tampered';write(tampered,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}},other)
-            with self.assertRaisesRegex(ValueError,'do not match their pin|bytes'):cpio_verify.verify(tampered,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'do not match their pin|bytes'):cpio_verify.verify(tampered,pinned_init=sha(b'INIT'),require_environment=False)
             # no artifacts file at all in a root whose receipt claims a host-query runtime
             bare=Tree();bare.add('init','file',b'INIT',True)
             missing=Path(folder)/'missing';write(missing,{'hostQuery':{'artifacts':{}}},bare)
-            with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'),require_environment=False)
             # the environment gitconfig: a receipt that claims the pinned one must find exactly it in the cpio
             git=(HERE/'environment'/'gitconfig').read_bytes()
             def with_git(data):
@@ -492,7 +492,14 @@ class RuntimeArtifactTests(unittest.TestCase):
             hidden=Path(folder)/'hidden';write(hidden,{},with_git(git))
             with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(hidden,pinned_init=sha(b'INIT'))
             with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'),require_environment=True)
-            self.assertTrue(cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'))['startupPresent'])    # (a root built before the gitconfig, checked without the requirement)
+            with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'))    # the library requires the claim by default
+            # the image ships the file only under /opt/winter/environment/base: a system gitconfig of the cpio's own is refused, whatever its kind, claim or no claim
+            for label,kind,data in (('file','file',git),('empty','file',b''),('directory','directory',None)):
+                stray=with_git(git);stray.add('etc/gitconfig',kind,data) if data is not None else stray.add('etc/gitconfig',kind)
+                for extra in (claim,{}):
+                    folder_name=Path(folder)/('stray-%s-%d'%(label,len(extra)));write(folder_name,extra,stray)
+                    with self.assertRaisesRegex(ValueError,'system gitconfig'):cpio_verify.verify(folder_name,pinned_init=sha(b'INIT'),require_environment=False)
+            self.assertTrue(cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'),require_environment=False)['startupPresent'])    # (a root built before the gitconfig, checked without the requirement)
             # the command line (the image build's check) requires the claim unless told the root is older than the gitconfig
             noinit=Tree();noinit.add('etc/value','file',b'x');old=Path(folder)/'old';write(old,{},noinit)
             run=lambda *flags:subprocess.run([sys.executable,'-I','-S','-B',str(HERE/'verify.py'),str(old),'--no-init','--allow-unpinned',*flags],capture_output=True,text=True)
@@ -502,7 +509,7 @@ class RuntimeArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'missing or not a regular file'):cpio_verify.verify(gitabsent,pinned_init=sha(b'INIT'))
             # a root without a host-query claim is unaffected
             plain=Path(folder)/'plain';write(plain,{},bare)
-            self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'))['runtimeArtifacts'])
+            self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'),require_environment=False)['runtimeArtifacts'])
 
 class TwoPassTests(unittest.TestCase):
     def test_two_passes_must_agree_byte_for_byte(self):

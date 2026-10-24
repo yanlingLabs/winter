@@ -10,6 +10,12 @@
 #include <string.h>
 #include <unistd.h>
 
+/* The test build renames dataroots.c's fchmod to wg_tool_fchmod (-Dfchmod=wg_tool_fchmod, which also renames the header's declaration). DATAROOTS_FCHMOD_LIE: the call reports
+ * success but leaves bits other than the ones asked for (a file system that ignores or filters a chmod): only a read-back of the mode from the descriptor can notice. */
+#undef fchmod
+extern int fchmod(int fd, mode_t mode);
+int wg_tool_fchmod(int fd, mode_t mode) { return fchmod(fd, getenv("DATAROOTS_FCHMOD_LIE") ? (mode_t)(mode ^ 0020) : mode); }
+
 /* DATAROOTS_LOG: every fchown request ("uid:gid") is appended to that file. A request for an id this (non-root) user cannot give is recorded and then done as the user itself:
  * the tool uid of a conversation (41001, 41002) is never the invoking user's. `stored` tells the code under test that this is what the file system will now report. DATAROOTS_REAL_IDS
  * (needs root) does the real chown and no mapping. */

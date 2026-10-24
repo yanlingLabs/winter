@@ -97,7 +97,7 @@ class DataRootTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.folder = Path(tempfile.mkdtemp(prefix="guest-dataroots-"))
-        cls.tool = build([HERE / "dataroots_tool.c", INIT / "dataroots.c"], cls.folder / "tool", extra=FLAG)
+        cls.tool = build([HERE / "dataroots_tool.c", INIT / "dataroots.c"], cls.folder / "tool", extra=[*FLAG, "-Dfchmod=wg_tool_fchmod"])
 
     @classmethod
     def tearDownClass(cls):
@@ -265,6 +265,22 @@ class DataRootTests(unittest.TestCase):
         self.assertIn("41001:41001", log.read_text())                                                  # (a directory PID 1 made itself is let through to the chown; it is the result that fails)
         self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/6", DATAROOTS_STORED_GID=os.getgid() + 5000), "-1")          # nor is the group
         self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/7"), "0")
+
+    def test_the_bits_of_a_plan_directory_are_read_back_from_the_descriptor_not_taken_from_fchmod(self):
+        """A chmod that reports success and leaves other bits (a file system that filters it): the plan directory is refused, as a data root's mode is by make_one."""
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5", DATAROOTS_FCHMOD_LIE="1"), "-1")
+        self.assertFalse((self.dir / "plan/conv-0001/5").exists() and self.mode_of("plan/conv-0001/5") == 0o700)
+        self.assertEqual(self.run_env(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        self.assertEqual(self.mode_of("plan/conv-0001/5"), 0o700)
+
+    def test_a_name_that_is_not_a_canonical_epoch_never_makes_an_epoch_stale(self):
+        """Only a canonical decimal (at most nine digits, no sign, no leading zero, nothing after the digits) names an epoch; the scan skips every other entry."""
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")
+        for name in ("0012", "12x", "-9", "99a99", "0999999", "1234567890", ".9"):
+            (self.dir / "plan/conv-0001" / name).mkdir()
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "0")
+        (self.dir / "plan/conv-0001/7").mkdir()
+        self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/6"), "-1")             # ... while a canonical one above still does
 
     def test_a_directory_read_that_fails_or_a_stale_errno_decides_the_epoch_scan_correctly(self):
         self.assertEqual(self.run_tool(self.gid, "/workspace/plan/conv-0001/5"), "0")

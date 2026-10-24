@@ -47,6 +47,7 @@ def check_runtime_artifacts(files,config_bytes):
 
 # ---- the environment's fixed system gitconfig (agent-sdk SH6b mounts base/etc/gitconfig read-only into the process worker) ---------------------
 ENVIRONMENT_GITCONFIG_PATH='/opt/winter/environment/base/etc/gitconfig'
+SYSTEM_GITCONFIG_PATH='/etc/gitconfig'   # where the tool launcher mounts the file above, at run time; the image itself ships NOTHING there (a file in the cpio would be read by git outside that mount)
 GIT_TEMPLATE_DIRECTORY='/opt/winter/environment/base/usr/share/winter/git-empty-template'   # init.templateDir below: an empty, root-owned directory, so git never makes .git/hooks
 MAX_GITCONFIG_BYTES=64*1024                  # the tool launcher's own bound
 # The ONLY settings the file may carry, with their only values. Anything else (an include, includeIf, alias, hook path, fsmonitor command, credential helper, url rewrite,
@@ -89,10 +90,11 @@ def check_environment_gitconfig(files,expected_sha256):
     if any(path.startswith(GIT_TEMPLATE_DIRECTORY+'/') for path in files):raise ValueError('git template directory is not empty')
     return expected_sha256
 
-def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_environment=False):
+def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_environment=True):
     """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
     uid/gid 0 whose bytes hash to the digest pinned in pins.json (or `pinned_init`). `require_init=False` is for roots built
-    before slice S5, which must still have NO startup program."""
+    before slice S5, which must still have NO startup program. `require_environment` (default True) demands the receipt's claim of the environment gitconfig; only a root built
+    before that file existed is checked with False (the command line's --no-environment)."""
     receipt=json.loads((root/'receipt.json').read_text())
     # image.py writes a full receipt with reproducibilityPinned false (and exits 3) while expectedArtifact is null: such a root is evidence of a build, not an accepted artifact
     if receipt.get('reproducibilityPinned') is not True and not allow_unpinned:raise ValueError('receipt is not reproducibility-pinned')
@@ -140,6 +142,7 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_
         if set(startup)!={'init'} or startup['init']!=('file',0o555,pinned_init):raise ValueError('cpio startup program is not exactly the pinned init')
         if receipt.get('initSha256')!=pinned_init or receipt.get('initPresent') is not True:raise ValueError('receipt does not describe the pinned init')
     elif startup:raise ValueError('cpio carries a startup program')
+    if SYSTEM_GITCONFIG_PATH in records:raise ValueError('cpio carries a system gitconfig of its own: the image ships the environment gitconfig only under /opt/winter/environment/base')
     runtime=None
     if receipt.get('hostQuery') is not None:   # a root built for the host-query runtime must carry exactly the artifacts its receipt describes
         if config_bytes is None:raise ValueError('runtime artifacts file missing from the cpio')
