@@ -413,11 +413,12 @@ class FileChannelPid1Tests(unittest.TestCase):
         self.assertEqual(self.roots(40001, "/etc/passwd"), "-1")
 
     def test_the_plan_view_is_made_by_pid_1_for_its_own_conversation_and_an_earlier_epoch_never_again(self):
-        """Through op_prepare_conversation_dirs (the conversation here is `s1`): /workspace/plan/s1/<epoch> as root:gid 02770 below parents 0711, a stale epoch refused."""
+        """Through op_prepare_conversation_dirs (the conversation here is `s1`): /workspace/plan/s1/<epoch> for the conversation's tool uid, 0700, below /workspace/plan 0711; a stale epoch refused.
+        The tool does not run as root, so what the file system keeps is the invoking user's; the owner PID 1 asks for (41001) is covered by test_filechannel's request log."""
         self.assertEqual(self.roots(40001, "/workspace/plan/s1/3"), "0")
         view = self.workspace / "plan/s1/3"
-        self.assertEqual((stat.S_IMODE(view.stat().st_mode), view.stat().st_gid), (0o2770, os.getgid()))
-        self.assertEqual((stat.S_IMODE((self.workspace / "plan").stat().st_mode), stat.S_IMODE((self.workspace / "plan/s1").stat().st_mode)), (0o711, 0o711))
+        self.assertEqual(stat.S_IMODE(view.stat().st_mode), 0o700)
+        self.assertEqual((stat.S_IMODE((self.workspace / "plan").stat().st_mode), stat.S_IMODE((self.workspace / "plan/s1").stat().st_mode)), (0o711, 0o700))
         self.assertEqual(self.roots(40001, "/workspace/plan/s1/2"), "-1")        # below 3
         self.assertFalse((self.workspace / "plan/s1/2").exists())
         self.assertEqual(self.roots(40001, "/workspace/plan/other/1"), "-1")     # not this conversation's

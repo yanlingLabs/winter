@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
     if (wg_parse_conversation_payload(bytes, length, &set) != 0) { printf("refused\n"); return 0; }
     printf("%u|%u|%u|", set.profile, set.browse_uid, set.count);
     for (unsigned i = 0; i < set.count; i++) {
-        printf("%s%s:%u:%u:", i ? ";" : "", set.session_id[i], set.runtime_uid[i], set.workspace_gid[i]);
+        printf("%s%s:%u:%u:%u:", i ? ";" : "", set.session_id[i], set.runtime_uid[i], set.tool_uid[i], set.workspace_gid[i]);
         for (unsigned r = 0; r < set.root_count[i]; r++) printf("%s%s", r ? "," : "", set.root_source[i][r]);
     }
     printf("|%.*s\n", (int)set.json_length, set.json);

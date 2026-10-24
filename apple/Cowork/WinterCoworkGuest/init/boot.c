@@ -90,10 +90,13 @@ int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct 
         at += 4;
         if (out->browse_uid != 0 && (out->browse_uid < WG_UNIX_ID_MIN || out->browse_uid > WG_UNIX_ID_MAX)) return -1;
         for (unsigned i = 0; i < out->count; i++) {
-            if (length - at < 5) return -1;
-            uint32_t gid = le32(payload + at);
-            unsigned roots = payload[at + 4];
-            at += 5;
+            if (length - at < 9) return -1;
+            uint32_t tool = le32(payload + at);
+            uint32_t gid = le32(payload + at + 4);
+            unsigned roots = payload[at + 8];
+            at += 9;
+            if (tool < WG_UNIX_ID_MIN || tool > WG_UNIX_ID_MAX) return -1;
+            out->tool_uid[i] = tool;
             if (gid < WG_UNIX_ID_MIN || gid > WG_UNIX_ID_MAX || roots < 1 || roots > WG_ROOTS_MAX) return -1;
             out->workspace_gid[i] = gid;
             out->root_count[i] = roots;
@@ -108,9 +111,15 @@ int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct 
         }
         /* The browse uid is a fourth kind of id beside runtime uids, tool uids and workspace gids: it is none of the ones PID 1 can see. */
         for (unsigned i = 0; i < out->count; i++)
-            if (out->browse_uid != 0 && (out->browse_uid == out->runtime_uid[i] || out->browse_uid == out->workspace_gid[i])) return -1;
-        for (unsigned i = 0; i < out->count; i++)
-            for (unsigned j = 0; j < out->count; j++) if (out->workspace_gid[i] == out->runtime_uid[j]) return -1;
+            if (out->browse_uid != 0 && (out->browse_uid == out->runtime_uid[i] || out->browse_uid == out->tool_uid[i] || out->browse_uid == out->workspace_gid[i])) return -1;
+        /* Every runtime and tool uid of the set is distinct, and no workspace gid is any of them (a group id equal to a uid is that user's private group). */
+        for (unsigned i = 0; i < out->count; i++) {
+            if (out->tool_uid[i] == out->runtime_uid[i]) return -1;
+            for (unsigned j = 0; j < out->count; j++) {
+                if (out->workspace_gid[i] == out->runtime_uid[j] || out->workspace_gid[i] == out->tool_uid[j]) return -1;
+                if (j != i && (out->tool_uid[i] == out->tool_uid[j] || out->tool_uid[i] == out->runtime_uid[j])) return -1;
+            }
+        }
     }
 #endif
     if (length - at < 2) return -1;
