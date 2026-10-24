@@ -1,7 +1,7 @@
 {
   "formatVersion": 1,
   "snapshot": "20261011T000000Z",
-  "sdkCommit": "524ce04b033e0bcad1e06d97ab7cab7c36e7aa2d",
+  "sdkCommit": "52f275f0eaeeaa4c823796265fdb81c64fc7a435",
   "bun": {
     "version": "1.3.14",
     "target": "bun-linux-arm64",
@@ -83,9 +83,10 @@
       "093fb3ead915d967e8a01b358abdbcc39a76f447",
       "7e71929d0231be2d77645bfa47ee2b550f3add22",
       "f5612e4671b16a5fa2cb771e78a2dd6a6b0b4789",
-      "7511bbaedd734c7379bdafdc68c13027f60fe398"
+      "7511bbaedd734c7379bdafdc68c13027f60fe398",
+      "524ce04b033e0bcad1e06d97ab7cab7c36e7aa2d"
     ],
-    "mainAt": "524ce04b033e0bcad1e06d97ab7cab7c36e7aa2d",
+    "mainAt": "52f275f0eaeeaa4c823796265fdb81c64fc7a435",
     "mergedPullRequests": [
       27,
       28,
@@ -94,14 +95,16 @@
       42,
       43,
       44,
-      49
+      49,
+      52
     ],
     "contains": [
       "the supervisor change that accepts the relay's pipes (agent-sdk #30: --trusted-config-fd N [--runtime-ports-fds IN,OUT,ERR])",
       "the guest-side work of the Cowork guest arc: #43 messaging, #44 cold resume, #42 browse (supervisor and session-owner library change; the launcher source is unchanged); 7511bbae is the v0.0.54 release commit on top (version strings only, no guest source change)",
-      "#49, the plan view (contract 3, 12.5): the supervisor admits /workspace/plan/<id>/<epoch> writable under plan only and never an epoch below one already made, and the tool launcher mounts it writable for the file worker only (linux-supervisor.py and linux-tool-compartment.c change; the runtime launcher and owner library sources are unchanged)"
+      "#49, the plan view (contract 3, 12.5): the supervisor admits /workspace/plan/<id>/<epoch> writable under plan only and never an epoch below one already made, and the tool launcher mounts it writable for the file worker only (linux-supervisor.py and linux-tool-compartment.c change; the runtime launcher and owner library sources are unchanged)",
+      "#52, SH6b: the memory share /workspace/.winter/memory as a host-query tool root, and the tool launcher mounting the environment's etc/gitconfig read-only at /etc/gitconfig for the process worker (linux-supervisor.py and linux-tool-compartment.c change again); the environment image carries that file (environment.gitconfigSha256)"
     ],
-    "supervisorSha256": "2f55cc2b042660e8db9389d3355842af12279fba64fdba2de91b08023929cc21",
+    "supervisorSha256": "7ecbdc1ef15eed6111ca180b67687f0be2cdf9e63e2573e0835401e633b0fc78",
     "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) were source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests."
   },
   "guest": {
