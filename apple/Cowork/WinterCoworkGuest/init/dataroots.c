@@ -40,18 +40,13 @@ static long plan_view_epoch(const char *source, const char *session_id) {
 }
 
 /* The data disk is the record of which epochs were ever made: an epoch below one that already exists beside it is stale and is never made again (the supervisor refuses it too).
- * The walk never follows a link and an unreadable parent refuses. A missing /workspace/plan or /workspace/plan/<sid> means no earlier epoch. 0 = fine, -1 = refuse. */
-static int plan_epoch_is_current(int workspace, const char *session_id, long epoch, const struct wg_dataroots_ops *ops) {
-    int plan = openat(workspace, &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    if (plan < 0) return errno == ENOENT ? 0 : -1;
-    int parent = openat(plan, session_id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    int saved = errno;
-    close(plan);
-    if (parent < 0) return saved == ENOENT ? 0 : -1;
-    struct stat st;
-    if (fstat(parent, &st) != 0 || st.st_uid != ops->owner) { close(parent); return -1; }   /* the folder of the id is root's (PID 1 made it) */
-    DIR *directory = fdopendir(parent);
-    if (!directory) { close(parent); return -1; }
+ * `folder` is /workspace/plan/<sid> as make_plan_view already walked and checked it (no link followed, root's): the scan reads that very descriptor, it opens nothing by name.
+ * A read error is not "no later epoch". 0 = fine, -1 = refuse. */
+static int plan_epoch_is_current(int folder, long epoch, const struct wg_dataroots_ops *ops) {
+    int duplicate = dup(folder);                                         /* fdopendir takes the descriptor it is given */
+    if (duplicate < 0) return -1;
+    DIR *directory = fdopendir(duplicate);
+    if (!directory) { close(duplicate); return -1; }
     int result = 0;
     struct dirent *entry;
     errno = 0;
@@ -121,7 +116,8 @@ static int make_one(int workspace, const char *source, gid_t gid, const struct w
 
 /* A directory of the plan view, `name` below `parent` (a held descriptor): created, opened without following a link, and only ever one that PID 1 (root) made before: a directory
  * of any other owner is refused BEFORE anything is changed on it. `uid` and `gid` are the owner to give it (root's own, or the conversation's tool uid and its group, never the workspace
- * group) and `mode` its bits (0711 for the two that are only walked through, 0700 for the epoch). What the descriptor says afterwards is checked, not what the calls returned. */
+ * group) and `mode` its bits (0711 for the two that are only walked through, 0700 for the epoch). What the descriptor says afterwards is checked, not what the calls returned.
+ * Returns that descriptor (the next step walks on it, nothing is reopened by name), or -1. */
 static int make_plan_dir(int parent, const char *name, uid_t uid, gid_t gid, mode_t mode, const struct wg_dataroots_ops *ops) {
     int fd = open_component(parent, name, mode);
     if (fd < 0) return -1;
@@ -134,26 +130,29 @@ static int make_plan_dir(int parent, const char *name, uid_t uid, gid_t gid, mod
     if (rc == 0) rc = ops->fchown_fd(fd, uid, gid, ops->ctx);
     if (rc == 0) rc = fchmod(fd, mode);                                                  /* after the chown: a chown clears the setgid bit; mkdirat's mode is filtered by umask(077) */
     if (rc == 0 && (fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid)) rc = -1;
-    close(fd);
-    return rc;
+    if (rc != 0) { close(fd); return -1; }
+    return fd;
 }
 
-/* /workspace/plan and /workspace/plan/<sid>: root:root 0711 (walked through, never listed by the tool), then the epoch below it: the conversation's tool uid and group, 0700. */
-static int make_plan_view(int workspace, const char *session_id, const char *source, uint32_t tool_uid, const struct wg_dataroots_ops *ops) {
-    const char *epoch = strrchr(source, '/') + 1;
+/* /workspace/plan and /workspace/plan/<sid>: root:root 0711 (walked through, never listed by the tool); the epochs already on the disk are read from that same descriptor (a later
+ * one makes this epoch stale); then the epoch below it: the conversation's tool uid and group, 0700. One walk, every step on the descriptor the step before it returned. */
+static int make_plan_view(int workspace, const char *session_id, const char *source, long epoch, uint32_t tool_uid, const struct wg_dataroots_ops *ops) {
+    const char *epoch_name = strrchr(source, '/') + 1;
     const char *names[2] = { &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], session_id };
     int current = dup(workspace);
     if (current < 0) return -1;
     for (int level = 0; level < 2; level++) {
-        int next = -1;
-        if (make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops) == 0) next = openat(current, names[level], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int next = make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops);
         close(current);
         if (next < 0) return -1;
         current = next;
     }
-    int rc = make_plan_dir(current, epoch, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops);
+    if (plan_epoch_is_current(current, epoch, ops) != 0) { close(current); return -1; }
+    int made = make_plan_dir(current, epoch_name, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops);
     close(current);
-    return rc;
+    if (made < 0) return -1;
+    close(made);
+    return 0;
 }
 
 static int make_roots(const char *workspace_path, const struct wg_conversation_set *set, const struct wg_dataroots_ops *ops, int plan_only) {
@@ -167,8 +166,8 @@ static int make_roots(const char *workspace_path, const struct wg_conversation_s
             if (wg_data_root_is_share_mount(source)) continue;
             if (under(source, PLAN_ROOT)) {
                 long epoch = plan_view_epoch(source, set->session_id[i]);
-                if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops) != 0) { rc = -1; break; }
-                rc = make_plan_view(workspace, set->session_id[i], source, set->tool_uid[i], ops);
+                if (epoch < 0) { rc = -1; break; }
+                rc = make_plan_view(workspace, set->session_id[i], source, epoch, set->tool_uid[i], ops);
                 continue;
             } else if (plan_only) {
                 continue;

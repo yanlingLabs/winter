@@ -186,8 +186,8 @@ class PinTests(unittest.TestCase):
         self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
         self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
         self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
-        self.assertEqual(PINS['sdkCommit'],'52f275f0eaeeaa4c823796265fdb81c64fc7a435')
-        for number in (29,30,42,43,44,49,52):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
+        self.assertEqual(PINS['sdkCommit'],'ec91fe06719d76e99bcdbdae8a6daaf690dfeb50')
+        for number in (29,30,42,43,44,49,50,52):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
         self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
     def test_the_current_artifact_is_pinned_and_the_last_real_one_before_the_re_pin_is_kept(self):
         self.assertEqual(set(PINS['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
@@ -481,12 +481,23 @@ class RuntimeArtifactTests(unittest.TestCase):
                 withgit=Tree();withgit.add('init','file',b'INIT',True);withgit.add(cpio_verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',data);withgit.add(cpio_verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory')
                 return withgit
             claim={'environment':{'gitconfigSha256':PINS['environment']['gitconfigSha256']}}
+            plain_root=Path(folder)/'plain_root';write(plain_root,{},bare)
             gitgood=Path(folder)/'gitgood';write(gitgood,claim,with_git(git))
             cpio_verify.verify(gitgood,pinned_init=sha(b'INIT'))
             gitbad=Path(folder)/'gitbad';write(gitbad,claim,with_git(git+b'# changed\n'))
             with self.assertRaisesRegex(ValueError,'do not match their pin'):cpio_verify.verify(gitbad,pinned_init=sha(b'INIT'))
             gitlying=Path(folder)/'gitlying';write(gitlying,{'environment':{'gitconfigSha256':'0'*64}},with_git(git))
             with self.assertRaisesRegex(ValueError,'does not describe the pinned environment gitconfig'):cpio_verify.verify(gitlying,pinned_init=sha(b'INIT'))
+            # a receipt that does not claim the gitconfig cannot hide one the cpio ships, and a verification that requires the claim refuses a root without it
+            hidden=Path(folder)/'hidden';write(hidden,{},with_git(git))
+            with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(hidden,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'),require_environment=True)
+            self.assertTrue(cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'))['startupPresent'])    # (a root built before the gitconfig, checked without the requirement)
+            # the command line (the image build's check) requires the claim unless told the root is older than the gitconfig
+            noinit=Tree();noinit.add('etc/value','file',b'x');old=Path(folder)/'old';write(old,{},noinit)
+            run=lambda *flags:subprocess.run([sys.executable,'-I','-S','-B',str(HERE/'verify.py'),str(old),'--no-init','--allow-unpinned',*flags],capture_output=True,text=True)
+            self.assertNotEqual(run().returncode,0);self.assertIn('environment gitconfig',run().stderr)
+            self.assertEqual(run('--no-environment').returncode,0)
             gitabsent=Path(folder)/'gitabsent';write(gitabsent,claim,bare)
             with self.assertRaisesRegex(ValueError,'missing or not a regular file'):cpio_verify.verify(gitabsent,pinned_init=sha(b'INIT'))
             # a root without a host-query claim is unaffected
