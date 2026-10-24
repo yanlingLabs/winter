@@ -27,7 +27,7 @@ Streams 4 and 5 on conversation 0 only (codec: another conversation is `bad_fiel
 
 ## 4. Bootstrap helper and the contract copies
 
-The three vector copies are re-pinned to PR #115 (488986e8). The helper's revision-3 vocabulary (`v` 2: `browseUid`, `continuation`, `endedGuestBoots`, `timeoutMs` up to 24 h, `continuations`, `shares`) is complete at the message level and passes every bootstrap-class vector. Behaviour is not: this guest has no shares and no resume store, so `shares` is answered with `share_inventory`, `resume` with `resume_store_missing`, `either` runs fresh and `runtime_ready.continuations` says `fresh`. The nine `shares` transcripts of `bootstrap-order.json` therefore wait for SH6. The helper hands PID 1 an extended 'C' payload (profile byte bit 7): the browse uid, per conversation its workspace gid and the `source` of each root.
+The three vector copies are re-pinned to PR #115 (488986e8). The helper's revision-3 vocabulary (`v` 2: `browseUid`, `continuation`, `endedGuestBoots`, `timeoutMs` up to 24 h, `continuations`, `shares`) is complete at the message level and passes every bootstrap-class vector. Behaviour is not: this guest has no shares and no resume store, so `shares` is answered with `share_inventory`, `resume` with `resume_store_missing`, `either` runs fresh and `runtime_ready.continuations` says `fresh`. The nine `shares` transcripts of `bootstrap-order.json` therefore wait for SH6. The helper hands PID 1 an extended 'C' payload (profile byte bit 7): the browse uid, per conversation its tool uid, its workspace gid and the `source` of each root (the plan view, 12.5, is the tool uid's own, 0700).
 
 ## 5. Not verified here (G1 and CI)
 

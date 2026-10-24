@@ -469,12 +469,20 @@ def main():
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
     if base+'/bin/sh' not in tree.nodes:tree.add(base+'/bin/sh','symlink',b'dash',origin='derived:explicit-dash-shell')
+    # The environment's fixed system gitconfig (agent-sdk SH6b mounts it read-only at /etc/gitconfig for the process worker) and the empty directory its init.templateDir names:
+    # safe defaults only (verify.check_gitconfig_text), the pinned bytes of a file kept beside this script, never derived from anything at build time.
+    gitconfig=(HERE/'environment'/'gitconfig').read_bytes()
+    verify.check_gitconfig_text(gitconfig)
+    if sha(gitconfig)!=pins['environment']['gitconfigSha256']:raise ValueError('environment/gitconfig does not match the pinned environment.gitconfigSha256')
+    tree.add(verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',gitconfig,False,'pinned:scripts/cowork-guest-artifact/environment/gitconfig')
+    tree.add(verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory',origin='derived:empty-git-template-directory')
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
     check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
     records=verify_elfs(tree)
     refuse_blkid(tree)
     refuse_provider_bridge(tree)
     verify.check_runtime_artifacts(tree_files(tree),tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data'])
+    verify.check_environment_gitconfig(tree_files(tree),pins['environment']['gitconfigSha256'])
     required=REQUIRED_PROGRAMS
     for path in required:
         target,node=tree.resolve(path)
@@ -486,6 +494,7 @@ def main():
     receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
     problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems
     receipt['packageLockSha256']=lock_sha
+    receipt['environment']={'gitconfigPath':'/etc/gitconfig','gitconfigSha256':sha(gitconfig)}
     (out/'packages.lock.json').write_bytes(lock_bytes)
     receipt['reproducibilityPinned']=not problems
     (out/'receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')

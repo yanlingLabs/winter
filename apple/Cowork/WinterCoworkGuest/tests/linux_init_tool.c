@@ -36,7 +36,9 @@ static int fsync_log(int fd) {
 static int fsync_fail(int fd) { (void)fd; fsync_calls++; return -1; }
 
 #ifdef WG_FILE_CHANNEL_V1
-static int own_chown(int fd, uid_t uid, gid_t gid, void *ctx) { (void)ctx; return fchown(fd, uid, gid); }
+/* A non-root test cannot give the plan view to the conversation's tool uid (41001): it asks for it, and `stored` says what the file system will report. */
+static int own_chown(int fd, uid_t uid, gid_t gid, void *ctx) { (void)ctx; return fchown(fd, uid >= 41000 ? getuid() : uid, gid >= 41000 ? getgid() : gid); }
+static void own_stored(uid_t *uid, gid_t *gid, void *ctx) { (void)ctx; if (*uid >= 41000) *uid = getuid(); if (*gid >= 41000) *gid = getgid(); }
 #endif
 
 static int open_descriptors(void) {
@@ -164,12 +166,14 @@ int main(int argc, char **argv) {
         set.browse_uid = (uint32_t)strtoul(argv[2], NULL, 10);
         set.workspace_gid[0] = (uint32_t)strtoul(argv[3], NULL, 10);
         set.runtime_uid[0] = (uint32_t)getuid();
+        set.tool_uid[0] = 41001u;
         snprintf(set.session_id[0], sizeof set.session_id[0], "s1");
         for (int i = 4; i < argc && set.root_count[0] < WG_ROOTS_MAX; i++) snprintf(set.root_source[0][set.root_count[0]++], WG_ROOT_SOURCE_MAX + 1, "%s", argv[i]);
         sys_calls.fchown_fn = chown_log;                     /* the per-conversation directories: a non-root test cannot chown to another uid */
-        static const struct wg_dataroots_ops own = { NULL, own_chown, 0, 0 };
+        static const struct wg_dataroots_ops own = { NULL, own_chown, 0, 0, own_stored, NULL, 0 };
         struct wg_dataroots_ops mine = own;
         mine.owner = mine.parent_owner = getuid();
+        mine.owner_group = getgid();
         static struct wg_dataroots_ops installed;
         installed = mine;
         dataroots_ops = &installed;

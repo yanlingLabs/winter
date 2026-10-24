@@ -1,5 +1,5 @@
 """Read back actual newc metadata and contents independently of the encoder."""
-import argparse, hashlib, json, stat
+import argparse, hashlib, json, re, stat
 from pathlib import Path, PurePosixPath
 
 HERE=Path(__file__).resolve().parent
@@ -44,6 +44,50 @@ def check_runtime_artifacts(files,config_bytes):
         pins[key]=entry['sha256']
     if len(set(RUNTIME_ARTIFACT_PATHS.values()))!=3:raise ValueError('runtime artifact paths must be distinct')
     return pins
+
+# ---- the environment's fixed system gitconfig (agent-sdk SH6b mounts base/etc/gitconfig read-only into the process worker) ---------------------
+ENVIRONMENT_GITCONFIG_PATH='/opt/winter/environment/base/etc/gitconfig'
+GIT_TEMPLATE_DIRECTORY='/opt/winter/environment/base/usr/share/winter/git-empty-template'   # init.templateDir below: an empty, root-owned directory, so git never makes .git/hooks
+MAX_GITCONFIG_BYTES=64*1024                  # the tool launcher's own bound
+# The ONLY settings the file may carry, with their only values. Anything else (an include, includeIf, alias, hook path, fsmonitor command, credential helper, url rewrite,
+# core.sshCommand, core.pager, ...) is refused: the file is read by every git the tool side runs, so an extra line is an extra way to run something.
+GITCONFIG_SETTINGS={('init','templatedir'):'/usr/share/winter/git-empty-template',('core','hookspath'):'/dev/null',('core','fsmonitor'):'false',('credential','helper'):'',('protocol.ext','allow'):'never'}
+
+def check_gitconfig_text(data):
+    """The gitconfig text as git will read it: ASCII, bounded, only the settings above with exactly their values, each once. Returns the settings."""
+    if len(data)>MAX_GITCONFIG_BYTES:raise ValueError('gitconfig size out of bounds')
+    try:text=data.decode('ascii')
+    except UnicodeDecodeError as error:raise ValueError('gitconfig is not ASCII') from error
+    if not text.endswith('\n') or '\r' in text or '\0' in text or '\\' in text:raise ValueError('gitconfig is not plain LF text without continuations')
+    section=None;found={}
+    for line in text.split('\n')[:-1]:
+        line=line.strip()
+        if not line or line.startswith('#'):continue
+        if line.startswith('['):
+            match=re.fullmatch(r'\[([A-Za-z0-9-]+)(?: "([A-Za-z0-9._-]+)")?\]',line)
+            if match is None:raise ValueError('gitconfig section is not plain: '+line)
+            section=match.group(1).lower()+('.'+match.group(2) if match.group(2) else '');continue
+        match=re.fullmatch(r'([A-Za-z][A-Za-z0-9-]*)[ \t]*=[ \t]*([^#;"]*?)[ \t]*',line)
+        if match is None:raise ValueError('gitconfig line is not a plain setting: '+line)
+        key=(section,match.group(1).lower())
+        if key in found:raise ValueError('gitconfig setting is repeated: '+line)
+        found[key]=match.group(2)
+    # (an unknown key or a changed value is a difference from the allowed settings)
+    if found!=GITCONFIG_SETTINGS:raise ValueError('gitconfig does not carry exactly the allowed settings and values')
+    return found
+
+def check_environment_gitconfig(files,expected_sha256):
+    """The file as the tool launcher will meet it (regular, single link, root-owned, not group or other writable, at most 64 KiB) with the pinned bytes, and the empty
+    template directory it names (root-owned, not writable, with nothing in it). `files` is the same map check_runtime_artifacts reads."""
+    found=files.get(ENVIRONMENT_GITCONFIG_PATH)
+    if found is None or found['kind']!='file':raise ValueError('environment gitconfig missing or not a regular file')
+    if found['uid'] or found['gid'] or found['nlink']!=1 or found['mode']&0o022:raise ValueError('environment gitconfig is not a root-owned single-link file nobody else can write')
+    if not 0<found['size']<=MAX_GITCONFIG_BYTES:raise ValueError('environment gitconfig size out of bounds')
+    if found['sha256']!=expected_sha256:raise ValueError('environment gitconfig bytes do not match their pin')
+    template=files.get(GIT_TEMPLATE_DIRECTORY)
+    if template is None or template['kind']!='directory' or template['uid'] or template['gid'] or template['mode']&0o022:raise ValueError('git template directory is missing or not a root-owned read-only directory')
+    if any(path.startswith(GIT_TEMPLATE_DIRECTORY+'/') for path in files):raise ValueError('git template directory is not empty')
+    return expected_sha256
 
 def verify(root,pinned_init=None,require_init=True,allow_unpinned=False):
     """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
@@ -101,6 +145,11 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False):
         if config_bytes is None:raise ValueError('runtime artifacts file missing from the cpio')
         runtime=check_runtime_artifacts(records,config_bytes)
         if runtime!={key:value['sha256'] for key,value in receipt['hostQuery']['artifacts'].items()}:raise ValueError('receipt does not describe the runtime artifacts')
+    environment=None
+    if receipt.get('environment') is not None:   # a root built with the environment's gitconfig must carry exactly the pinned one
+        pinned=json.loads((HERE/'pins.json').read_text())['environment']['gitconfigSha256']
+        if receipt['environment'].get('gitconfigSha256')!=pinned:raise ValueError('receipt does not describe the pinned environment gitconfig')
+        environment=check_environment_gitconfig(records,pinned)
     return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'runtimeArtifacts':runtime}
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned),sort_keys=True))

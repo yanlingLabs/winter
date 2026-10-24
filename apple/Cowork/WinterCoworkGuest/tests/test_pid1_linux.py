@@ -257,6 +257,9 @@ class FileChannelPid1Tests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="guest-pid1-fc-case-"))
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # The workspace is shared by the whole class, and the plan view's record of epochs is the disk itself: an epoch an earlier test made (rightly) makes every lower one stale, so each
+        # test starts with no plan folder, as a fresh data volume would.
+        shutil.rmtree(self.workspace / "plan", ignore_errors=True)
 
     def run_tool(self, *args):
         result = subprocess.run([str(self.tool), *map(str, args)], capture_output=True, text=True, timeout=60)
@@ -411,6 +414,25 @@ class FileChannelPid1Tests(unittest.TestCase):
         mode = stat.S_IMODE(os.stat(self.workspace / "repos/on").st_mode)
         self.assertEqual((mode, os.stat(self.workspace / "repos/on").st_gid), (0o2770, os.getgid()))
         self.assertEqual(self.roots(40001, "/etc/passwd"), "-1")
+
+    def test_the_plan_view_is_made_by_pid_1_for_its_own_conversation_and_an_earlier_epoch_never_again(self):
+        """Through op_prepare_conversation_dirs (the conversation here is `s1`): /workspace/plan/s1/<epoch> (the conversation's tool uid, 0700) below /workspace/plan and /workspace/plan/s1 (root, 0711); a stale epoch refused.
+        The tool does not run as root, so what the file system keeps is the invoking user's; the owner PID 1 asks for (41001) is covered by test_filechannel's request log."""
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/3"), "0")
+        view = self.workspace / "plan/s1/3"
+        self.assertEqual(stat.S_IMODE(view.stat().st_mode), 0o700)
+        self.assertEqual((stat.S_IMODE((self.workspace / "plan").stat().st_mode), stat.S_IMODE((self.workspace / "plan/s1").stat().st_mode)), (0o711, 0o711))
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/2"), "-1")        # below 3
+        self.assertFalse((self.workspace / "plan/s1/2").exists())
+        self.assertEqual(self.roots(40001, "/workspace/plan/other/1"), "-1")     # not this conversation's
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/4"), "0")
+        self.assertEqual(sorted(p.name for p in (self.workspace / "plan/s1").iterdir()), ["3", "4"])
+
+    def test_a_workspace_without_a_browse_uid_still_gets_its_plan_view_and_no_other_root(self):
+        self.assertEqual(self.roots(0, "/workspace/repos/off2", "/workspace/plan/s1/9"), "0")
+        self.assertTrue((self.workspace / "plan/s1/9").is_dir())
+        self.assertFalse((self.workspace / "repos/off2").exists())
+        self.assertEqual(self.roots(0, "/workspace/plan/s1/8"), "-1")                              # stale on this path too
 
 
 if __name__ == "__main__":

@@ -155,7 +155,7 @@ class VectorTests(unittest.TestCase):
         for name in ("mux-frames.json", "bootstrap-order.json", "runtime-flow.json"):
             pin = VECTOR_PINS["files"][name]
             self.assertEqual(hashlib.sha256((VECTORS / name).read_bytes()).hexdigest(), pin["sha256"], name)
-            self.assertEqual(pin["sourceBranch"], "cowork/n2-contract-v3")
+            self.assertEqual(pin["sourceBranch"], "cowork/output-integration")
             self.assertRegex(pin["sourceCommit"], r"^[0-9a-f]{40}$")
             self.assertEqual(pin["sourcePath"], "packages/core/test/cowork/native/vectors/" + name)
             commits.add(pin["sourceCommit"])
@@ -1639,9 +1639,10 @@ class ConversationSetTests(unittest.TestCase):
         self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), message["browseUid"] or 0)
         at += 4
         item = message["conversations"][0]
-        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["workspaceGid"])
-        self.assertEqual(payload[at + 4], len(item["roots"]))
-        at += 5
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["toolUid"])            # the owner of the conversation's plan view
+        self.assertEqual(int.from_bytes(payload[at + 4:at + 8], "little"), item["workspaceGid"])
+        self.assertEqual(payload[at + 8], len(item["roots"]))
+        at += 9
         for root in item["roots"]:
             source = root["source"].encode()
             self.assertEqual((payload[at], payload[at + 1:at + 1 + len(source)]), (len(source), source))
@@ -1729,7 +1730,10 @@ class ConversationSetTests(unittest.TestCase):
                             ("a control character", "/workspace/folders/\u0001x"), ("over 1024 bytes", "/workspace/folders/" + "a" * 1100), ("outside the workspace", "/etc/x"), ("relative", "workspace/folders/x")):
             with self.subTest(label):
                 self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
-        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * (255 - len("/workspace/folders/"))))
+        long_path = "/workspace/folders/" + "/".join(["a" * 60] * 3) + "/" + "b" * (255 - len("/workspace/folders/") - 183)         # 255 bytes in components of at most 64 (PID 1's limit)
+        self.assertEqual(len(long_path), 255)
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", long_path))
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 65))              # one component over 64: PID 1 refuses it
 
     def test_a_root_source_pid_1_would_refuse_is_refused_here_and_answered_bad_conversations(self):
         item = lambda m: m["conversations"][0]
@@ -1742,6 +1746,7 @@ class ConversationSetTests(unittest.TestCase):
         tools = "bootstrap-down-conversations-tools-only"
         item = lambda m: m["conversations"][0]
         def set_roots(m, *roots):
+            item(m)["policy"] = "ask"                                 # a writable root is refused under plan (contract 12.3a); these cases are about the views
             item(m)["roots"] = [{"id": "root-%d" % i, "guestPath": g, "source": g, "readOnly": False} for i, g in enumerate(roots)]
         sid = "conv-0001"
         for label, roots in (("memory", ["/workspace/.winter/memory"]), ("scratch of this session", ["/workspace/.winter/scratch/" + sid]), ("outputs of this session", ["/workspace/outputs/" + sid]),
@@ -1764,6 +1769,46 @@ class ConversationSetTests(unittest.TestCase):
         self.accepted(lambda m: set_roots(m, *["/workspace/folders/r%d" % i for i in range(16)]), vector=tools)
         self.refused(lambda m: item(m).__setitem__("roots", []), vector=tools)
         self.refused(lambda m: item(m)["roots"][0].__setitem__("readOnly", 1), vector=tools)
+
+    def test_the_plan_view_is_admitted_only_as_this_conversations_one_writable_root_under_plan(self):
+        item = lambda m: m["conversations"][0]
+        sid = item(conversations_vector())["logicalSessionId"]
+        def plan(m, path=None, read_only=False, policy="plan", others_read_only=True, twice=False):
+            path = path or "/workspace/plan/%s/7" % sid
+            item(m)["policy"] = policy
+            for root in item(m)["roots"]:
+                root["readOnly"] = others_read_only
+            item(m)["roots"].append({"id": "plan-scratch", "guestPath": path, "source": path, "readOnly": read_only})
+            if twice:
+                other = "/workspace/plan/%s/8" % sid
+                item(m)["roots"].append({"id": "plan-scratch-2", "guestPath": other, "source": other, "readOnly": False})
+        self.accepted(plan)
+        for epoch in ("0", "123456789"):
+            with self.subTest("accepts epoch " + epoch):
+                self.accepted(lambda m, e=epoch: plan(m, "/workspace/plan/%s/%s" % (sid, e)))
+        for label, path in (("a leading zero", "/workspace/plan/%s/07" % sid), ("ten digits", "/workspace/plan/%s/1234567890" % sid), ("a sign", "/workspace/plan/%s/+7" % sid),
+                            ("not a number", "/workspace/plan/%s/x" % sid), ("another conversation", "/workspace/plan/other-id/7"), ("nothing deeper", "/workspace/plan/%s/7/x" % sid),
+                            ("no epoch", "/workspace/plan/%s" % sid), ("the plan folder", "/workspace/plan")):
+            with self.subTest("refuses " + label):
+                self.refused(lambda m, p=path: plan(m, p))
+        self.refused(lambda m: plan(m, read_only=True))                         # the plan view is writable by definition
+        for policy in ("ask", "auto", "accept-edits", "dont-ask", "bypass"):
+            with self.subTest("refuses under " + policy):
+                self.refused(lambda m, p=policy: plan(m, policy=p))
+        self.refused(lambda m: plan(m, others_read_only=False))                 # under plan it is the ONLY writable root
+        self.refused(lambda m: plan(m, twice=True))                             # at most once
+        # PID 1 makes the directory from `source`, the supervisor admits the root by `guestPath`: for anything under /workspace/plan on either side they are one path.
+        def apart(m, guest, source):
+            plan(m)
+            item(m)["roots"][-1].update(guestPath=guest, source=source)
+        view = "/workspace/plan/%s/7" % sid
+        self.refused(lambda m: apart(m, view, "/workspace/plan/%s/8" % sid))         # the supervisor admits epoch 7, PID 1 makes epoch 8
+        self.refused(lambda m: apart(m, view, "/workspace/repos/elsewhere"))        # a plan view whose directory is somewhere else
+        self.refused(lambda m: apart(m, "/workspace/repos/elsewhere", view))        # an ordinary root whose directory PID 1 would treat as a plan view
+        def ordinary_with_plan_source(m):
+            item(m)["roots"][0]["source"] = "/workspace/plan/%s/9" % sid
+        self.refused(ordinary_with_plan_source)
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/plan"))
 
     def test_a_host_query_conversation_has_a_narrower_view_and_plan_is_read_only(self):
         item = lambda m: m["conversations"][0]
