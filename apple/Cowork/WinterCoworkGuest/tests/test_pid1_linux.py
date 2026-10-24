@@ -412,6 +412,24 @@ class FileChannelPid1Tests(unittest.TestCase):
         self.assertEqual((mode, os.stat(self.workspace / "repos/on").st_gid), (0o2770, os.getgid()))
         self.assertEqual(self.roots(40001, "/etc/passwd"), "-1")
 
+    def test_the_plan_view_is_made_by_pid_1_for_its_own_conversation_and_an_earlier_epoch_never_again(self):
+        """Through op_prepare_conversation_dirs (the conversation here is `s1`): /workspace/plan/s1/<epoch> as root:gid 02770 below parents 0711, a stale epoch refused."""
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/3"), "0")
+        view = self.workspace / "plan/s1/3"
+        self.assertEqual((stat.S_IMODE(view.stat().st_mode), view.stat().st_gid), (0o2770, os.getgid()))
+        self.assertEqual((stat.S_IMODE((self.workspace / "plan").stat().st_mode), stat.S_IMODE((self.workspace / "plan/s1").stat().st_mode)), (0o711, 0o711))
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/2"), "-1")        # below 3
+        self.assertFalse((self.workspace / "plan/s1/2").exists())
+        self.assertEqual(self.roots(40001, "/workspace/plan/other/1"), "-1")     # not this conversation's
+        self.assertEqual(self.roots(40001, "/workspace/plan/s1/4"), "0")
+        self.assertEqual(sorted(p.name for p in (self.workspace / "plan/s1").iterdir()), ["3", "4"])
+
+    def test_a_workspace_without_a_browse_uid_still_gets_its_plan_view_and_no_other_root(self):
+        self.assertEqual(self.roots(0, "/workspace/repos/off2", "/workspace/plan/s1/9"), "0")
+        self.assertTrue((self.workspace / "plan/s1/9").is_dir())
+        self.assertFalse((self.workspace / "repos/off2").exists())
+        self.assertEqual(self.roots(0, "/workspace/plan/s1/8"), "-1")                              # stale on this path too
+
 
 if __name__ == "__main__":
     unittest.main()

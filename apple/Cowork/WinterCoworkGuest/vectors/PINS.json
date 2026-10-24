@@ -2,22 +2,22 @@
   "files": {
     "bootstrap-order.json": {
       "sha256": "2475e6104387b901ff029cd0580849b5bc417a4aefd2e4a1b2019c45a1a0d2cb",
-      "sourceBranch": "cowork/n2-contract-v3",
-      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
+      "sourceBranch": "cowork/output-integration",
+      "sourceCommit": "2e8c5a73ec0fbe4217d099a3ba624ee0a2380377",
       "sourcePath": "packages/core/test/cowork/native/vectors/bootstrap-order.json",
       "sourceRepository": "yanlingLabs/winter"
     },
     "mux-frames.json": {
-      "sha256": "e0f92dff66a83bfd41ad9673fece53455b827fab3694250a2ea63a7c0b098b3e",
-      "sourceBranch": "cowork/n2-contract-v3",
-      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
+      "sha256": "851365e6db956810bfe33d2f006a953693a2c6b0f7568fca7d0bb926103dced3",
+      "sourceBranch": "cowork/output-integration",
+      "sourceCommit": "2e8c5a73ec0fbe4217d099a3ba624ee0a2380377",
       "sourcePath": "packages/core/test/cowork/native/vectors/mux-frames.json",
       "sourceRepository": "yanlingLabs/winter"
     },
     "runtime-flow.json": {
       "sha256": "06c79a37d3f34ac6a5ec8045101267e12a57a1b54b698e3cf8718248801fc4b6",
-      "sourceBranch": "cowork/n2-contract-v3",
-      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
+      "sourceBranch": "cowork/output-integration",
+      "sourceCommit": "2e8c5a73ec0fbe4217d099a3ba624ee0a2380377",
       "sourcePath": "packages/core/test/cowork/native/vectors/runtime-flow.json",
       "sourceRepository": "yanlingLabs/winter"
     },
