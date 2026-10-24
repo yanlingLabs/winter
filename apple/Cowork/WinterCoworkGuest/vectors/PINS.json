@@ -1,23 +1,23 @@
 {
   "files": {
     "bootstrap-order.json": {
-      "sha256": "36be531467c3ceb9d91f0f2cefb02ec40fba324878a021fe5247317a3c389ca4",
-      "sourceBranch": "cowork/n2-host-adapter",
-      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sha256": "2475e6104387b901ff029cd0580849b5bc417a4aefd2e4a1b2019c45a1a0d2cb",
+      "sourceBranch": "cowork/n2-contract-v3",
+      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
       "sourcePath": "packages/core/test/cowork/native/vectors/bootstrap-order.json",
       "sourceRepository": "yanlingLabs/winter"
     },
     "mux-frames.json": {
-      "sha256": "d80c4211b76f8b9074328ed57dc0f5a78b8bab9a3b6275aae850736c3bdf20e1",
-      "sourceBranch": "cowork/n2-host-adapter",
-      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sha256": "e0f92dff66a83bfd41ad9673fece53455b827fab3694250a2ea63a7c0b098b3e",
+      "sourceBranch": "cowork/n2-contract-v3",
+      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
       "sourcePath": "packages/core/test/cowork/native/vectors/mux-frames.json",
       "sourceRepository": "yanlingLabs/winter"
     },
     "runtime-flow.json": {
-      "sha256": "c72950ed10d800447bb17bf14a6a076ddf995e4f9d4e2de968c8a218452727b7",
-      "sourceBranch": "cowork/n2-host-adapter",
-      "sourceCommit": "6c1f04e807df3a10579d6f14a15e39652bd1c7a6",
+      "sha256": "06c79a37d3f34ac6a5ec8045101267e12a57a1b54b698e3cf8718248801fc4b6",
+      "sourceBranch": "cowork/n2-contract-v3",
+      "sourceCommit": "488986e88855609c75034630421899ae2369592b",
       "sourcePath": "packages/core/test/cowork/native/vectors/runtime-flow.json",
       "sourceRepository": "yanlingLabs/winter"
     },
@@ -30,5 +30,5 @@
     }
   },
   "formatVersion": 1,
-  "note": "The three S1 golden vectors are byte-identical copies of the contract branch (the guest copies the contract, never the other way round; edit nothing here, re-copy from the contract branch and update the pin in the same change). sdk-guided-config.json is not a contract file: it is derived from the agent SDK supervisor (see its entry)."
+  "note": "The three S1 golden vectors are byte-identical copies of the contract branch (the guest copies the contract, never the other way round; edit nothing here, re-copy from the contract branch and update the pin in the same change). They are the revision-3 copies (PR #115, re-pinned by FC3). sdk-guided-config.json is not a contract file: it is derived from the agent SDK supervisor (see its entry)."
 }

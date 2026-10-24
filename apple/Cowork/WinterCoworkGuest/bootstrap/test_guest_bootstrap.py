@@ -40,6 +40,16 @@ def deadline(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+# The contract vectors are revision 3 (`v` 2); this module's tests of them run the helper in the vocabulary an image with `file-channel-v1` speaks. The revision-2 helper (the
+# production guest, which refuses those messages with `version`) is held by FileChannelRevisionTests at the end of the module.
+def setUpModule():
+    gb.set_revision_three(True)
+
+
+def tearDownModule():
+    gb.set_revision_three(False)
+
+
 def load_vectors():
     raw = (VECTORS / "mux-frames.json").read_bytes()
     pins = json.loads((VECTORS / "PINS.json").read_text())
@@ -145,7 +155,7 @@ class VectorTests(unittest.TestCase):
         for name in ("mux-frames.json", "bootstrap-order.json", "runtime-flow.json"):
             pin = VECTOR_PINS["files"][name]
             self.assertEqual(hashlib.sha256((VECTORS / name).read_bytes()).hexdigest(), pin["sha256"], name)
-            self.assertEqual(pin["sourceBranch"], "cowork/n2-host-adapter")
+            self.assertEqual(pin["sourceBranch"], "cowork/n2-contract-v3")
             self.assertRegex(pin["sourceCommit"], r"^[0-9a-f]{40}$")
             self.assertEqual(pin["sourcePath"], "packages/core/test/cowork/native/vectors/" + name)
             commits.add(pin["sourceCommit"])
@@ -161,7 +171,13 @@ class VectorTests(unittest.TestCase):
                                       ("bootstrap-up-fault-supervisor-failed", "up", "fault"), ("bootstrap-up-fault-second-conversations", "up", "fault"),
                                       ("bootstrap-up-fault-bad-plan", "up", "fault"), ("bootstrap-up-fault-probe-failed", "up", "fault"),
                                       ("bootstrap-up-fault-format-failed", "up", "fault"), ("bootstrap-up-fault-replay-failed", "up", "fault"),
-                                      ("bootstrap-up-fault-mount-failed", "up", "fault"), ("bootstrap-up-fault-internal", "up", "fault")):
+                                      ("bootstrap-up-fault-mount-failed", "up", "fault"), ("bootstrap-up-fault-internal", "up", "fault"),
+                                      ("bootstrap-down-shares", "down", "shares"), ("bootstrap-up-shares-mounted", "up", "shares_mounted"),
+                                      ("bootstrap-down-conversations-browse-uid", "down", "conversations"), ("bootstrap-down-conversations-resume", "down", "conversations"),
+                                      ("bootstrap-down-conversations-either", "down", "conversations"), ("bootstrap-down-conversations-timeout-a-day", "down", "conversations"),
+                                      ("bootstrap-up-runtime-ready-resumed", "up", "runtime_ready"), ("bootstrap-up-fault-share-inventory", "up", "fault"),
+                                      ("bootstrap-up-fault-share-mount-failed", "up", "fault"), ("bootstrap-up-fault-resume-store-missing", "up", "fault"),
+                                      ("bootstrap-up-fault-fresh-store-not-empty", "up", "fault")):
             with self.subTest(name):
                 payload = payload_of(POSITIVE[name])
                 message = gb.parse_bootstrap_message(payload, direction)
@@ -186,7 +202,7 @@ class VectorTests(unittest.TestCase):
 
     def test_every_bootstrap_positive_vector_is_covered(self):
         names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1]
-        self.assertEqual(len(names), 18)
+        self.assertEqual(len(names), 29)
         for name in names:
             with self.subTest(name):
                 direction = next(v["direction"] for v in VECTOR_DATA["positive"] if v["name"] == name)
@@ -245,7 +261,7 @@ class VectorTests(unittest.TestCase):
         protocol = REPO / "packages/core/src/cowork/native/protocol.ts"
         if protocol.exists():
             faults = re.search(r"COWORK_NATIVE_BOOTSTRAP_FAULTS = Object\.freeze\(\[([^\]]*)\]", protocol.read_text()).group(1)
-            self.assertEqual(tuple(re.findall(r'"([^"]+)"', faults)), gb.FAULT_CODES)
+            self.assertEqual(tuple(re.findall(r'"([^"]+)"', faults)), gb.FAULT_CODES_V3)
 
 
 class MessageParserTests(unittest.TestCase):
@@ -266,12 +282,12 @@ class MessageParserTests(unittest.TestCase):
 
     def test_duplicate_keys_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
-        self.refused(text.replace('"v":1,', '"v":1,"v":1,').encode(), "malformed")
+        self.refused(text.replace('"v":2,', '"v":2,"v":2,').encode(), "malformed")
 
     def test_float_and_exponent_spellings_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
-        self.refused(text.replace('"v":1', '"v":1.0').encode(), "malformed")
-        self.refused(text.replace('"v":1', '"v":1e0').encode(), "malformed")
+        self.refused(text.replace('"v":2', '"v":2.0').encode(), "malformed")
+        self.refused(text.replace('"v":2', '"v":2e0').encode(), "malformed")
 
     def test_whitespace_and_alternate_escapes_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
@@ -280,27 +296,28 @@ class MessageParserTests(unittest.TestCase):
 
     def test_reordered_keys_are_malformed_even_though_the_key_set_is_right(self):
         ready = self.ready()
-        reordered = {"v": 1, "t": "ready", "nonce": ready["nonce"], "operationId": ready["operationId"]}
+        reordered = {"v": 2, "t": "ready", "nonce": ready["nonce"], "operationId": ready["operationId"]}
         self.refused(gb.canonical_text(reordered).encode(), "malformed")
 
     def test_non_ascii_is_refused(self):
-        self.refused('{"v":1,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}'.encode() if False else
-                     ('{"v":1,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}').encode(), "malformed")
+        self.refused(('{"v":2,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}').encode(), "malformed")
 
     def test_nesting_beyond_eight_levels_is_malformed(self):
-        deep = '{"v":1,"t":"ready","operationId":"a","nonce":"' + "0" * 32 + '","x":' + "[" * 9 + "]" * 9 + "}"
+        deep = '{"v":2,"t":"ready","operationId":"a","nonce":"' + "0" * 32 + '","x":' + "[" * 9 + "]" * 9 + "}"
         self.refused(deep.encode(), "malformed")
 
     def test_dangerous_keys_are_malformed(self):
-        self.refused(b'{"v":1,"t":"ready","__proto__":1}', "malformed")
+        self.refused(b'{"v":2,"t":"ready","__proto__":1}', "malformed")
 
     def test_unknown_type_extra_key_and_bad_nonce(self):
-        self.refused(b'{"v":1,"t":"explode"}', "unknown_type")
+        self.refused(b'{"v":2,"t":"explode"}', "unknown_type")
         ready = self.ready()
         self.refused(gb.canonical_text({**ready, "extra": 1}).encode(), "bad_field")
         self.refused(gb.canonical_text({**ready, "nonce": "0F" * 16}).encode(), "bad_field")
         self.refused(gb.canonical_text({**ready, "nonce": "0" * 31}).encode(), "bad_field")
-        self.refused(gb.canonical_text({**ready, "v": 2}).encode(), "bad_field")
+        self.refused(gb.canonical_text({**ready, "v": 1}).encode(), "version")     # a peer one revision behind is told `version`, judged before the schema
+        self.refused(gb.canonical_text({**ready, "v": 3}).encode(), "version")
+        self.refused(gb.canonical_text({**ready, "v": "2"}).encode(), "version")
 
     def test_direction_decides_which_types_exist(self):
         self.refused(payload_of(POSITIVE["bootstrap-up-mounted"]), "unknown_type", "down")
@@ -1613,15 +1630,32 @@ class ConversationSetTests(unittest.TestCase):
             self.assertEqual(list(item), ["logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots"])
 
     def test_the_message_to_pid_1_has_the_documented_layout(self):
-        payload = gb.conversations_payload(self.parsed())
-        self.assertEqual(payload[:2], bytes([2, 1]))
+        message = self.parsed()
+        payload = gb.conversations_payload(message)
+        self.assertEqual(payload[:2], bytes([2 | 0x80, 1]))                  # profile 2, bit 7: the file channel's extension follows the conversation records
         self.assertEqual(payload[2:6], (20000).to_bytes(4, "little"))
         self.assertEqual((payload[6], payload[7:16]), (9, b"conv-0001"))
-        items = json.loads(payload[16:])
+        at = 16
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), message["browseUid"] or 0)
+        at += 4
+        item = message["conversations"][0]
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["workspaceGid"])
+        self.assertEqual(payload[at + 4], len(item["roots"]))
+        at += 5
+        for root in item["roots"]:
+            source = root["source"].encode()
+            self.assertEqual((payload[at], payload[at + 1:at + 1 + len(source)]), (len(source), source))
+            at += 1 + len(source)
+        items = json.loads(payload[at:])
         self.assertEqual(items[0]["logicalSessionId"], "conv-0001")
         payload = gb.conversations_payload(self.parsed("bootstrap-down-conversations-tools-only"))
-        self.assertEqual(payload[:2], bytes([0, 2]))
-        self.assertTrue(payload.isascii())
+        self.assertEqual(payload[:2], bytes([0x80, 2]))
+        self.assertTrue(payload[payload.index(b'[{"'):].isascii())             # the items array stays printable ASCII
+        gb.set_revision_three(False)                                          # the revision-2 helper sends the plain payload, byte for byte as before
+        try:
+            self.assertEqual(gb.conversations_payload({**message, "profile": "host-query-v1"})[:2], bytes([1, 1]))
+        finally:
+            gb.set_revision_three(True)
 
     def test_the_items_are_printable_ascii_and_within_the_config_budget(self):
         for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
@@ -1662,7 +1696,7 @@ class ConversationSetTests(unittest.TestCase):
         self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", True))
         self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", 0))
         self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 0))
-        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600001))
+        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 86_400_001))
         self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 1))
         self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600000))
         for key in ("runtimeUid", "toolUid", "workspaceGid"):
@@ -1695,7 +1729,14 @@ class ConversationSetTests(unittest.TestCase):
                             ("a control character", "/workspace/folders/\u0001x"), ("over 1024 bytes", "/workspace/folders/" + "a" * 1100), ("outside the workspace", "/etc/x"), ("relative", "workspace/folders/x")):
             with self.subTest(label):
                 self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
-        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 1000))
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * (255 - len("/workspace/folders/"))))
+
+    def test_a_root_source_pid_1_would_refuse_is_refused_here_and_answered_bad_conversations(self):
+        item = lambda m: m["conversations"][0]
+        too_long = "/workspace/repos/" + "a" * (256 - len("/workspace/repos/"))
+        for label, path in (("256 bytes", too_long), ("a space", "/workspace/repos/a b"), ("a colon", "/workspace/repos/a:b"), ("no component", "/workspace/")):
+            with self.subTest(label):
+                self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
 
     def test_the_supervisors_view_rules(self):
         tools = "bootstrap-down-conversations-tools-only"
@@ -1883,7 +1924,10 @@ class ConversationSessionTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E", "C", "runtime_ready"])
         self.assertEqual(channel.sent[5][1], gb.conversations_payload(gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-guided"]), "down")))
-        self.assertEqual(channel.sent[-1][1], payload_of(POSITIVE["bootstrap-up-runtime-ready"]))
+        # the vector's `continuations` is [] (its set is tools-only); a host-query conversation is run fresh by this guest and says so
+        expected = json.loads(payload_of(POSITIVE["bootstrap-up-runtime-ready"]))
+        expected["continuations"] = ["fresh"]
+        self.assertEqual(channel.sent[-1][1], gb.canonical_text(expected).encode())
 
     def test_a_tools_only_set_reports_how_many_conversations_the_supervisor_serves(self):
         status, channel = self.run_session([down("bootstrap-down-conversations-tools-only"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 2]))])
@@ -1906,6 +1950,13 @@ class ConversationSessionTests(unittest.TestCase):
         self.assertEqual([k for k in self.kinds(channel) if k == "C"], ["C"])
         status, channel = self.run_session([down("bootstrap-down-conversations-guided"), down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
         self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:second_conversations"])   # one that arrived while PID 1 was busy
+
+    def test_a_root_source_pid_1_would_refuse_is_answered_bad_conversations_without_bothering_pid_1(self):
+        body = conversations_vector()
+        body["conversations"][0]["roots"][0]["source"] = "/workspace/repos/" + "a" * 240
+        status, channel = self.run_session([(gb.TAG_DOWN, conversations_body(body))])
+        self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:bad_conversations"))
+        self.assertNotIn("C", self.kinds(channel))
 
     def test_an_unbound_or_invalid_set_is_refused_without_bothering_pid_1(self):
         wrong_nonce = conversations_vector()
@@ -1952,7 +2003,7 @@ def time_now():
 
 ORDER_VECTORS = json.loads((VECTORS / "bootstrap-order.json").read_text())
 ORDER_STEPS = {"hello": ("up", None), "plan": ("down", "hello"), "receipt": ("up", "plan"), "ready": ("down", "receipt"), "mounted": ("up", "ready"),
-               "conversations": ("down", "mounted"), "runtime_ready": ("up", "conversations")}
+               "shares": ("down", "mounted"), "shares_mounted": ("up", "shares"), "conversations": ("down", "mounted"), "runtime_ready": ("up", "conversations")}
 
 
 def bootstrap_order(events):
@@ -1969,6 +2020,11 @@ def bootstrap_order(events):
         if kind in seen:
             return {"ok": False, "index": index, "reason": {"conversations": "second_conversations", "runtime_ready": "duplicate_runtime_ready"}.get(kind, "out_of_order")}
         if step[1] is not None and step[1] not in seen:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        # Shares (revision 3) are optional, but when they are sent they come before the set, and the set waits for `shares_mounted`.
+        if kind == "shares" and "conversations" in seen:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        if kind == "conversations" and "shares" in seen and "shares_mounted" not in seen:
             return {"ok": False, "index": index, "reason": "out_of_order"}
         seen.add(kind)
     return {"ok": True}
@@ -2001,13 +2057,20 @@ class RecordingChannel(FakeChannel):
 
 
 class BootstrapOrderVectorTests(unittest.TestCase):
-    """bootstrap-order.json: 16 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
-    cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason."""
+    """bootstrap-order.json: 25 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
+    cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason. The nine transcripts that carry host-backed
+    `shares` need a guest that mounts shares (SH6); this guest answers `shares` with the share-inventory fault and mounts nothing, which
+    test_a_shares_message_is_answered_with_the_share_inventory_fault holds, so they are left out of the tests that complete a transcript."""
     BOOT = "66666666-6666-4666-8666-666666666666"
+    @staticmethod
+    def with_shares(case):
+        return any(e["t"] in ("shares", "shares_mounted") for e in case["events"])
+
     BODIES = {"plan": lambda: payload_of(POSITIVE["bootstrap-down-plan"]), "ready": lambda: payload_of(POSITIVE["bootstrap-down-ready"]),
+              "shares": lambda: payload_of(POSITIVE["bootstrap-down-shares"]),
               "conversations": lambda: payload_of(POSITIVE["bootstrap-down-conversations-guided"]),
               "mounted": lambda: payload_of(POSITIVE["bootstrap-up-mounted"]),
-              "reboot": lambda: gb.canonical_text({"v": 1, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
+              "reboot": lambda: gb.canonical_text({"v": 2, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
 
     def inputs_for(self, events):
         """The channel the transcript's `down` events make: PID 1's mount and supervisor answers come after the message that asks for them."""
@@ -2039,7 +2102,7 @@ class BootstrapOrderVectorTests(unittest.TestCase):
         return channel
 
     def test_the_port_of_the_oracle_gives_every_recorded_result(self):
-        self.assertEqual(len(ORDER_VECTORS["cases"]), 16)
+        self.assertEqual(len(ORDER_VECTORS["cases"]), 25)
         for case in ORDER_VECTORS["cases"]:
             with self.subTest(case["name"]):
                 self.assertEqual(bootstrap_order([(e["dir"], e["t"]) for e in case["events"]]), case["result"])
@@ -2048,7 +2111,7 @@ class BootstrapOrderVectorTests(unittest.TestCase):
         not_applicable = {"plan-before-hello"}   # the guest sends `hello` before it reads anything, so a plan can never be the first message of its transcript
         names = []
         for case in ORDER_VECTORS["cases"]:
-            if case["name"] in not_applicable:
+            if case["name"] in not_applicable or self.with_shares(case):
                 continue
             names.append(case["name"])
             with self.subTest(case["name"]):
@@ -2079,7 +2142,7 @@ class BootstrapOrderVectorTests(unittest.TestCase):
 
     def test_the_guest_says_runtime_ready_only_for_a_set_that_came_after_mounted(self):
         for case in ORDER_VECTORS["cases"]:
-            if case["name"] == "plan-before-hello":
+            if case["name"] == "plan-before-hello" or self.with_shares(case):
                 continue
             with self.subTest(case["name"]):
                 events = [(e["dir"], e["t"]) for e in case["events"]]
@@ -2088,6 +2151,14 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                     at = merged.index(("up", "runtime_ready"))
                     self.assertIn(("down", "conversations"), merged[:at])
                     self.assertIn(("up", "mounted"), merged[:merged.index(("down", "conversations"))])
+
+    def test_a_shares_message_is_answered_with_the_share_inventory_fault(self):
+        """The guest has no share support (SH6): after `mounted` a `shares` message gets `share_inventory`, nothing is mounted, and no `shares_mounted` is ever said."""
+        events = [("down", "plan"), ("down", "ready"), ("up", "mounted"), ("down", "shares")]
+        channel = self.run_guest(events)
+        ups = [gb.parse_bootstrap_message(body, "up") for tag, body in channel.sent if tag == gb.TAG_UP]
+        self.assertEqual([m["t"] + (":" + m["code"] if m["t"] == "fault" else "") for m in ups], ["hello", "receipt", "mounted", "fault:share_inventory"])
+        self.assertNotIn("shares_mounted", [m["t"] for m in ups])
 
     def test_exact_outputs_for_the_violations_by_the_host(self):
         expect = {
@@ -2109,6 +2180,135 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                         message = gb.parse_bootstrap_message(body, "up")
                         got.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
                 self.assertEqual(got, ups)
+
+
+class FileChannelRevisionTests(unittest.TestCase):
+    """Revision 3 of the bootstrap vocabulary is spoken only with `--file-channel-v1` (an image that declares `file-channel-v1`). The production helper is revision 2, byte for byte
+    what it was: the module-level setUp switches this module to revision 3, so these tests switch back where they need to, and restore."""
+    BOOT = "66666666-6666-4666-8666-666666666666"
+
+    def revision_two(self):
+        gb.set_revision_three(False)
+        self.addCleanup(gb.set_revision_three, True)
+
+    def downgraded(self, name):
+        """The revision-2 spelling of a revision-3 conversations vector: `v` 1, no browseUid, no cold-resume fields, the 600 s ceiling."""
+        message = json.loads(payload_of(POSITIVE[name]))
+        message["v"] = 1
+        message.pop("browseUid", None)
+        for item in message["conversations"]:
+            if item["runtime"] is not None:
+                item["runtime"].pop("continuation", None)
+                item["runtime"].pop("endedGuestBoots", None)
+                item["runtime"]["timeoutMs"] = min(item["runtime"]["timeoutMs"], 600_000)
+        return message
+
+    def test_the_revision_two_helper_is_the_old_helper(self):
+        self.revision_two()
+        self.assertEqual(gb.BOOTSTRAP_VERSION, 1)
+        ready = json.loads(payload_of(POSITIVE["bootstrap-down-ready"]))
+        ready["v"] = 1
+        self.assertEqual(gb.parse_bootstrap_message(gb.canonical_text(ready).encode(), "down")["v"], 1)
+        conversations = self.downgraded("bootstrap-down-conversations-guided")
+        self.assertEqual(gb.parse_bootstrap_message(gb.canonical_text(conversations).encode(), "down")["t"], "conversations")
+        payload = gb.conversations_payload(gb.parse_bootstrap_message(gb.canonical_text(conversations).encode(), "down"))
+        self.assertEqual(payload[:2], bytes([2, 1]))                                   # the plain payload: no bit 7, no extension
+        self.assertTrue(payload.isascii())
+        self.assertEqual(gb.FAULT_CODES, gb.FAULT_CODES_V3[:len(gb.FAULT_CODES)])
+        base = {"operationId": "filesystem_55555555-5555-4555-8555-555555555555", "nonce": "0f" * 16}
+        for code in gb.FAULT_CODES_V3[len(gb.FAULT_CODES):]:
+            with self.assertRaises(ValueError):
+                gb.encode_bootstrap_message({"t": "fault", "code": code, **base})   # the four new codes do not exist in revision 2
+
+    def test_the_revision_two_helper_refuses_every_revision_three_message_it_is_sent(self):
+        self.revision_two()
+        names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1 and v["direction"] == "down" and v["name"] != "bootstrap-down-plan"]
+        self.assertGreaterEqual(len(names), 7)
+        for name in names:
+            with self.subTest(name):
+                with self.assertRaises(gb.ProtocolError):
+                    gb.parse_bootstrap_message(payload_of(POSITIVE[name]), "down")
+
+    def test_the_revision_three_helper_refuses_every_revision_two_message_with_version(self):
+        ready = json.loads(payload_of(POSITIVE["bootstrap-down-ready"]))
+        ready["v"] = 1
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(gb.canonical_text(ready).encode(), "down")
+        self.assertEqual(caught.exception.code, "version")
+
+    def test_configure_selects_the_vocabulary_from_the_command_line(self):
+        base = ["--channel-fds", "3,4", "--data", "/dev/vda:254:0", "--environment", "/dev/vdb:254:16"]
+        self.addCleanup(gb.set_revision_three, True)
+        gb.configure(base)
+        self.assertEqual((gb.REVISION_THREE, gb.BOOTSTRAP_VERSION), (False, 1))
+        gb.configure(base + ["--file-channel-v1"])
+        self.assertEqual((gb.REVISION_THREE, gb.BOOTSTRAP_VERSION), (True, 2))
+        gb.configure(base)
+        self.assertEqual(gb.REVISION_THREE, False)
+
+    def test_the_flag_switches_the_revision_and_only_the_flag(self):
+        base = ["--channel-fds", "3,4", "--data", "/dev/vda:254:0", "--environment", "/dev/vdb:254:16"]
+        flags = {}
+        gb.parse_arguments(base, flags)
+        self.assertEqual(flags, {"file_channel_v1": False})
+        flags = {}
+        self.assertEqual(gb.parse_arguments(base + ["--file-channel-v1"], flags)[:2], (3, 4))
+        self.assertEqual(flags, {"file_channel_v1": True})
+        flags = {}
+        gb.parse_arguments(["--file-channel-v1"] + base, flags)
+        self.assertEqual(flags, {"file_channel_v1": True})
+        for bad in (base + ["--file-channel-v1", "--file-channel-v1"], base + ["--file-channel-v1=1"], base + ["--file-channel-v2"]):
+            with self.assertRaises(gb.Refused):
+                gb.parse_arguments(bad, {})
+        self.assertEqual(gb.main(["--channel-fds", "3"]), 64)
+        gb.set_revision_three(True)
+
+    def run_session(self, name):
+        incoming = [down("bootstrap-down-plan"), down("bootstrap-down-ready"), (gb.TAG_MOUNT_RESULT, b"\x01"), down(name), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))]
+
+        class D:
+            def close(self):
+                pass
+
+        channel = FakeChannel(incoming)
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        session.run()
+        return channel
+
+    def faults(self, channel):
+        out = []
+        for tag, body in channel.sent:
+            if tag == gb.TAG_UP:
+                message = gb.parse_bootstrap_message(body, "up")
+                out.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
+        return out
+
+    def test_a_resume_has_no_store_to_find_and_never_reaches_pid_1(self):
+        channel = self.run_session("bootstrap-down-conversations-resume")
+        self.assertEqual(self.faults(channel)[-1], "fault:resume_store_missing")
+        self.assertNotIn(gb.TAG_CONVERSATIONS, [tag for tag, _ in channel.sent])
+
+    def test_either_is_run_fresh_and_the_host_is_told_so(self):
+        channel = self.run_session("bootstrap-down-conversations-either")
+        self.assertEqual(self.faults(channel)[-1], "runtime_ready")
+        ready = json.loads(next(body for tag, body in reversed(channel.sent) if tag == gb.TAG_UP))
+        self.assertEqual(ready["continuations"], ["fresh"])
+
+    def test_the_roots_sent_to_pid_1_are_their_sources_not_their_views(self):
+        message = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-browse-uid"]), "down")
+        root = dict(message["conversations"][0]["roots"][0], guestPath="/workspace/folders/a-view", source="/workspace/repos/a-source")
+        message["conversations"][0]["roots"] = [root]
+        payload = gb.conversations_payload(message)
+        self.assertIn(b"\x19/workspace/repos/a-source", payload)               # length byte 25, then the source
+        self.assertNotIn(b"a-view", payload.split(b"[{")[0])
+
+    def test_a_browse_uid_reaches_pid_1_in_the_payload(self):
+        channel = self.run_session("bootstrap-down-conversations-browse-uid")
+        payload = next(body for tag, body in channel.sent if tag == gb.TAG_CONVERSATIONS)
+        message = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-browse-uid"]), "down")
+        self.assertNotEqual(message["browseUid"], None)
+        ids = sum(5 + len(item["logicalSessionId"]) for item in message["conversations"])
+        self.assertEqual(int.from_bytes(payload[2 + ids:6 + ids], "little"), message["browseUid"])
 
 
 if __name__ == "__main__":

@@ -21,11 +21,8 @@ export const COWORK_CLI_USAGE = `usage:
   winter workspace instructions get|provenance <workspaceId> [--json]
   winter workspace instructions update <workspaceId> --instruction-revision N --digest SHA256 (--content TEXT | --stdin | --content-file FILE) --request-id ID [--allow-empty] [--json]
   winter workspace operation get <workspaceId> <operationId> [--json]
-  winter workspace session create <workspaceId> --source ID [--cwd RELATIVE] --request-id ID [--json]
-  winter workspace session list <workspaceId> [--json]
 
-Creation is unavailable. A Cowork conversation is created with session create and then
-used by its session id (winter -p, attach); every production daemon refuses it today. Source provisioning is gated by the daemon; add commands
+Creation is unavailable. Source provisioning is gated by the daemon; add commands
 accept an existing opaque host selection ID. This CLI does not issue selections.
 Guidance input accepts one content source, at most ${COWORK_INSTRUCTION_MAX_BYTES} UTF-8 bytes with no NUL.
 --stdin reads to EOF; --stdin and --content-file keep guidance text out of argv.

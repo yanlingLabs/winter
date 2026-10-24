@@ -17,6 +17,7 @@
 #define WG_TRUSTED_CONFIG_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #define WG_CONFIG_MAX_BYTES 60000u      /* the supervisor refuses more than 65536 */
 #define WG_CONFIG_BASE_MAX 8192u
@@ -56,6 +57,12 @@ int wg_runtime_block_valid(unsigned profile, const char *text, size_t length);
 /* The per-conversation `guidanceDirectory` the supervisor requires of a guided conversation and refuses on any other (`runtime_config`): for profile 2 the
  * conversations text names exactly `count` of them, each WG_GUIDANCE_DIRECTORY; for any other profile it names none. Returns 1 when that holds. */
 int wg_guidance_members_ok(unsigned profile, unsigned count, const char *conversations, size_t length);
+
+#ifdef WG_FILE_CHANNEL_V1
+/* Adds `"fileChannel":{"browseUid":N,"dataDevice":D}` as the last member of a config built above (image with `file-channel-v1` only). `browse_uid` must be in the
+ * contract's unixId range and `data_device` non-zero; the config must not already name `fileChannel` (the static part is not allowed to). 0 = added. */
+int wg_add_file_channel(char *config, size_t length, size_t capacity, uint32_t browse_uid, uint64_t data_device, size_t *out_length);
+#endif
 
 /* A single balanced printable-ASCII JSON text of the given kind ('{' or '['), string-aware. */
 int wg_json_text_shape(const char *text, size_t length, char opening, size_t maximum);

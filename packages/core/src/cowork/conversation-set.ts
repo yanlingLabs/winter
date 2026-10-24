@@ -54,7 +54,7 @@ export const COWORK_GUEST_IDENTITIES = Object.freeze({ runtimeUid: 2001, toolUid
  *  supervisor before its CR2 release refuses more than 600000, so the host sends 600000 until the image pins CR2. */
 export const COWORK_GUEST_RUNTIME_TIMEOUT_MS = 600_000;
 
-type GuestToolClass = "read" | "write" | "execute";
+type GuestToolClass = "read" | "write" | "execute" | "coordinate";
 const CLASS_ORDER: readonly GuestToolClass[] = ["read", "write", "execute"];
 
 /** The guest supervisor's own derivation of tools from classes (`host_query_config`), in its order. */
@@ -151,6 +151,19 @@ export interface CoworkConversationSetInput {
   readonly offered: readonly string[];
   /** The provider route the door was built with. Production has none, and then nothing reaches this builder. */
   readonly route: CoworkProviderRoute;
+  /** The plan execution view's epoch (the policy machine's `epoch`): under plan, the conversation's own writable plan
+   *  scratch `/workspace/plan/<sid>/<epoch>` is mounted beside its read-only roots. Nothing passes it yet: the native
+   *  contract (`allowedView`, plan's read-only rule) and the supervisor do not admit that view, so a set carrying it is
+   *  refused on the wire (pinned). Ignored outside plan. */
+  readonly planScratchEpoch?: number;
+  /** #92 N3 (L7): the conversation's stable uids (`CoworkRepository.allocateGuestUids`). Absent: the fixed picks. */
+  readonly uids?: { readonly runtimeUid: number; readonly toolUid: number };
+}
+
+/** The plan scratch guest path of one conversation at one policy epoch (`/workspace/plan/<sid>/<epoch>`, outside `.winter`). */
+export function coworkPlanScratchPath(sessionId: string, epoch: number): string {
+  if (!Number.isSafeInteger(epoch) || epoch < 0) throw new CoworkError("invalid_request");
+  return `/workspace/plan/${sessionId}/${epoch}`;
 }
 
 /** The incarnation's conversation set for ONE source-located conversation (N2: a host-query set carries exactly one). */
@@ -166,6 +179,9 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
   const root = source === undefined
     ? Object.freeze({ id: "outputs", guestPath: cwd, source: cwd, readOnly: policy === "plan" })
     : Object.freeze({ id: source.sourceId, guestPath: cwd, source: cwd, readOnly: source.access === "read-only" || policy === "plan" });
+  const planRoot = policy === "plan" && input.planScratchEpoch !== undefined
+    ? (() => { const path = coworkPlanScratchPath(binding.sessionId, input.planScratchEpoch); return Object.freeze({ id: "plan-scratch", guestPath: path, source: path, readOnly: false }); })()
+    : undefined;
   const toolClasses = coworkGuestToolClassesFor(input.offered);
   const scope: CoworkProviderRouteScope = Object.freeze({
     homeId: input.homeId, workspaceId: context.workspaceId, sessionId: binding.sessionId, backendSessionId: input.backendSessionId,
@@ -183,8 +199,9 @@ export function coworkConversationFor(input: CoworkConversationSetInput): Cowork
     authority: Object.freeze({ workspaceId: context.workspaceId, sessionId: input.backendSessionId, incarnationId: context.incarnationId, leaseEpoch: context.leaseEpoch,
       configRevision: input.configRevision, grantRevision: input.grantRevision, policyRevision: input.policyRevision }),
     ...COWORK_GUEST_IDENTITIES,
+    ...(input.uids === undefined ? {} : { runtimeUid: input.uids.runtimeUid, toolUid: input.uids.toolUid }),
     policy,
-    roots: Object.freeze([root]),
+    roots: Object.freeze(planRoot === undefined ? [root] : [root, planRoot]),
     runtime: Object.freeze({ model: route.model, timeoutMs: COWORK_GUEST_RUNTIME_TIMEOUT_MS, toolClasses: Object.freeze(toolClasses),
       provider: Object.freeze(sorted({ scope, selection }) as Record<string, unknown>), guided: null,
       // Contract revision 3: a driver sends its set once per incarnation and the conversation never restarts on another (cold

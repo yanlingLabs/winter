@@ -23,7 +23,7 @@ test("happy path: the set goes out once after mounted, bound to the plan, and ru
   expect(sets.length).toBe(1);
   expect(sets[0]).toMatchObject({ profile: "host-query-guided-v1", incarnationId: running.incarnationId });
   expect(sets[0]!.conversations.length).toBe(1);
-  expect(contexts).toEqual([{ workspaceId: h.workspaceId, incarnationId: running.incarnationId, leaseEpoch: running.leaseEpoch, guestBootId: "66666666-6666-4666-8666-666666666666" }]);
+  expect(contexts).toEqual([{ workspaceId: h.workspaceId, incarnationId: running.incarnationId, leaseEpoch: running.leaseEpoch, guestBootId: running.guestBootId }]);
   const order = h.events.filter(event => ["host:ready-sent", "host:conversations-sent", "host:runtime-ready"].includes(event));
   expect(order).toEqual(["host:ready-sent", "host:conversations-sent", "host:runtime-ready"]);
   expect(h.records.get(h.workspaceId).power).toBe("running");

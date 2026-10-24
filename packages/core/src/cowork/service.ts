@@ -40,6 +40,9 @@ export interface CoworkHostPorts {
  *  callback (`CoworkGuestStartRequest`, asked once at `mounted`); the Cowork driver takes the narrower `CoworkGuestStarter`
  *  (session-ports.ts), whose result is the running incarnation. */
 export interface CoworkGuestStartPort { start(workspaceId: string, request?: CoworkGuestStartRequest): Promise<unknown> }
+/** Session door D4 fix: `resumeProvisioning`'s keyset page and its in-flight bound. */
+export const COWORK_PROVISION_PAGE = 64;
+export const COWORK_PROVISION_CONCURRENCY = 4;
 const NO_GRANTS: CoworkGrantResolver = { folder: () => undefined, repository: () => undefined };
 const RESPONSE_BUDGET = 128 * 1024;
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -247,7 +250,11 @@ export class CoworkWorkspaceService {
       throw error;
     }
   }
-  private readonly provisioning = new Map<string, Promise<void>>();
+  private readonly provisionDrives = new Map<string, Promise<void>>();
+  /** Operations whose port answered `applied` in this process: they wait for the guest, so `resumeProvisioning` leaves them
+   *  alone (a boot drives every pending creation once; within a process only the unanswered ones again). */
+  private readonly provisionApplied = new Set<string>();
+  private resuming: Promise<void> | undefined;
   /**
    * Session door D4c: run S7B's `provision(workspaceId, operationId)` for a committed creation, once at a time per operation.
    * Only with the port (no production host supplies it). Its answer is recorded through the operation:
@@ -261,23 +268,50 @@ export class CoworkWorkspaceService {
   private provisionAfterCommit(workspaceId: string, operationId: string): Promise<void> {
     const port = this.host.provisioning;
     if (port === undefined) return Promise.resolve();
-    const running = this.provisioning.get(operationId);
+    const running = this.provisionDrives.get(operationId);
     if (running !== undefined) return running;
     if (this.records.operation(workspaceId, operationId).status !== "pending") return Promise.resolve();
     const run = (async () => {
       let answer: unknown;
       try { answer = await port.provision(workspaceId, operationId); } catch { return; }
       const status = answer !== null && typeof answer === "object" ? (answer as { status?: unknown }).status : undefined;
+      if (status === "applied") this.provisionApplied.add(operationId);
       if (status === "failed") { try { this.records.failCreationProvisioning(workspaceId, operationId); } catch { /* left pending: a later resume decides */ } }
-    })().finally(() => { this.provisioning.delete(operationId); });
-    this.provisioning.set(operationId, run);
+    })().finally(() => { this.provisionDrives.delete(operationId); });
+    this.provisionDrives.set(operationId, run);
     return run;
   }
-  /** Session door D4c: drive provisioning for every creation still pending (a crash between COMMIT and `provision`). The host
-   *  that supplies the port calls it once at boot. Resolves when every drive it started has settled; never rejects. */
-  async resumeProvisioning(): Promise<void> {
-    if (this.host.provisioning === undefined) return;
-    await Promise.all(this.records.pendingCreations().map(({ workspaceId, operationId }) => this.provisionAfterCommit(workspaceId, operationId)));
+  /**
+   * Session door D4c: drive provisioning for every creation still pending (a crash between COMMIT and `provision`). The host
+   * that supplies the port calls it once at boot. EVERY pending creation is driven, oldest first (created_at, then
+   * operation id), in keyset pages of `COWORK_PROVISION_PAGE`, with at most `COWORK_PROVISION_CONCURRENCY` drives in flight:
+   * no row bound, so a backlog of creations waiting on their guest can never starve a newer crash-interrupted one. One
+   * resume at a time (a second call joins the running one). Resolves when every drive it started has settled; never
+   * rejects, even on a synchronous throw.
+   */
+  resumeProvisioning(): Promise<void> {
+    if (this.host.provisioning === undefined) return Promise.resolve();
+    if (this.resuming !== undefined) return this.resuming;
+    const run = (async () => {
+      let after: { createdAt: string; operationId: string } | undefined;
+      for (;;) {
+        const page = this.records.pendingCreations(COWORK_PROVISION_PAGE, after);
+        if (page.length === 0) return;
+        const todo = page.filter(item => !this.provisionApplied.has(item.operationId));
+        let next = 0;
+        const worker = async () => {
+          while (next < todo.length) {
+            const item = todo[next++]!;
+            try { await this.provisionAfterCommit(item.workspaceId, item.operationId); } catch { /* uncertain: stays pending */ }
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(COWORK_PROVISION_CONCURRENCY, todo.length) }, worker));
+        const last = page[page.length - 1]!;
+        after = { createdAt: last.createdAt, operationId: last.operationId };
+      }
+    })().catch(() => { /* never rejects: whatever was not driven stays pending for the next resume */ }).finally(() => { this.resuming = undefined; });
+    this.resuming = run;
+    return run;
   }
   /** Session door D4b: S7B's `provisioning.admit` when the host supplies the port, otherwise the host's refusing gate. */
   private admitProvisioning(principal: CoworkPrincipal): void {

@@ -3,6 +3,8 @@ import type { NewSessionEvent } from "@yanlinglabs/winter-protocol";
 import type { LegSession } from "../runtime-sdk/session-driver";
 import type { CoworkHostApprovalPorts } from "./approval-ports";
 import type { CoworkPrincipal } from "./authority";
+import type { CoworkResumePlan } from "./cold-resume";
+import type { CoworkHeldInputVerbs } from "./held-input";
 import type { CoworkConnection } from "./service";
 import type { CoworkConversation } from "./types";
 
@@ -45,6 +47,9 @@ export interface CoworkSessionCreateInput {
 export type CoworkLegSession = Omit<LegSession, "mode"> & {
   readonly mode: "cowork";
   readonly coworkEpoch: { readonly incarnationId: string; readonly leaseEpoch: number } | undefined;
+  /** #92 N4: the held-input verbs (PEER-INBOX's `drainOnce` drives them). Present only with the host's gate and a runtime
+   *  that offered `held-input-v1`; absent everywhere in production. */
+  readonly heldInput?: CoworkHeldInputVerbs;
 };
 
 /** The Cowork driver table, beside the Code one, keyed by stored mode. Same verbs ipc/server.ts and SessionMessaging call. */
@@ -151,7 +156,7 @@ export interface CoworkGuestConversation {
   readonly policy: "auto" | "plan" | "ask" | "accept-edits" | "dont-ask" | "bypass";
   readonly roots: readonly { readonly id: string; readonly guestPath: string; readonly source: string; readonly readOnly: boolean }[];
   readonly runtime: {
-    readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly ("read" | "write" | "execute")[];
+    readonly model: string; readonly timeoutMs: number; readonly toolClasses: readonly ("read" | "write" | "execute" | "coordinate")[];
     readonly provider: Readonly<Record<string, unknown>>;
     readonly guided: Readonly<{ bindingId: string; generation: number }> | null;
     /** Cold resume (native contract revision 3): `fresh`, `resume` or `either`, and the host-attested ended guest boots. */
@@ -166,9 +171,19 @@ export type CoworkGuestStopOutcome =
   | { readonly released: true; readonly evidence: "orderly-receipt" | "new-boot" | "owner-recover" }
   | { readonly released: false; readonly reason: string };
 
+/** One folder share the guest reports mounted (#92 section 2.5, `shares_mounted`): the source it backs, at the revision the
+ *  host's `shares` records were prepared from. Host-mapped from the share tag; never a guest-supplied id. */
+export interface CoworkMountedShare { readonly sourceId: string; readonly revision: number }
 /** What a start is handed: the incarnation's conversation set, asked once at `mounted`. */
 export interface CoworkGuestStartRequest {
   conversations(context: CoworkGuestConversationContext): CoworkGuestConversationSet | null;
+  /** #92 N2: at the guest's `shares_mounted` (contract text version 3), BEFORE `conversations`. Each mounted folder source
+   *  becomes honestly `ready` for THIS incarnation (`acknowledgeSource`). Throws typed to fault the boot. No native host
+   *  calls it before the v3 contract exists (S7B), so today it is never invoked. */
+  sharesMounted?(context: CoworkGuestConversationContext, mounted: readonly CoworkMountedShare[]): void;
+  /** #92 N3: present only on a gated cold resume. S7B's v3 host puts it on the conversation's runtime record
+   *  (`runtime.continuation`, `runtime.endedGuestBoots`) and checks the guest's `continuation` echo. */
+  readonly resume?: CoworkResumePlan;
 }
 /** The runtime class (2) for one conversation. Today the native host drops runtime frames ("no consumer in this slice");
  *  S7B adds this link. */
@@ -184,6 +199,10 @@ export interface CoworkGuestRuntimeLink {
 /** A running incarnation, as a start resolves it. */
 export interface CoworkGuestRun {
   readonly workspaceId: string; readonly incarnationId: string; readonly leaseEpoch: number; readonly guestBootId: string;
+  /** #92 N3: the guest's `runtime_ready` echo of the continuation it took (CR2): `resume` when its store was found and
+   *  resumed, `fresh` when it started a new one. Absent from a host that does not carry it; an `either` start without it is
+   *  refused (the driver never guesses). */
+  readonly continuation?: "fresh" | "resume";
   /** Conversation index 0 only (N2), available after `runtime_ready`. */
   runtime(conversation: 0): CoworkGuestRuntimeLink;
   stop(reason: "user" | "shutdown" | "restart" | "update"): Promise<CoworkGuestStopOutcome>;

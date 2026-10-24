@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, fstatSync, fsyncSync, ftruncateSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import type { RuntimeStateDb } from "../runtime-state/db";
-import { AT_FDCWD, closeFd, createFileAt, mkdirAt, openDirAt, openImageAt } from "./volume-fs";
+import { AT_FDCWD, closeFd, createFileAt, mkdirAt, openDirAt, openImageAt, openImageReadOnlyAt } from "./volume-fs";
 import { COWORK_EXT4_FEATURES, COWORK_EXT4_MOUNT_OPTIONS, filesystemUUID, validFilesystemPlan, matchesFilesystemReceipt, readyFilesystemHistory, filesystemReceiptNeedsRecovery, validReplayDebt, sameReplayDebt, type FilesystemCheckMode, type RecordedFilesystemPlan, type CoworkVolumeFilesystemAuthority, type VolumeFilesystemState, type VolumeFilesystemJournal, type VolumeFilesystemPlan, type VolumeFilesystemReceipt } from "./volume-filesystem";
 import { timeMachineVolumeBackup, type CoworkVolumeBackup } from "./volume-backup";
 
@@ -24,6 +24,10 @@ export interface CoworkVolumeRecord {
   identity: VolumeFileIdentity | null; owner: CoworkVolumeOwner | null; lastStopId: string | null;
   createdAt: string; updatedAt: string;
 }
+/** A durable, exclusive restore claim on a stopped, unowned workspace (the content-out restorer's volume needs). It IS the volume owner record, so `claim`, `open` and `prepareFilesystems` refuse
+ *  (`volume_busy`) from the first byte the restore exchanges until the identity is re-recorded and the claim ended, and a crash leaves the owner visible: nothing starts, and recovery sees volumes that
+ *  name an owner it has no evidence for. */
+export interface CoworkRestoreClaim { readonly workspaceId: string; readonly restoreId: string; /** The authority's proof from `beginRestore`, carried so every later call is admitted the same way. */ readonly proof: unknown }
 export interface CoworkVolumeAuthority {
   /** Current authenticated controller, canonical home registration, workspace grant and incarnation
    * checks belong here. Mandatory injection; local paths, manifest bytes and worker PIDs are insufficient. */
@@ -43,6 +47,8 @@ function owner(value: CoworkVolumeOwner): CoworkVolumeOwner {
   if (!value || !Number.isSafeInteger(value.leaseEpoch) || value.leaseEpoch < 1 || !/^[a-f0-9]{64}$/.test(value.runtimeImageDigest)) fail("invalid_request");
   return { controllerInstanceId: token(value.controllerInstanceId), workerInstanceId: token(value.workerInstanceId), incarnationId: token(value.incarnationId), leaseEpoch: value.leaseEpoch, runtimeImageDigest: value.runtimeImageDigest };
 }
+/** The owner record of a restore: never a native incarnation (its controller id is `restore-<id>` and nothing else in the system mints one). */
+const restoreOwner = (restoreId: string): CoworkVolumeOwner => owner({ controllerInstanceId: `restore-${token(restoreId)}`.slice(0, 160), workerInstanceId: "restore", incarnationId: "restore", leaseEpoch: 1, runtimeImageDigest: "0".repeat(64) });
 const sameOwner = (a: CoworkVolumeOwner | null, b: CoworkVolumeOwner) => a !== null && JSON.stringify(owner(a)) === JSON.stringify(owner(b));
 const sameIdentity = (a: VolumeFileIdentity, b: VolumeFileIdentity) => a.device === b.device && a.inode === b.inode && a.uid === b.uid && a.mode === b.mode;
 const filename = (purpose: VolumePurpose): "data.ext4" | "env.ext4" => purpose === "data" ? "data.ext4" : purpose === "environment" ? "env.ext4" : fail("invalid_request");
@@ -443,6 +449,90 @@ export class CoworkVolumes {
       if (JSON.stringify(current.map(v => v.filesystemJournal)) !== JSON.stringify(volumes.map(v => v.filesystemJournal)) || current.some(v => v.filesystemState !== "ready" || !sameOwner(v.owner, request.owner))) return false;
       return this.filesystemAuthority!.authorize(admitted.request, admitted.homeId, current, plan.checkMode) === true;
     }, { mode: "immediate" }); } finally { checked.forEach(v => v.close()); }
+  }
+  // ---------------------------------------------------------------------------------------------- restore (content-out)
+  private restoreRequest(claim: CoworkRestoreClaim, proof: unknown = claim.proof): CoworkVolumeRequest { return { workspaceId: token(claim.workspaceId), owner: restoreOwner(claim.restoreId), proof }; }
+  private restoreHeld(request: CoworkVolumeRequest): CoworkVolumeRecord[] {
+    const volumes = this.records(request.workspaceId);
+    if (volumes.length !== 2 || volumes.some(v => v.state !== "allocated" || !sameOwner(v.owner, request.owner))) fail("volume_busy");
+    return volumes;
+  }
+  /** Take the exclusive restore claim: both images allocated and validated, no owner (or this very restore's, for a retry), no open handle. Durable before it returns. */
+  beginRestore(input: { workspaceId: string; restoreId: string; proof: unknown }): CoworkRestoreClaim {
+    if (this.rs.db.inTransaction) fail("invalid_request");
+    const claim: CoworkRestoreClaim = { workspaceId: token(input.workspaceId), restoreId: token(input.restoreId), proof: input.proof };
+    const request = this.restoreRequest(claim);
+    const validate = (volumes: CoworkVolumeRecord[], homeId: string) => {
+      if ((this.handles.get(claim.workspaceId) ?? 0) > 0) fail("volume_busy");
+      if (volumes.length !== 2) fail("recovery_required");
+      for (const volume of volumes) {
+        if (volume.homeId !== homeId || volume.state !== "allocated") fail("recovery_required");
+        if (volume.owner && !sameOwner(volume.owner, request.owner)) fail("volume_busy");
+      }
+    };
+    const admitted = this.admit("claim", request), prior = this.records(claim.workspaceId);
+    validate(prior, admitted.homeId);
+    const checked = this.prepareChecked(prior);
+    try {
+      this.rs.transaction(() => {
+        const { homeId } = this.admit("claim", request), volumes = this.records(claim.workspaceId);
+        validate(volumes, homeId);
+        volumes.forEach(v => this.revalidateChecked(v, checked));
+        this.run("UPDATE cowork_volumes SET owner_json=?,last_stop_id=NULL WHERE workspace_id=?", JSON.stringify(request.owner), claim.workspaceId);
+      }, { mode: "immediate" });
+    } finally { checked.forEach(v => v.close()); }
+    return claim;
+  }
+  /** A READ-ONLY descriptor pinned to the recorded image, for the holder of the restore claim only. The descriptor cannot write, and it is checked against the recorded identity and size. */
+  openForRestoreRead(claim: CoworkRestoreClaim, purpose: VolumePurpose): { volume: CoworkVolumeRecord; fd: number; close(): void } {
+    if (this.rs.db.inTransaction) fail("invalid_request");
+    const request = this.restoreRequest(claim);
+    this.admit("open", request);
+    const volume = this.restoreHeld(request).find(v => v.purpose === purpose);
+    if (!volume) fail("not_found");
+    const dirs = this.directories(claim.workspaceId, false); let fd = -1;
+    try {
+      fd = openImageReadOnlyAt(dirs.at(-1)!, filename(purpose)); this.validate(fd, volume);
+      const pinned = fd; let closed = false;
+      return { volume, fd, close: () => { if (!closed) { closed = true; closeSync(pinned); } } };
+    } catch (error) { closeFd(fd); if (error instanceof CoworkVolumeError) throw error; fail("recovery_required"); }
+    finally { dirs.forEach(closeFd); }
+  }
+  /** After the restorer put a new image in place: record the new file's identity for ONE volume. The recorded identity must be what the restorer believed (`expected`), and the file on disk must
+   *  be exactly `next` (identity, mode, owner, size). Only the claim's holder may call it, and only while it holds. */
+  reidentifyRestored(claim: CoworkRestoreClaim, change: { purpose: VolumePurpose; expected: VolumeFileIdentity | null; next: VolumeFileIdentity; proof: unknown }): void {
+    if (this.rs.db.inTransaction) fail("invalid_request");
+    const request = this.restoreRequest(claim, change.proof ?? claim.proof);
+    this.admit("open", request);
+    const dirs = this.directories(claim.workspaceId, false); let fd = -1;
+    try {
+      fd = openImageReadOnlyAt(dirs.at(-1)!, filename(change.purpose));
+      const onDisk = identity(fd, "image"), size = Number(fstatSync(fd, { bigint: true }).size);
+      if (!sameIdentity(onDisk, change.next)) fail("recovery_required");
+      this.rs.transaction(() => {
+        this.admit("open", request);
+        const volume = this.restoreHeld(request).find(v => v.purpose === change.purpose);
+        if (!volume || !volume.identity || size !== volume.capacityBytes) fail("recovery_required");
+        if (change.expected !== null && !sameIdentity(volume.identity, change.expected)) fail("recovery_required");
+        this.run("UPDATE cowork_volumes SET device=?,inode=?,uid=?,mode=?,updated_at=? WHERE volume_id=?", change.next.device, change.next.inode, change.next.uid, change.next.mode, new Date().toISOString(), volume.volumeId);
+      }, { mode: "immediate" });
+    } catch (error) { if (error instanceof CoworkVolumeError) throw error; fail("recovery_required"); }
+    finally { closeFd(fd); dirs.forEach(closeFd); }
+  }
+  /** End the claim: every recorded identity must match the files on disk again (a restore that replaced an image and did not re-record it stays claimed, which is visible and safe). */
+  endRestore(claim: CoworkRestoreClaim): void {
+    if (this.rs.db.inTransaction) fail("invalid_request");
+    const request = this.restoreRequest(claim);
+    this.admit("release", request);
+    const prior = this.restoreHeld(request), checked = this.prepareChecked(prior);
+    try {
+      this.rs.transaction(() => {
+        this.admit("release", request);
+        const volumes = this.restoreHeld(request);
+        volumes.forEach(v => this.revalidateChecked(v, checked));
+        this.run("UPDATE cowork_volumes SET owner_json=NULL,last_stop_id=NULL WHERE workspace_id=?", claim.workspaceId);
+      }, { mode: "immediate" });
+    } finally { checked.forEach(v => v.close()); }
   }
   release(input: CoworkVolumeRequest, stop: CoworkVolumeStop): void {
     if (this.rs.db.inTransaction) fail("invalid_request");

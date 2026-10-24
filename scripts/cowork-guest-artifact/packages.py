@@ -76,6 +76,19 @@ def paragraphs(text):
             elif ': ' in line: key,value=line.split(': ',1); fields[key]=value
         if fields: yield fields
 
+def release_signers(status, allowed):
+    """The pinned fingerprints that validly signed, from gpgv's --status-fd text: sorted and de-duplicated, so the lock does not depend on the gpg version, the signature order or the signing dates.
+    A signing key or its primary counts when it is pinned (VALIDSIG <signing fpr> <date> <ts> <expire> <ver> <res> <pk> <hash> <class> <primary fpr>). A BADSIG, or no pinned signer, refuses.
+    Signatures by keys that are not imported or not pinned do not invalidate a verified pinned signer."""
+    found=set()
+    for line in status.splitlines():
+        if not line.startswith('[GNUPG:] VALIDSIG '): continue
+        fields=line.split()
+        for candidate in (fields[2], fields[11] if len(fields)>11 else None):
+            if candidate in allowed: found.add(candidate)
+    if not found or '[GNUPG:] BADSIG ' in status: raise ValueError('release signature')
+    return sorted(found)
+
 def verify_release(data, pins, cache):
     with tempfile.TemporaryDirectory(prefix='winter-image-gpg-') as folder:
         home=Path(folder); os.chmod(home,0o700)
@@ -89,13 +102,10 @@ def verify_release(data, pins, cache):
         signed=home/'InRelease'; signed.write_bytes(data)
         result=subprocess.run(['gpgv','--homedir',str(home),'--keyring',str(home/'pubring.kbx'),'--status-fd','1',str(signed)],capture_output=True,text=True)
         (cache/'signature-status.log').write_text(result.stdout+'\n'+result.stderr)
-        allowed={k['fingerprint'] for k in pins['keys']}
-        valid=[line for line in result.stdout.splitlines() if line.startswith('[GNUPG:] VALIDSIG ')]
-        # Extra signatures without imported keys do not invalidate a verified allowed signer.
-        if not any(line.split()[-1] in allowed or line.split()[2] in allowed for line in valid) or '[GNUPG:] BADSIG ' in result.stdout: raise ValueError('release signature')
+        signers=release_signers(result.stdout,{k['fingerprint'] for k in pins['keys']})
         clear=data.decode().split('\n\n',1)[1].split('-----BEGIN PGP SIGNATURE-----',1)[0]
         clear='\n'.join(line[2:] if line.startswith('- ') else line for line in clear.splitlines())+'\n'
-        return clear, valid
+        return clear, signers
 
 def order(char):
     if char=='~': return -1

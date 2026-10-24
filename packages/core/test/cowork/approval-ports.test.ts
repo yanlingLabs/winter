@@ -13,8 +13,7 @@ import { doorFixture, type DoorFixture } from "./session-door-fixture";
 
 // Compile-time: the DOOR's structural ports ARE the APPROVALS lane's ports (assignable both ways).
 type Mutual<A, B> = [A] extends [B] ? ([B] extends [A] ? true : false) : false;
-// `planScratchEpoch` (#112) is left out here until the DOOR ports implement it (#116 adds it and restores the full check).
-const ASSIGNABLE: Mutual<CoworkHostApprovalPorts, Required<CoworkApprovalPorts> extends infer R ? Omit<R, "explicit" | "planScratchEpoch"> : never> = true;
+const ASSIGNABLE: Mutual<CoworkHostApprovalPorts, Required<CoworkApprovalPorts> extends infer R ? Omit<R, "explicit"> : never> = true;
 
 const fixtures: DoorFixture[] = [];
 afterEach(() => { for (const f of fixtures.splice(0)) f.close(); });
@@ -40,6 +39,9 @@ test("the path table: its root and memory are admitted, its own outputs and scra
     // Outside the conversation's view: the rest of its source, other sources, the OS.
     "/workspace/folders/grant": "outside", "/workspace/folders/grant/repository": "outside", "/workspace/folders/other": "outside", "/workspace/repos/r": "outside",
     "/etc/passwd": "outside", "/": "outside", "/run": "outside",
+    // The plan scratch (#112): every `/workspace/plan/<sid>/<epoch>` tree; the projection narrows it to its own sid and epoch.
+    "/workspace/plan/conversation/0": "planScratch", "/workspace/plan/conversation/0/notes.md": "planScratch", "/workspace/plan/other/4/x": "planScratch",
+    "/workspace/plan": "outside", "/workspace/plan/conversation": "outside", "/workspace/plan/conversation/0/../../other/1/x": "planScratch",
     // Not an absolute path: never admitted.
     "relative/path": "protected", "": "protected", "/workspace/folders/grant/repo/\0": "protected",
   };
@@ -57,16 +59,17 @@ test("the ports: identity is the workspace and source revision; the machine is s
     // No plan view is mounted yet (the epoch-scoped scratch is a later slice): never installed, even under plan.
     expect(ports.planViewInstalled()).toBe(false);
     expect(coworkApprovalPortsFor({ binding, source, ceiling, planViewMounted: true }).planViewInstalled()).toBe(policy === "plan");
+    expect(ports.planScratchEpoch()).toBe(0); // the machine's epoch
     expect(ports.classifyPath("/workspace/folders/grant/repo/a")).toBe("admitted");
     expect(ports.classifyPath("/workspace/folders/grant/a")).toBe("outside");
     expect(Object.isFrozen(ports)).toBe(true);
   }
 });
 
-function bridge(policy: ApprovalPolicy) {
+function bridge(policy: ApprovalPolicy, planViewMounted = false) {
   const f = doorFixture({ policy }); fixtures.push(f);
   const binding = f.records.binding("conversation"); f.begin();
-  const ports = coworkApprovalPortsFor({ binding, source: f.authority.requireSource(f.workspaceId, binding.sourceId), ceiling: f.authority.effectiveCapabilities("conversation") });
+  const ports = coworkApprovalPortsFor({ binding, source: f.authority.requireSource(f.workspaceId, binding.sourceId), ceiling: f.authority.effectiveCapabilities("conversation"), planViewMounted });
   const approvals = new ApprovalBroker(), events: NewSessionEvent[] = [];
   // The APPROVALS lane's bridge with the DOOR's ports; `mode: "code"` is the bridge's own type (a NEEDS for APPROVALS).
   const canUse = canUseToolFor({ sessionId: "conversation", mode: "code", policy, approvals, questions: new QuestionBroker(), gate: new PermissionGate(),
@@ -99,9 +102,20 @@ test("D3b: an outputs-located conversation's own folder stays `outputs` (never `
     ["/workspace/outputs/s_0123456789ab", "outputs"], ["/workspace/outputs/s_0123456789ab/report.md", "outputs"],
     ["/workspace/outputs/s_other/x", "protected"], ["/workspace/folders/grant", "outside"], ["/workspace/.winter/memory", "admitted"],
   ] as const) expect([path, ports.classifyPath(path)]).toEqual([path, klass]);
-  expect(ports.identity()).toEqual({ workspaceId: f.workspaceId, sourceRevision: 0 });
+  expect(ports.identity()).toEqual({ workspaceId: f.workspaceId, sourceRevision: 0, outputsFolder: "/workspace/outputs/s_0123456789ab" });
   expect(ports.planViewInstalled()).toBe(false);
   // A source binding must name its source; an outputs conversation must not.
   expect(() => coworkApprovalPortsFor({ binding: conversation, source: f.records.sources(f.workspaceId)[0]!, ceiling: { toolClasses: [], hostServices: [], connectors: [], network: "none" } })).toThrow("authority_denied");
   expect(coworkClassifyGuestPath("/workspace/outputs/s_0123456789ab/a", { sessionId: "s_0123456789ab", root: null })).toBe("outputs");
+});
+
+test("plan scratch through the real bridge: only plan, only with the view mounted, only its own sid at the current epoch", async () => {
+  const write = async (h: ReturnType<typeof bridge>, path: string) => (await h.canUse("Write", { file_path: path, content: "x" }, ctx("plan"))).behavior;
+  const mounted = bridge("plan", true);
+  expect(await write(mounted, "/workspace/plan/conversation/0/notes.md")).toBe("allow");
+  for (const path of ["/workspace/plan/conversation/1/notes.md", "/workspace/plan/other/0/notes.md", "/workspace/plan/conversation/notes.md", "/workspace/plan/conversation/0/../1/x"]) {
+    expect([path, await write(mounted, path)]).toEqual([path, "deny"]);
+  }
+  expect(await write(bridge("plan"), "/workspace/plan/conversation/0/notes.md")).toBe("deny"); // no view: plan_view_missing
+  for (const policy of POLICIES.filter(policy => policy !== "plan")) expect([policy, await write(bridge(policy, true), "/workspace/plan/conversation/0/notes.md")]).toEqual([policy, "deny"]);
 });

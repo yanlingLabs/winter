@@ -2,7 +2,10 @@
 // interrupt reach the door's drivers (and compaction refuses typed); without one nothing changes and the drivers are never
 // asked. `session.list` carries the row's workspace reference from the host binding; remote never sees or reaches the row.
 // Also: provisioning admission through S7B's port when a host supplies it, and truthful capabilities. No guest boots here.
-import { afterEach, expect, test } from "bun:test";
+import { setDefaultTimeout, afterEach, expect, test } from "bun:test";
+
+// Whole-repo source scans (AST/regex over every package): a loaded CI runner can pass bun's 5 s default, so these files get 30 s.
+setDefaultTimeout(30_000);
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,7 +14,8 @@ import { FileSecretStore } from "../../src/auth/secret-store";
 import { TokenAuthority } from "../../src/auth/tokens";
 import { startIpcServer } from "../../src/ipc/server";
 import { CoworkRepository } from "../../src/cowork/repository";
-import { CoworkWorkspaceService, type CoworkHostPorts } from "../../src/cowork/service";
+import { CoworkWorkspaceService, COWORK_PROVISION_CONCURRENCY, COWORK_PROVISION_PAGE, disabledCoworkHost, type CoworkHostPorts } from "../../src/cowork/service";
+import { createMacCoworkHost } from "../../src/cowork/mac-host";
 import type { CoworkLegSession, CoworkProvisioningPort, CoworkSessionDoor, CoworkSessionDrivers } from "../../src/cowork/session-ports";
 import { CoworkError } from "../../src/cowork/types";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../src/runtime-state/db";
@@ -197,18 +201,66 @@ test("a Cowork row whose reference cannot be read lists without it, and the list
   } finally { CoworkRepository.prototype.conversationRef = original; }
 });
 
-test("pins: no src module supplies a host's provisioning or execution port (the composition that does is the D6 flip)", () => {
+/** Every place a src module NAMES `provisioning` or `execution` as a property it writes, in any syntax the parser knows:
+ *  an assignment (`provisioning: x`), a shorthand (`{ provisioning }`), a method or accessor (`execution() {}`), a class
+ *  field, an interface member, an assignment through a property access (`host.provisioning = x`), and any string literal or
+ *  template that is exactly the name (computed keys, `Reflect.set`, `defineProperty`). Reads (`this.host.provisioning`) are not writes. */
+function portNameWrites(names: readonly string[] = ["provisioning", "execution"]): string[] {
+  const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs");
+  const ts = require("typescript") as typeof import("typescript");
+  const packages = join(import.meta.dir, "..", "..", "..");
+  const files = readdirSync(packages).flatMap(name => { const src = join(packages, name, "src"); try { return statSync(src).isDirectory() ? readdirSync(src, { recursive: true }).map(String).map(file => join(src, file)).filter(file => /\.(ts|tsx|js|mjs|cjs)$/.test(file)) : []; } catch { return []; } });
+  expect(files.length).toBeGreaterThan(100);
+  const NAMES = new Set(names), found: string[] = [];
+  for (const file of files) {
+    const visit = (node: import("typescript").Node): void => {
+      const named = (ts.isIdentifier(node) || ts.isPrivateIdentifier(node) || ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && NAMES.has(node.text.replace(/^#/, ""));
+      if (named) {
+        const parent = node.parent;
+        const read = ts.isPropertyAccessExpression(parent) && parent.name === node
+          && !(ts.isBinaryExpression(parent.parent) && parent.parent.left === parent && parent.parent.operatorToken.kind >= ts.SyntaxKind.FirstAssignment && parent.parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment);
+        if (!read) found.push(`${file.slice(packages.length + 1).split(/[\\/]/).join("/")} ${ts.SyntaxKind[parent.kind]} ${parent.getText().replace(/\s+/g, " ").slice(0, 60)}`);
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(ts.createSourceFile(file, readFileSync(file, "utf8"), ts.ScriptTarget.Latest, true));
+  }
+  return found.sort();
+}
+
+test("pins (structural): no src module supplies a host's execution port, and the one place that supplies provisioning is the daemon, behind an injected environment (production has none)", () => {
+  // Declared in service.ts's host interface, reported in its capabilities, typed on the wire; the schedule status's own
+  // `execution` field is a different value. Any other write of either name, in any syntax, fails here.
+  expect(portNameWrites()).toEqual([
+    // S7B (part 3): the daemon composes the provisioning port ONLY where an environment was injected (`coworkNativePort`, undefined in production: the activation seam
+    // answers undefined), and only when the host has none. The behavioural pin below and native/anti-wiring's seam pin cover the other half.
+    "core/src/daemon.ts PropertyAssignment provisioning: coworkProvisioning",
+    "core/src/cowork/schedules.ts PropertyAssignment execution: \"unavailable\" as const",
+    "core/src/cowork/service.ts PropertyAssignment execution: this.host.execution?.() === true",
+    "core/src/cowork/service.ts PropertyAssignment provisioning: this.host.provisioning?.available() === true",
+    "core/src/cowork/service.ts PropertySignature execution?: () => boolean;",
+    "core/src/cowork/service.ts PropertySignature provisioning?: CoworkProvisioningPort;",
+    "protocol/src/cowork.ts PropertyAssignment execution: z.boolean()",
+    "protocol/src/cowork.ts PropertyAssignment execution: z.literal(\"unavailable\")",
+    "protocol/src/cowork.ts PropertyAssignment provisioning: z.boolean()",
+  ].sort());
+  // The approvals adapter is defined in the door module and called by no src module (only a door composition will).
   const { readdirSync, readFileSync, statSync } = require("node:fs") as typeof import("node:fs");
   const packages = join(import.meta.dir, "..", "..", "..");
   const files = readdirSync(packages).flatMap(name => { const src = join(packages, name, "src"); try { return statSync(src).isDirectory() ? readdirSync(src, { recursive: true }).map(String).map(file => join(src, file)).filter(file => /\.(ts|tsx|js|mjs)$/.test(file)) : []; } catch { return []; } });
-  expect(files.length).toBeGreaterThan(100);
   const code = (file: string) => readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/[^\n]*/g, "$1");
-  const naming = (pattern: RegExp) => files.filter(file => pattern.test(code(file))).map(file => file.slice(packages.length + 1)).sort();
-  // Declared and read in service.ts; the protocol names the wire field. Nothing else writes either port.
-  expect(naming(/\bprovisioning\s*\??:/)).toEqual([join("core", "src", "cowork", "service.ts"), join("protocol", "src", "cowork.ts")]);
-  expect(naming(/\bexecution\s*\??:\s*\(/)).toEqual([join("core", "src", "cowork", "service.ts")]);
-  // The approvals adapter is defined in the door module and called by no src module (only a door composition will).
-  expect(naming(/(?<!function )\bcoworkApprovalPort\(/)).toEqual([]);
+  expect(files.filter(file => /(?<!function )\bcoworkApprovalPort\(/.test(code(file)))).toEqual([]);
+});
+
+test("pins (behavioural): the production host composition carries neither port, and its service reports false/false", () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-prod-")), db = openRuntimeStateDb(home);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  // daemon.ts: `opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)`, plus `native`.
+  const native = { start: async () => undefined };
+  for (const host of [disabledCoworkHost, createMacCoworkHost(home, undefined, db), createMacCoworkHost(home, undefined, db, native), { ...createMacCoworkHost(home, undefined, db), native }]) {
+    expect(["provisioning" in host, "execution" in host]).toEqual([false, false]);
+    expect(new CoworkWorkspaceService(new CoworkRepository(db), host).call(HARNESS, "workspace.capabilities.get", {})).toMatchObject({ provisioning: false, execution: false });
+  }
 });
 
 // ------------------------------------------------------------------------------------------------ D4c: provision after COMMIT
@@ -282,7 +334,7 @@ test("D4c: without the port nothing is provisioned and resumeProvisioning does n
   expect(records.pendingCreations()).toEqual([]);
   const ported = service({ provisioning: { available: () => true, admit: () => {}, provision: async () => ({ status: "applied" }) } });
   const receipt = create(ported.svc, "x");
-  expect(ported.records.pendingCreations()).toEqual([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
+  expect(ported.records.pendingCreations()).toMatchObject([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
 });
 
 test("D4c: a replay alone re-drives an uncertain creation; a concluded one leaves the pending list; only a creation can fail this way", async () => {
@@ -290,7 +342,7 @@ test("D4c: a replay alone re-drives an uncertain creation; a concluded one leave
   const p = provisioned(async () => { if (first) { first = false; throw new Error("uncertain"); } return { status: "failed" }; });
   const receipt = create(p.svc, "one");
   await settle();
-  expect(p.records.pendingCreations()).toEqual([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
+  expect(p.records.pendingCreations()).toMatchObject([{ workspaceId: receipt.workspaceId, operationId: receipt.operationId }]);
   create(p.svc, "one"); await settle();
   expect(p.calls.length).toBe(2);
   expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("failed");
@@ -298,4 +350,127 @@ test("D4c: a replay alone re-drives an uncertain creation; a concluded one leave
   // A non-creation operation (a title update) is never concluded by a provisioning answer.
   const update = p.svc.call(HARNESS, "workspace.update", { workspaceId: receipt.workspaceId, requestId: "rename", expectedRevision: 1, title: "renamed" });
   expect(() => p.records.failCreationProvisioning(receipt.workspaceId, update.operationId)).toThrow("not_found");
+});
+
+// ------------------------------------------------------------------------------------------------ D4 review fixes
+test("D4b fix: a source addition goes through the port's admit when present, refusing while unavailable", () => {
+  let available = false, admitted = 0;
+  const provisioning: CoworkProvisioningPort = { available: () => available, admit: () => { admitted++; if (!available) throw new CoworkError("unsupported_topology"); }, provision: async () => ({ status: "applied" }) };
+  const { svc, records } = service({ provisioning });
+  available = true;
+  const receipt = create(svc, "made");
+  available = false; admitted = 0;
+  const add = (requestId: string) => svc.call(HARNESS, "workspace.source.addFolder", { workspaceId: receipt.workspaceId, requestId, expectedRevision: records.get(receipt.workspaceId).configRevision, selectionId: "folder-choice" });
+  expect(() => add("refused")).toThrow("unsupported_topology");
+  expect([admitted, records.sources(receipt.workspaceId).length]).toEqual([1, 1]);
+  available = true;
+  expect(add("admitted").value.sourceId).toBeTruthy();
+  expect([admitted, records.sources(receipt.workspaceId).length]).toEqual([2, 2]);
+});
+
+test("D4b fix: a live driver's steer refusal reaches the client typed; an unknown session never routes to the door", async () => {
+  const calls: string[] = [];
+  const session = { async steer() { calls.push("steer"); throw new CoworkError("stale_acknowledgment"); } } as unknown as CoworkLegSession;
+  const drivers: CoworkSessionDrivers = {
+    get: id => { calls.push(`get:${id}`); return session; }, ensure: async id => { calls.push(`ensure:${id}`); return session; },
+    runTurn: async () => { throw new Error("unused"); }, evict: async () => {}, list: () => [], beginShutdown: async () => {},
+  };
+  const b = await boot(door(drivers));
+  expect((await b.harness.request(METHODS.sessionSteer, { sessionId: b.coworkId, text: "more" })).error.data).toEqual({ code: "stale_acknowledgment" });
+  expect(calls).toEqual([`get:${b.coworkId}`, "steer"]);
+  calls.length = 0;
+  for (const method of [METHODS.sessionSend, METHODS.sessionSteer, METHODS.sessionInterrupt, METHODS.sessionCompact]) {
+    expect((await b.harness.request(method, { sessionId: "s_ffffffffffff", text: "x" })).error?.data?.code).not.toBe("stale_acknowledgment");
+  }
+  expect(calls).toEqual([]);
+});
+
+test("D4c fix: a creation concluded failed is terminal for execution: no reservation, no bind, no boot", async () => {
+  const p = provisioned(async () => ({ status: "failed" }));
+  const receipt = create(p.svc, "one");
+  await settle();
+  expect(p.status(receipt.workspaceId, receipt.operationId)).toBe("failed");
+  const sourceId = p.records.sources(receipt.workspaceId)[0]!.sourceId;
+  expect(() => p.records.reserveConversation({ principalId: "local", workspaceId: receipt.workspaceId, requestId: "r", scope: "t", requestDigest: "a".repeat(64) }, () => false)).toThrow("recovery_required");
+  const committed = { hasCommittedSession: () => true };
+  const context = () => ({ principalId: "local", requestId: "bind", expectedRevision: p.records.get(receipt.workspaceId).configRevision });
+  expect(() => p.records.bindConversation(context(), receipt.workspaceId, { sessionId: "s_0123456789ab", sourceId }, committed)).toThrow("recovery_required");
+  expect(() => p.records.bindOutputsConversation(context(), receipt.workspaceId, { sessionId: "s_0123456789ab" }, committed)).toThrow("recovery_required");
+  expect(() => p.records.beginIncarnation(receipt.workspaceId, "incarnation-1", p.records.get(receipt.workspaceId).configRevision)).toThrow("recovery_required");
+  expect(p.records.rs.db.query("SELECT COUNT(*) AS n FROM cowork_conversations").get()).toEqual({ n: 0 });
+  // An applied creation of another workspace is unaffected.
+  const fine = service({ provisioning: { available: () => true, admit: () => {}, provision: async () => ({ status: "applied" }) } });
+  const ok = create(fine.svc, "ok"); await settle();
+  expect(fine.records.reserveConversation({ principalId: "local", workspaceId: ok.workspaceId, requestId: "r", scope: "t", requestDigest: "a".repeat(64) }, () => false).state).toBe("pending");
+});
+
+test("D4c fix: a late `failed` for a workspace a guest has started stays pending (uncertain); only a never-booted workspace fails", () => {
+  const { records } = service();
+  const made = (requestId: string) => records.create({ principalId: "fixture", requestId }, { ownership: "project", title: "t", ceiling: CEILING, sources: [FOLDER] });
+  const receipt = made("booted"); // created directly: nothing drives it, the operation stays pending
+  records.beginIncarnation(receipt.workspaceId, "incarnation-1", records.get(receipt.workspaceId).configRevision);
+  records.failCreationProvisioning(receipt.workspaceId, receipt.operationId);
+  expect(records.operation(receipt.workspaceId, receipt.operationId).status).toBe("pending");
+  const never = made("never");
+  records.failCreationProvisioning(never.workspaceId, never.operationId);
+  expect(records.operation(never.workspaceId, never.operationId).status).toBe("failed");
+});
+
+test("D4c fix: resume drives EVERY pending creation once per boot, oldest first, in keyset pages, at most COWORK_PROVISION_CONCURRENCY at a time", async () => {
+  const home = mkdtempSync(join(tmpdir(), "winter-door-d4c-bound-")), db = openRuntimeStateDb(home);
+  cleanups.push(() => { db.close(); rmSync(home, { recursive: true, force: true }); });
+  let clock = 0;
+  const records = new CoworkRepository(db, () => new Date(Date.UTC(2026, 0, 1) + clock++ * 1000).toISOString());
+  const total = COWORK_PROVISION_PAGE + 6, made: string[] = [];
+  for (let i = 0; i < total; i++) made.push(records.create({ principalId: "fixture", requestId: `create-${i}` }, { ownership: "project", title: "t", ceiling: CEILING, sources: [FOLDER] }).operationId);
+  let inFlight = 0, most = 0;
+  const order: string[] = [];
+  const port = (): CoworkProvisioningPort => ({
+    available: () => true, admit: () => {},
+    provision: async (_workspaceId, operationId) => { order.push(operationId); inFlight++; most = Math.max(most, inFlight); await Bun.sleep(1); inFlight--; return { status: "applied" }; },
+  });
+  const host: CoworkHostPorts = { ...disabledCoworkHost, provisioning: port() };
+  const svc = new CoworkWorkspaceService(records, host);
+  const first = svc.resumeProvisioning();
+  expect(svc.resumeProvisioning()).toBe(first); // one resume at a time
+  await first;
+  expect(order).toEqual(made);
+  expect(most).toBe(COWORK_PROVISION_CONCURRENCY);
+  // Every one answered `applied` in this process: waiting on its guest, so a second resume drives nothing.
+  await svc.resumeProvisioning();
+  expect(order.length).toBe(total);
+  // A new boot (a new service over the same records) drives every still-pending creation once more.
+  order.length = 0; most = 0;
+  await new CoworkWorkspaceService(records, { ...disabledCoworkHost, provisioning: port() }).resumeProvisioning();
+  expect([order.length, most]).toEqual([total, COWORK_PROVISION_CONCURRENCY]);
+});
+
+test("D4c fix: resumeProvisioning never rejects, even when reading the pending list throws synchronously", async () => {
+  const p = provisioned(async () => ({ status: "applied" }));
+  const original = p.records.pendingCreations.bind(p.records);
+  (p.records as unknown as { pendingCreations: unknown }).pendingCreations = () => { throw new Error("SQLITE_BUSY stand-in"); };
+  await p.svc.resumeProvisioning();
+  (p.records as unknown as { pendingCreations: unknown }).pendingCreations = original;
+  const operation = p.records.operation.bind(p.records);
+  create(p.svc, "one"); await settle();
+  (p.records as unknown as { operation: unknown }).operation = () => { throw new Error("SQLITE_BUSY stand-in"); };
+  const fresh = new CoworkWorkspaceService(p.records, { ...disabledCoworkHost, provisioning: { available: () => true, admit: () => {}, provision: async () => ({ status: "applied" }) } });
+  await fresh.resumeProvisioning();
+  (p.records as unknown as { operation: unknown }).operation = operation;
+});
+
+test("pins (structural): no src module supplies the N3 cold-resume or the N4 held-input gate (resume waits for the owner patch)", () => {
+  // Declared on the driver's deps (and the leg session's verbs); the only value written is the driver's own gated verbs.
+  // A composition that supplied either gate would add a line here: that is the D6 flip, and for cold resume only after the
+  // owner applies the cold-resume owner patch (the unmodified native owner refuses a resume record).
+  expect(portNameWrites(["coldResume", "heldInput", "ownerPatchApplied"])).toEqual([
+    "core/src/agent/session-messaging.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
+    // b4: the gated composition seam NAMES the driver dep's type (a type reference, not a write); no production source imports it (peer-inbox-composition.test.ts pins that).
+    "core/src/cowork/peer-inbox-composition.ts LiteralType \"heldInput\"",
+    "core/src/cowork/session-driver.ts PropertyAssignment heldInput: coworkHeldInputVerbs(queryNow, () => handle.cowor",
+    "core/src/cowork/session-driver.ts PropertySignature readonly coldResume?: { readonly ownerPatchApplied: true };",
+    "core/src/cowork/session-driver.ts PropertySignature readonly heldInput?: { readonly enabled: true; /** Design ru",
+    "core/src/cowork/session-driver.ts PropertySignature readonly ownerPatchApplied: true",
+    "core/src/cowork/session-ports.ts PropertySignature readonly heldInput?: CoworkHeldInputVerbs;",
+  ]);
 });
