@@ -186,8 +186,8 @@ class PinTests(unittest.TestCase):
         self.assertRegex(PINS['sdkPin']['previousCommit'],r'^[0-9a-f]{40}$')
         self.assertNotEqual(PINS['sdkCommit'],PINS['sdkPin']['previousCommit'])
         self.assertEqual(PINS['sdkCommit'],PINS['sdkPin']['mainAt'])
-        self.assertEqual(PINS['sdkCommit'],'52f275f0eaeeaa4c823796265fdb81c64fc7a435')
-        for number in (29,30,42,43,44,49,52):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
+        self.assertEqual(PINS['sdkCommit'],'ec91fe06719d76e99bcdbdae8a6daaf690dfeb50')
+        for number in (29,30,42,43,44,49,50,52):self.assertIn(number,PINS['sdkPin']['mergedPullRequests'])
         self.assertRegex(PINS['sdkPin']['supervisorSha256'],r'^[0-9a-f]{64}$')
     def test_the_current_artifact_is_pinned_and_the_last_real_one_before_the_re_pin_is_kept(self):
         self.assertEqual(set(PINS['expectedArtifact']),{'runtimeSha256','cpioSha256','rootManifestSha256','helperBinarySha256'})
