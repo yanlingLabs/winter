@@ -1,10 +1,10 @@
 {
   "_comment": "Hash pins of the composed queue and the production archive. The archive is rebuilt only when a patch or the upstream pin changes; scripts/build_archive.py fails if a rebuild differs from these values.",
-  "composedSourceDiffSha256": "3e7cd2681d8b4053a5b5d7d1273e860f234bb36be7e892552957299707df2510",
+  "composedSourceDiffSha256": "7ec7dd847bc09373d02ffe23894ca9f6ddebf2c992f8dbd2f251127823be5f24",
   "productionArchive": {
     "features": "blk,cowork-production-only",
-    "rawSha256": "75c458241a45b67d9d924fbb044c2502110ad527dce2cf40018c62aa7c655d15",
-    "strippedSha256": "06e8b8f39f8666eaa19c57090f03a321d24f7e8d468e77a48fc4242cd21566a4",
+    "rawSha256": "e04b4dd70f199eb206c9508e1f714f3dc2cee05802fee47ef666875c9e74cd20",
+    "strippedSha256": "06559a845e8815cebd9f28e65029c8696129af00e7e336c366ba3c6e52fd6f91",
     "linkThis": "stripped"
   },
   "exports": {
@@ -73,16 +73,19 @@
       "krun_start_enter"
     ],
     "cowork": [
+      "krun_cowork_add_share_v1",
       "krun_cowork_create_runtime_port_v1",
       "krun_cowork_enable_profile_v1",
       "krun_cowork_get_flush_counters_v1",
       "krun_cowork_get_pin_counters_v1",
+      "krun_cowork_next_share_event_v1",
+      "krun_cowork_revoke_share_v1",
       "krun_cowork_set_exit_hook_v1",
       "krun_cowork_set_workspace_disks_v1",
       "krun_cowork_validate_profile_v1"
     ],
     "upstreamCount": 62,
-    "coworkCount": 7,
-    "totalCount": 69
+    "coworkCount": 10,
+    "totalCount": 72
   }
 }

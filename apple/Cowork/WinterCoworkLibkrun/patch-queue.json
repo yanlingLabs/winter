@@ -1,5 +1,5 @@
 {
-  "_comment": "basePatches (0004-0013) are the admitted two-disk fixture queue, applied unchanged; newPatches (0014-0025) are the production profile. Every patch applies to the previous composed state, so the queue is a stack.",
+  "_comment": "basePatches (0004-0013) are the admitted two-disk fixture queue, applied unchanged; newPatches (0014-0026) are the production profile. Every patch applies to the previous composed state, so the queue is a stack.",
   "status": "native-source-only-independent-review-required",
   "profile": "n2-production-admitted-raw-pair-and-generic-runtime-port",
   "basePatches": [
@@ -200,6 +200,27 @@
       ],
       "purpose": "the git rules and the quarantine tag of the confined virtio-fs server (SH2 R15 as revised for H1-H5, R16): on read-write folder sources, folded and (dev, ino) protected names (_PC_CASE_SENSITIVE), git directories recognised anywhere and none new outside a .git chain, git directories never moved or removed and no directory renamed into the zone, the creation-order check, pointer files buffered until FLUSH/RELEASE and checked, hooks immutable, config only through a checked config.lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets discovered before serving, watched names reported to a bounded share_notice sink; on every read-write share, com.apple.quarantine on CREATE, MKDIR, an exec-bit SETATTR and a write-open or truncate of an executable (a tag failure is EIO, a new node removed); FUSE-message tests. Not wired: no device, entry point or gate",
       "patchSha256": "c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af"
+    },
+    {
+      "patchFile": "patches/0026-proposed-guarded-fs-device-shares-abi-gate.patch",
+      "allowedFiles": [
+        "include/libkrun.h",
+        "src/devices/src/cowork_counters.rs",
+        "src/devices/src/virtio/fs/cowork.rs",
+        "src/devices/src/virtio/fs/cowork_tests.rs",
+        "src/devices/src/virtio/fs/device.rs",
+        "src/devices/src/virtio/fs/mod.rs",
+        "src/devices/src/workspace_disks.rs",
+        "src/libkrun/src/cowork_production_gate_matrix_tests.rs",
+        "src/libkrun/src/cowork_production_profile_tests.rs",
+        "src/libkrun/src/cowork_production_shares_tests.rs",
+        "src/libkrun/src/lib.rs",
+        "src/vmm/src/builder.rs",
+        "src/vmm/src/resources.rs",
+        "src/vmm/src/vmm_config/fs.rs"
+      ],
+      "purpose": "the guarded fs device of the Cowork shares (SH2 R6, R10, R11 device half, R13 exit path, R14): one virtio-fs device per share serving the confined server through a bounce copy, registered with the reclaim Access, ring pins and per-request pins, freeze honoured, chains over max_pages + 4 descriptors or 1,048,576 + 8,192 bytes (4,096 on the high-priority queue) refused before pinning, and so is a chain whose writable area cannot hold the 16-byte FUSE out header (a FORGET or BATCH_FORGET with no writable descriptor on the high-priority queue excepted), one worker thread, no shared-memory region, no EVENT_IDX; the budget from the actual share count (3 + S devices, 48 + 4 S pins, 8 MiB + 1,114,136 S bytes); revocation closed by the device thread and reported on a share-event queue; krun_cowork_add_share_v1, krun_cowork_revoke_share_v1 and krun_cowork_next_share_event_v1; the production gate admits r.fs only as built by krun_cowork_add_share_v1; gate matrix rows with shares present; the share_notice sink of the confined server (0025) forwarded onto the share-event queue",
+      "patchSha256": "f4ed7ef2d32fdd0fad578e6fee136fc1dd38d287ee86aeb70956d69d99a5942c"
     }
   ],
   "allAddedFiles": [
@@ -240,7 +261,10 @@
     "src/devices/src/virtio/fs/macos/confined/git_tests.rs",
     "src/devices/src/virtio/fs/macos/confined/gitconfig.rs",
     "src/devices/src/virtio/fs/macos/confined/notice.rs",
-    "src/devices/src/virtio/fs/macos/confined/quarantine.rs"
+    "src/devices/src/virtio/fs/macos/confined/quarantine.rs",
+    "src/devices/src/virtio/fs/cowork.rs",
+    "src/devices/src/virtio/fs/cowork_tests.rs",
+    "src/libkrun/src/cowork_production_shares_tests.rs"
   ],
   "forbiddenAddedText": [
     "register_mmio_gpio(",
@@ -281,7 +305,12 @@
     "maxDevices": 3,
     "maxPins": 48,
     "maxPinnedBytes": 8388608,
-    "shutdownGpio": false
+    "shutdownGpio": false,
+    "maxShares": 12,
+    "shareVirtioId": 26,
+    "maxDevicesPerShare": 1,
+    "pinsPerShare": 4,
+    "pinnedBytesPerShare": 1114136
   },
   "productionReady": false,
   "vmStarted": false,

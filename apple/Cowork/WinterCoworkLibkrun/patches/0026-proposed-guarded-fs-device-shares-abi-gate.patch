@@ -1,0 +1,2632 @@
+diff --git a/include/libkrun.h b/include/libkrun.h
+index 669d9bd..8597c06 100644
+--- a/include/libkrun.h
++++ b/include/libkrun.h
+@@ -287,7 +287,8 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+  *
+  * The production profile is a separate gate from the fixture opt-ins below. It admits exactly: the
+  * two admitted RAW volumes, the generic runtime port, TWO vCPUs and 768..1024 MiB. The device
+- * inventory is the admitted one (virtio block x2, console/runtime port, rng, balloon); no shutdown
++ * inventory is the admitted one (virtio block x2, console/runtime port, rng, balloon), plus one
++ * confined virtio-fs device per share added by krun_cowork_add_share_v1 (at most 12); no shutdown
+  * GPIO device, no network, no vsock, no HVC bootstrap stream and no fixture trace. The limits are
+  * enforced inside the reviewed start-time gate, so krun_start_enter refuses any other geometry
+  * before it allocates anything. Raising either ceiling lifts that gate: it needs a fresh drain and
+@@ -297,7 +298,8 @@ int32_t krun_add_disk2(uint32_t ctx_id,
+  * Call order: krun_create_ctx, the usual non-device setters (kernel, console, krun_set_vm_config
+  * with exactly KRUN_COWORK_PRODUCTION_VCPUS and a memory size in range),
+  * krun_cowork_enable_profile_v1, krun_cowork_create_runtime_port_v1,
+- * krun_cowork_set_workspace_disks_v1, krun_cowork_validate_profile_v1 (mandatory), and last
++ * krun_cowork_set_workspace_disks_v1, krun_cowork_add_share_v1 once per share (optional),
++ * krun_cowork_validate_profile_v1 (mandatory), and last
+  * krun_start_enter. Every function returns zero (or a descriptor >= 3) or a negative errno.
+  */
+ #define KRUN_COWORK_PRODUCTION_VCPUS 2
+@@ -384,14 +386,52 @@ int32_t krun_cowork_get_flush_counters_v1(struct krun_cowork_flush_counters_v1 *
+ struct krun_cowork_pin_counters_v1 {
+     uint32_t size;                 /* in: sizeof(struct); out: bytes written */
+     uint32_t reserved;
+-    uint64_t max_pins;             /* 48 */
+-    uint64_t max_pinned_bytes;     /* 8 MiB */
++    uint64_t max_pins;             /* 48 + 4 * shares (48 before a VM is built) */
++    uint64_t max_pinned_bytes;     /* 8 MiB + 1,114,136 * shares */
+     uint64_t high_water_pins;
+     uint64_t high_water_bytes;
+     uint64_t budget_refusals;      /* pins refused for the budget; the worker stops after one */
+ };
+ int32_t krun_cowork_get_pin_counters_v1(struct krun_cowork_pin_counters_v1 *out);
+ 
++/* ====== Host-backed shares (SH2): the confined virtio-fs server on a guarded fs device ======
++ * One device per share; no shared-memory region; Simplified permissions, no xattr. Call after
++ * krun_cowork_enable_profile_v1 and before krun_cowork_validate_profile_v1. The pin budget grows with the
++ * shares: 48 + 4 * S pins and 8,388,608 + 1,114,136 * S bytes (96 and 21,758,240 at S = 12). */
++#define KRUN_COWORK_MAX_SHARES 12
++#define KRUN_COWORK_SHARE_READ_ONLY (1u << 0)    /* every mutation is EROFS */
++#define KRUN_COWORK_SHARE_WINTER (1u << 1)       /* a Winter share: O_UNIQUE, LINK refused, F_FULLFSYNC */
++#define KRUN_COWORK_SHARE_FOLDER_RULES (1u << 2) /* folder rules (git and quarantine); not with WINTER */
++
++/* flags: bit 0 = read-only, bit 1 = Winter share (R5 O_UNIQUE), bit 2 = folder rules (R15); every other bit zero.
++   tag: [a-z0-9-]{1,32}, distinct. root_fd: a directory, borrowed. guest_path: the canonical guest mount path (R15 gitfiles only). */
++int32_t krun_cowork_add_share_v1(uint32_t ctx_id, const char *tag, int32_t root_fd, uint32_t flags, const char *guest_path);
++
++/* Revokes one share (R11), from any thread, before or after krun_start_enter. Every request that starts
++ * after it answers EACCES; the device's own thread closes the share's descriptors at its next request
++ * boundary, or at once when idle, and only then is KRUN_COWORK_SHARE_EVENT_REVOKED queued for the tag.
++ * A repeat returns 0 and reports nothing. -ENOENT for an unknown context or tag. */
++int32_t krun_cowork_revoke_share_v1(uint32_t ctx_id, const char *tag);
++
++#define KRUN_COWORK_SHARE_EVENT_REVOKED 1 /* the share's descriptors are closed: send share_revoked{tag} */
++#define KRUN_COWORK_SHARE_EVENT_NOTICE 2  /* send share_notice{tag, kind}, kind = notice */
++#define KRUN_COWORK_SHARE_NOTICE_ENVRC 1
++#define KRUN_COWORK_SHARE_NOTICE_VSCODE_TASKS 2
++#define KRUN_COWORK_SHARE_NOTICE_VSCODE_SETTINGS 3
++#define KRUN_COWORK_SHARE_NOTICE_CODE_WORKSPACE 4
++#define KRUN_COWORK_SHARE_NOTICE_IDEA_PROJECT 5
++#define KRUN_COWORK_SHARE_NOTICE_GIT_PROTECTED 6
++struct krun_cowork_share_event_v1 {
++    uint32_t size;     /* in: sizeof(struct); out: bytes written */
++    uint32_t kind;     /* KRUN_COWORK_SHARE_EVENT_* */
++    uint32_t notice;   /* KRUN_COWORK_SHARE_NOTICE_* for a notice, 0 otherwise */
++    uint32_t reserved;
++    char tag[36];      /* NUL-terminated */
++};
++/* The next share event of a context: 1 when one was written, 0 when none arrived within timeout_ms (0 polls,
++ * at most 60000). Once per tag for a revocation, once per tag and kind for a notice. */
++int32_t krun_cowork_next_share_event_v1(uint32_t ctx_id, struct krun_cowork_share_event_v1 *out, uint32_t timeout_ms);
++
+ #ifdef KRUN_COWORK_FIXTURE_ORACLE
+ /* ====== Fixture oracle: present only when built with `cowork-fixture-oracle` ======
+  * Regression oracle for the reviewed fixture profile. Never a production API. A context that carries
+diff --git a/src/devices/src/cowork_counters.rs b/src/devices/src/cowork_counters.rs
+index ee89196..564021b 100644
+--- a/src/devices/src/cowork_counters.rs
++++ b/src/devices/src/cowork_counters.rs
+@@ -27,6 +27,9 @@ static FLUSH: [FlushSlot; FLUSH_SLOTS] = [FlushSlot::new(), FlushSlot::new()];
+ static PIN_HIGH_COUNT: AtomicU64 = AtomicU64::new(0);
+ static PIN_HIGH_BYTES: AtomicU64 = AtomicU64::new(0);
+ static PIN_REFUSED: AtomicU64 = AtomicU64::new(0);
++/// The budget the started VM's `Access` was built with (0: no VM built in this process yet).
++static BUDGET_PINS: AtomicU64 = AtomicU64::new(0);
++static BUDGET_BYTES: AtomicU64 = AtomicU64::new(0);
+ 
+ fn slot(device: u64) -> Option<&'static FlushSlot> {
+     usize::try_from(device).ok().and_then(|index| FLUSH.get(index))
+@@ -78,6 +81,18 @@ pub fn pin_accepted(count: usize, bytes: u64) {
+ pub fn pin_refused() {
+     PIN_REFUSED.fetch_add(1, Ordering::AcqRel);
+ }
++/// Records the pin budget the VM's `Access` was built with (R14: it grows with the shares).
++pub fn set_budget(pins: usize, bytes: u64) {
++    BUDGET_PINS.store(pins as u64, Ordering::Release);
++    BUDGET_BYTES.store(bytes, Ordering::Release);
++}
++/// The recorded budget, or `None` before a VM was built in this process.
++pub fn budget() -> Option<(u64, u64)> {
++    match BUDGET_PINS.load(Ordering::Acquire) {
++        0 => None,
++        pins => Some((pins, BUDGET_BYTES.load(Ordering::Acquire))),
++    }
++}
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct PinSnapshot {
+     pub high_water_pins: u64,
+diff --git a/src/devices/src/virtio/fs/cowork.rs b/src/devices/src/virtio/fs/cowork.rs
+new file mode 100644
+index 0000000..4e9a038
+--- /dev/null
++++ b/src/devices/src/virtio/fs/cowork.rs
+@@ -0,0 +1,693 @@
++//! The guarded fs device of the Cowork shares (SH2, the device half of R6, R10, R11, R13 and R14 of the
++//! N2 extensions design). One device serves one share: a `ConfinedFs` behind `Server::handle_confined_message`,
++//! on libkrun's virtio-fs transport, guarded the way the guarded block device is:
++//!
++//! * The device registers with the reclaim `Access`. Both virtqueues' rings are pinned for the life of an
++//!   activation, and every request pins its descriptor ranges from the moment it is popped until its used
++//!   entry is published (R14).
++//! * Guest memory is touched only under a lease: the request bytes are copied out, the reply is copied in.
++//!   The filesystem work runs on a private bounce copy of the chain with no lease held, so a reclaim
++//!   `freeze` never waits for host I/O, and a capture or completion that meets a freeze waits for the
++//!   resume (R14).
++//! * A chain of more than `max_pages + 4` descriptors, or of more than 1,048,576 + 8,192 bytes (4,096 on the
++//!   high-priority queue), is refused before anything is pinned: a terminal fault, as for a malformed block
++//!   chain (R14). So is a chain whose writable area is under the 16-byte FUSE out header, except a FORGET or
++//!   BATCH_FORGET with no writable descriptor at all on the high-priority queue (they take no reply).
++//! * One worker thread per device handles one request at a time (R10). There is no shared-memory region (R6).
++//! * Revocation (R11): any thread sets the flag. The device's own thread closes the share's descriptors at
++//!   its next request boundary, or at once when it is idle (the revoker writes its request queue event),
++//!   then reports `ShareEvent::Revoked` once. While no device thread runs (never activated, reset or
++//!   stopped), the share's server sits in its slot, and the revoker closes it there under the slot lock,
++//!   where no other thread can be using it.
++//! * The exit path stops and joins the worker before the exit hook (R13; `VmmExitObserver for Fs`).
++use std::collections::{HashSet, VecDeque};
++use std::ffi::{CStr, CString};
++use std::fmt;
++use std::io;
++use std::os::fd::AsRawFd;
++use std::sync::atomic::{AtomicBool, Ordering};
++use std::sync::{Arc, Condvar, Mutex, MutexGuard};
++use std::thread::JoinHandle;
++use std::time::{Duration, Instant};
++
++use utils::epoll::{ControlOperation, Epoll, EpollEvent, EventSet};
++use utils::eventfd::EventFd;
++use vm_memory::{Address, Bytes, GuestAddress, GuestMemory, GuestMemoryMmap, GuestMemoryRegion};
++
++use super::defs::{HPQ_INDEX, NUM_QUEUES, QUEUE_SIZE, REQ_INDEX};
++use super::descriptor_utils::{Reader, Writer};
++use super::macos::confined::{ConfinedConfig, ConfinedFs, NoticeKind, RevokeSwitch, ShareFlags, ShareNotices};
++use super::server::confined_dispatch::CONFINED_MAX_PAGES;
++use super::server::Server;
++use crate::reclaim_access::{Access, Device, Fault, Lease, Pin, Range};
++use crate::virtio::{Descriptor, DescriptorChain, DeviceQueue, Queue};
++
++/// At most 12 shares per incarnation: nine folder sources and the three Winter shares (2.1).
++pub const MAX_SHARES: usize = 12;
++/// A share tag is `[a-z0-9-]{1,32}` (the ABI block of 2.3).
++pub const TAG_MAX: usize = 32;
++/// A guest mount path fits the L2 record's `guest_path[256]`, NUL-padded (2.4).
++pub const GUEST_PATH_MAX: usize = 255;
++/// R14: the longest chain the device accepts, `max_pages + 4` descriptors.
++pub const MAX_CHAIN_DESCRIPTORS: usize = CONFINED_MAX_PAGES as usize + 4;
++/// R14: the most bytes one request-queue chain may carry: a 1 MiB payload plus the FUSE in and out headers.
++pub const MAX_CHAIN_BYTES: u64 = CONFINED_MAX_PAGES as u64 * 4096 + 8192;
++/// R14: the most bytes one high-priority-queue chain (FORGET, INTERRUPT) may carry.
++pub const MAX_HPQ_BYTES: u64 = 4096;
++/// R14: one virtqueue's rings at the queue size the device offers: the descriptor table, the available
++/// ring and the used ring (26,636 bytes at 1,024 entries).
++pub const RING_BYTES: u64 = 16 * QUEUE_SIZE as u64 + (6 + 2 * QUEUE_SIZE as u64) + (6 + 8 * QUEUE_SIZE as u64);
++/// The FUSE out header every reply starts with. A chain whose writable area cannot hold it is refused: the
++/// stock READ, READDIR and READDIRPLUS handlers unwrap the split after it.
++pub const OUT_HEADER_BYTES: u64 = std::mem::size_of::<super::fuse::OutHeader>() as u64;
++/// R14: pins one fs device holds at most: two ring pins, one request and one high-priority request.
++pub const PINS_PER_SHARE: usize = 4;
++/// R14: bytes one fs device pins at most (1,114,136).
++pub const PINNED_BYTES_PER_SHARE: u64 = MAX_CHAIN_BYTES + MAX_HPQ_BYTES + 2 * RING_BYTES;
++/// A capture or completion waits at most this long for a frozen gate (the guarded block device's bound).
++const FREEZE_WAIT: Duration = Duration::from_secs(2);
++const VIRTQ_DESC_F_NEXT: u16 = 1;
++const VIRTQ_DESC_F_WRITE: u16 = 2;
++/// The bounce copy: the descriptor table, then the chain's buffers from this offset.
++const BOUNCE_DATA: u64 = 8192;
++const BOUNCE_SIZE: usize = BOUNCE_DATA as usize + MAX_CHAIN_BYTES as usize;
++static ZEROS: [u8; 4096] = [0; 4096];
++
++/// `[a-z0-9-]{1,32}`.
++pub fn valid_tag(tag: &[u8]) -> bool {
++    (1..=TAG_MAX).contains(&tag.len()) && tag.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
++}
++
++/// A canonical guest mount path under `/workspace/` or `/run/winter/`: at least one component below the
++/// prefix, no empty, `.` or `..` component, no trailing slash, components of `[A-Za-z0-9._-]`, at most 255 bytes.
++pub fn valid_guest_path(path: &[u8]) -> bool {
++    if path.len() > GUEST_PATH_MAX {
++        return false;
++    }
++    let Some(rest) = path.strip_prefix(b"/workspace/").or_else(|| path.strip_prefix(b"/run/winter/")) else {
++        return false;
++    };
++    rest.split(|b| *b == b'/').all(|part| {
++        !part.is_empty() && part != b"." && part != b".." && part.iter().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
++    })
++}
++
++/// Two mount paths that are equal, or one below the other.
++pub fn guest_paths_overlap(a: &[u8], b: &[u8]) -> bool {
++    let below = |parent: &[u8], child: &[u8]| child.len() > parent.len() && child.starts_with(parent) && child[parent.len()] == b'/';
++    a == b || below(a, b) || below(b, a)
++}
++
++/// The ABI number of a `share_notice` kind (`KRUN_COWORK_SHARE_NOTICE_*`).
++pub fn notice_number(kind: NoticeKind) -> u32 {
++    match kind {
++        NoticeKind::Envrc => 1,
++        NoticeKind::VscodeTasks => 2,
++        NoticeKind::VscodeSettings => 3,
++        NoticeKind::CodeWorkspace => 4,
++        NoticeKind::IdeaProject => 5,
++        NoticeKind::GitProtected => 6,
++    }
++}
++
++/// What the worker turns into an L2 status: `share_revoked{tag}` or `share_notice{tag, kind}`.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub enum ShareEvent {
++    Revoked { tag: String },
++    Notice { tag: String, kind: NoticeKind },
++}
++
++#[derive(Default)]
++struct EventState {
++    queue: VecDeque<ShareEvent>,
++    /// (tag, 0) for a revocation, (tag, the notice's ABI number) for a notice: each is queued at most once
++    /// per incarnation, which also bounds the queue (12 tags x 7 events).
++    sent: HashSet<(String, u32)>,
++}
++
++/// The share events of one context, drained by the worker (`krun_cowork_next_share_event_v1`).
++#[derive(Default)]
++pub struct ShareEvents {
++    state: Mutex<EventState>,
++    ready: Condvar,
++}
++
++impl ShareEvents {
++    pub fn new() -> Arc<Self> {
++        Arc::new(Self::default())
++    }
++
++    fn lock(&self) -> MutexGuard<'_, EventState> {
++        self.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
++    }
++
++    fn push(&self, tag: &str, kind: Option<NoticeKind>) {
++        let mut state = self.lock();
++        if state.sent.insert((tag.to_string(), kind.map_or(0, notice_number))) {
++            let tag = tag.to_string();
++            state.queue.push_back(match kind {
++                None => ShareEvent::Revoked { tag },
++                Some(kind) => ShareEvent::Notice { tag, kind },
++            });
++            self.ready.notify_all();
++        }
++    }
++
++    /// The oldest undrained event, waiting at most `timeout` for one.
++    pub fn next(&self, timeout: Duration) -> Option<ShareEvent> {
++        let deadline = Instant::now() + timeout;
++        let mut state = self.lock();
++        loop {
++            if let Some(event) = state.queue.pop_front() {
++                return Some(event);
++            }
++            let remaining = deadline.saturating_duration_since(Instant::now());
++            if remaining.is_zero() {
++                return None;
++            }
++            state = self.ready.wait_timeout(state, remaining).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
++        }
++    }
++}
++
++
++struct Slot {
++    /// The share's server while no device thread holds it.
++    server: Option<Server<ConfinedFs>>,
++    /// The running device thread's request queue event (R11: the revoker wakes an idle thread through it).
++    wake: Option<Arc<EventFd>>,
++    /// The descriptors were closed and `Revoked` was reported.
++    closed: bool,
++}
++
++/// One share: its tag, flags, root identity, revoke switch and server, from `krun_cowork_add_share_v1` to
++/// the end of the process.
++pub struct ShareControl {
++    tag: String,
++    flags: ShareFlags,
++    identity: (u64, u64),
++    guest_path: CString,
++    /// The confined server's `share_notice` sink (R15); `forward_notices` moves it onto the event queue.
++    notices: ShareNotices,
++    revoke: RevokeSwitch,
++    events: Arc<ShareEvents>,
++    slot: Mutex<Slot>,
++}
++
++impl fmt::Debug for ShareControl {
++    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
++        f.debug_struct("ShareControl").field("tag", &self.tag).field("flags", &self.flags).field("identity", &self.identity).finish()
++    }
++}
++
++impl ShareControl {
++    /// Builds the share's confined server, which owns `config.root` from here on.
++    pub fn new(tag: &str, config: ConfinedConfig, events: Arc<ShareEvents>) -> io::Result<Arc<Self>> {
++        if !valid_tag(tag.as_bytes()) || !valid_guest_path(config.guest_path.as_bytes()) {
++            return Err(io::Error::from_raw_os_error(libc::EINVAL));
++        }
++        let flags = config.flags;
++        let guest_path = config.guest_path.clone();
++        let fs = ConfinedFs::new(config)?;
++        Ok(Arc::new(ShareControl {
++            tag: tag.to_string(),
++            flags,
++            identity: fs.root_identity(),
++            guest_path,
++            notices: fs.notices(),
++            revoke: fs.revoke_switch(),
++            events,
++            slot: Mutex::new(Slot { server: Some(Server::new(fs)), wake: None, closed: false }),
++        }))
++    }
++
++    fn lock(&self) -> MutexGuard<'_, Slot> {
++        self.slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
++    }
++
++    pub fn tag(&self) -> &str {
++        &self.tag
++    }
++
++    pub fn flags(&self) -> ShareFlags {
++        self.flags
++    }
++
++    /// The root's (dev, ino).
++    pub fn identity(&self) -> (u64, u64) {
++        self.identity
++    }
++
++    /// The canonical guest mount path (R15 gitfiles).
++    pub fn guest_path(&self) -> &CStr {
++        &self.guest_path
++    }
++
++    /// The confined server's notice sink (shared with the server).
++    pub fn notices(&self) -> ShareNotices {
++        self.notices.clone()
++    }
++
++    /// Moves the server's pending notices onto the event queue as `share_notice{tag, kind}`, once per kind.
++    /// The device thread calls it after every request; the drain calls it before it waits.
++    pub fn forward_notices(&self) {
++        for kind in self.notices.drain() {
++            self.events.push(&self.tag, Some(kind));
++        }
++    }
++
++    pub fn is_revoked(&self) -> bool {
++        self.revoke.is_revoked()
++    }
++
++    /// R11, from the worker's thread: sets the flag, then either closes a share no device thread holds (and
++    /// reports), or wakes the device thread through its queue event so it closes its own descriptors.
++    /// A second call changes nothing and reports nothing.
++    pub fn revoke(&self) {
++        self.revoke.revoke();
++        let mut slot = self.lock();
++        if slot.closed {
++            return;
++        }
++        if let Some(server) = slot.server.as_mut() {
++            server.close_confined();
++            slot.closed = true;
++            self.events.push(&self.tag, None);
++        } else if let Some(wake) = &slot.wake {
++            let _ = wake.write(1);
++        }
++    }
++
++    /// The descriptors the share's server holds while no device thread runs it (`None` while one does).
++    pub fn idle_descriptors(&self) -> Option<usize> {
++        self.lock().server.as_ref().map(|server| server.confined_fs().open_descriptors())
++    }
++
++    /// The device thread takes the server for its activation; `wake` is its request queue event.
++    fn take(&self, wake: Arc<EventFd>) -> Option<Server<ConfinedFs>> {
++        let mut slot = self.lock();
++        let server = slot.server.take()?;
++        slot.wake = Some(wake);
++        Some(server)
++    }
++
++    fn put_back(&self, server: Server<ConfinedFs>) {
++        let mut slot = self.lock();
++        slot.server = Some(server);
++        slot.wake = None;
++    }
++
++    /// The device thread's request-boundary check (R11): once the flag is set, it closes its own descriptors
++    /// and reports, once.
++    fn close_if_revoked(&self, server: &mut Server<ConfinedFs>) {
++        if !self.revoke.is_revoked() {
++            return;
++        }
++        let mut slot = self.lock();
++        if slot.closed {
++            return;
++        }
++        server.close_confined();
++        slot.closed = true;
++        self.events.push(&self.tag, None);
++    }
++}
++
++/// The device's queues and guest memory, only ever touched under a lease, plus the private bounce copy the
++/// server runs on.
++pub(crate) struct FsPort {
++    memory: GuestMemoryMmap,
++    queues: Vec<Queue>,
++    access: Access,
++    device: Device,
++    bounce: GuestMemoryMmap,
++    _rings: Vec<Pin>,
++}
++
++/// A request popped from a queue: its head, its ranges, the bytes it carries and the pin on every range.
++pub(crate) struct Captured {
++    queue: usize,
++    head: u16,
++    readable: Vec<Range>,
++    writable: Vec<Range>,
++    request: Vec<u8>,
++    /// Released after the used entry is published, under the completion lease.
++    _pin: Pin,
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum Step {
++    Empty,
++    Completed,
++    Stopped,
++}
++
++fn total(ranges: &[Range]) -> u64 {
++    ranges.iter().map(|r| r.len).sum()
++}
++
++/// R14: the chain's readable and writable ranges, refused before anything is pinned when it has more than
++/// `MAX_CHAIN_DESCRIPTORS` descriptors or more than `limit` bytes. Also refused: an indirect or unknown
++/// flag, a cycle, a readable descriptor after a writable one, a chain with nothing to read.
++fn walk_chain(head: DescriptorChain<'_>, limit: u64) -> Result<(Vec<Range>, Vec<Range>), Fault> {
++    let (mut readable, mut writable) = (Vec::new(), Vec::new());
++    let (mut count, mut bytes) = (0usize, 0u64);
++    let mut seen = HashSet::new();
++    let mut next = Some(head);
++    while let Some(desc) = next {
++        count += 1;
++        if count > MAX_CHAIN_DESCRIPTORS {
++            return Err(Fault::Limit);
++        }
++        bytes = bytes.checked_add(u64::from(desc.len)).ok_or(Fault::Overflow)?;
++        if bytes > limit {
++            return Err(Fault::Limit);
++        }
++        if !seen.insert(desc.index) || desc.flags & !(VIRTQ_DESC_F_NEXT | VIRTQ_DESC_F_WRITE) != 0 {
++            return Err(Fault::InvalidRange);
++        }
++        if desc.len != 0 {
++            let range = Range { gpa: desc.addr.raw_value(), len: u64::from(desc.len) };
++            if desc.is_write_only() {
++                writable.push(range);
++            } else if writable.is_empty() {
++                readable.push(range);
++            } else {
++                return Err(Fault::InvalidRange);
++            }
++        }
++        next = if desc.flags & VIRTQ_DESC_F_NEXT != 0 { Some(desc.next_descriptor().ok_or(Fault::InvalidRange)?) } else { None };
++    }
++    if readable.is_empty() {
++        return Err(Fault::InvalidRange);
++    }
++    Ok((readable, writable))
++}
++
++/// A chain's writable area holds at least the FUSE out header. The one exception is a request that takes no
++/// reply, sent as Linux sends it: a FORGET or BATCH_FORGET on the high-priority queue with no writable
++/// descriptor. The opcode is read from the private copy of the request, the one the server will see.
++fn reply_area_fits(index: usize, request: &[u8], writable: u64) -> bool {
++    if writable >= OUT_HEADER_BYTES {
++        return true;
++    }
++    if writable != 0 || index != HPQ_INDEX {
++        return false;
++    }
++    let opcode = request.get(4..8).and_then(|b| <[u8; 4]>::try_from(b).ok()).map(u32::from_le_bytes);
++    opcode == Some(super::fuse::Opcode::Forget as u32) || opcode == Some(super::fuse::Opcode::BatchForget as u32)
++}
++
++impl FsPort {
++    /// Pins both queues' rings (R14): the high-priority queue and the request queue, in that order.
++    pub(crate) fn new(memory: GuestMemoryMmap, queues: Vec<Queue>, access: Access, device: Device) -> Result<Self, Fault> {
++        if queues.len() != NUM_QUEUES {
++            return Err(Fault::InvalidRange);
++        }
++        let lease = access.begin(device)?;
++        let mut rings = Vec::with_capacity(NUM_QUEUES);
++        for queue in &queues {
++            queue.fixture_validate_report(&memory).map_err(|_| Fault::InvalidRange)?;
++            let ranges: Vec<_> = queue
++                .fixture_exclusions(&memory, false)
++                .map_err(|_| Fault::InvalidRange)?
++                .into_iter()
++                .map(|(gpa, len)| Range { gpa, len })
++                .collect();
++            rings.push(lease.pin(&ranges)?);
++        }
++        drop(lease);
++        let bounce = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), BOUNCE_SIZE)]).map_err(|_| Fault::Limit)?;
++        Ok(FsPort { memory, queues, access, device, bounce, _rings: rings })
++    }
++
++    fn checked_range(&self, range: Range) -> Result<(), Fault> {
++        let end = range.gpa.checked_add(range.len).ok_or(Fault::Overflow)?;
++        let region = self.memory.find_region(GuestAddress(range.gpa)).ok_or(Fault::InvalidRange)?;
++        if end > region.start_addr().raw_value().checked_add(region.len()).ok_or(Fault::Overflow)? {
++            return Err(Fault::InvalidRange);
++        }
++        Ok(())
++    }
++
++    /// Under the lease: pops one chain, refuses it before pinning if it is over the bounds, copies its
++    /// readable bytes out and pins every range.
++    fn capture(&mut self, lease: &Lease, index: usize) -> Result<Option<Captured>, Fault> {
++        lease.check(&self.access, self.device)?;
++        let limit = if index == HPQ_INDEX { MAX_HPQ_BYTES } else { MAX_CHAIN_BYTES };
++        let Some(head) = self.queues[index].fixture_checked_pop(&self.memory).map_err(|_| Fault::InvalidRange)? else {
++            return Ok(None);
++        };
++        let head_index = head.index;
++        let (readable, writable) = walk_chain(head, limit)?;
++        for range in readable.iter().chain(&writable) {
++            self.checked_range(*range)?;
++        }
++        let mut request = vec![0u8; total(&readable) as usize];
++        let mut done = 0;
++        for range in &readable {
++            let len = range.len as usize;
++            self.memory.read_slice(&mut request[done..done + len], GuestAddress(range.gpa)).map_err(|_| Fault::InvalidRange)?;
++            done += len;
++        }
++        if !reply_area_fits(index, &request, total(&writable)) {
++            return Err(Fault::InvalidRange);
++        }
++        let ranges: Vec<Range> = readable.iter().chain(&writable).copied().collect();
++        let pin = lease.pin(&ranges)?;
++        Ok(Some(Captured { queue: index, head: head_index, readable, writable, request, _pin: pin }))
++    }
++
++    /// No lease: the server runs on the bounce copy, laid out descriptor for descriptor as the guest laid out
++    /// the chain. Returns the reply bytes (at most the writable size).
++    fn perform(&mut self, server: &Server<ConfinedFs>, captured: &Captured) -> Vec<u8> {
++        let count = captured.readable.len() + captured.writable.len();
++        let in_bytes = total(&captured.readable);
++        let out_bytes = total(&captured.writable) as usize;
++        if self.bounce.write_slice(&captured.request, GuestAddress(BOUNCE_DATA)).is_err() {
++            return Vec::new();
++        }
++        // The reply area starts zeroed: nothing of an earlier request can reach this reply.
++        let mut cleared = 0;
++        while cleared < out_bytes {
++            let len = (out_bytes - cleared).min(ZEROS.len());
++            if self.bounce.write_slice(&ZEROS[..len], GuestAddress(BOUNCE_DATA + in_bytes + cleared as u64)).is_err() {
++                return Vec::new();
++            }
++            cleared += len;
++        }
++        let mut at = BOUNCE_DATA;
++        for (index, range) in captured.readable.iter().chain(&captured.writable).enumerate() {
++            let mut flags = if index + 1 < count { VIRTQ_DESC_F_NEXT } else { 0 };
++            if index >= captured.readable.len() {
++                flags |= VIRTQ_DESC_F_WRITE;
++            }
++            let next = if index + 1 < count { index as u16 + 1 } else { 0 };
++            let descriptor = Descriptor { addr: at, len: range.len as u32, flags, next };
++            if self.bounce.write_obj(descriptor, GuestAddress(16 * index as u64)).is_err() {
++                return Vec::new();
++            }
++            at += range.len;
++        }
++        let Some(chain) = DescriptorChain::checked_new(&self.bounce, GuestAddress(0), count as u16, 0) else {
++            return Vec::new();
++        };
++        let written = match (Reader::new(&self.bounce, chain.clone()), Writer::new(&self.bounce, chain)) {
++            (Ok(reader), Ok(writer)) => server.handle_confined_message(reader, writer).unwrap_or(0),
++            _ => 0,
++        };
++        let mut reply = vec![0u8; written.min(out_bytes)];
++        if self.bounce.read_slice(&mut reply, GuestAddress(BOUNCE_DATA + in_bytes)).is_err() {
++            return Vec::new();
++        }
++        reply
++    }
++
++    /// Under the lease: copies the reply into the guest's writable ranges and publishes the used entry. The
++    /// caller drops the request's pin after this, still under the lease.
++    fn complete(&mut self, lease: &Lease, captured: &Captured, reply: &[u8]) -> Result<(), Fault> {
++        lease.check(&self.access, self.device)?;
++        let queue = &mut self.queues[captured.queue];
++        queue.fixture_validate_report(&self.memory).map_err(|_| Fault::InvalidRange)?;
++        let mut done = 0;
++        for range in &captured.writable {
++            if done == reply.len() {
++                break;
++            }
++            let len = (range.len as usize).min(reply.len() - done);
++            self.memory.write_slice(&reply[done..done + len], GuestAddress(range.gpa)).map_err(|_| Fault::InvalidRange)?;
++            done += len;
++        }
++        if done != reply.len() {
++            return Err(Fault::InvalidRange);
++        }
++        let len = u32::try_from(reply.len()).map_err(|_| Fault::Overflow)?;
++        queue.add_used(&self.memory, captured.head, len).map_err(|_| Fault::InvalidRange)
++    }
++
++    /// Waits for a frozen gate to reopen, as the guarded block device does: false if stopped meanwhile.
++    fn wait(&self, stopped: &impl Fn() -> bool) -> Result<bool, Fault> {
++        let deadline = Instant::now() + FREEZE_WAIT;
++        loop {
++            if stopped() || self.access.stopped() {
++                return Ok(false);
++            }
++            match self.access.wait_begin(self.device, Duration::from_millis(10)) {
++                Ok(lease) => {
++                    drop(lease);
++                    return Ok(true);
++                }
++                Err(Fault::Timeout) if Instant::now() < deadline => {}
++                Err(fault) => return Err(fault),
++            }
++        }
++    }
++}
++
++/// One request of one queue, start to finish: capture under a lease, the filesystem work on the bounce copy
++/// with no lease, completion under a lease. A freeze defers either lease; a stop abandons the request
++/// without a used entry.
++pub(crate) fn service_next(port: &mut FsPort, server: &Server<ConfinedFs>, index: usize, stopped: impl Fn() -> bool) -> Result<Step, Fault> {
++    let captured = loop {
++        if stopped() || port.access.stopped() {
++            return Ok(Step::Stopped);
++        }
++        match port.access.begin(port.device) {
++            Ok(lease) => match port.capture(&lease, index)? {
++                Some(captured) => break captured,
++                None => return Ok(Step::Empty),
++            },
++            Err(Fault::Frozen) => {
++                if !port.wait(&stopped)? {
++                    return Ok(Step::Stopped);
++                }
++            }
++            Err(fault) => return Err(fault),
++        }
++    };
++    if stopped() || port.access.stopped() {
++        return Ok(Step::Stopped);
++    }
++    let reply = port.perform(server, &captured);
++    loop {
++        if stopped() || port.access.stopped() {
++            return Ok(Step::Stopped);
++        }
++        match port.access.begin(port.device) {
++            Ok(lease) => {
++                port.complete(&lease, &captured, &reply)?;
++                drop(captured);
++                drop(lease);
++                return Ok(Step::Completed);
++            }
++            Err(Fault::Frozen) => {
++                if !port.wait(&stopped)? {
++                    return Ok(Step::Stopped);
++                }
++            }
++            Err(fault) => return Err(fault),
++        }
++    }
++}
++
++/// What `Fs` keeps for a share device between activations.
++pub(crate) struct CoworkDevice {
++    pub(crate) share: Arc<ShareControl>,
++    pub(crate) access: Access,
++    pub(crate) device: Device,
++    pub(crate) stop: Arc<AtomicBool>,
++}
++
++/// The share device's one worker thread (R10).
++pub(crate) struct GuardedFsWorker {
++    port: FsPort,
++    events: Vec<Arc<EventFd>>,
++    share: Arc<ShareControl>,
++    server: Option<Server<ConfinedFs>>,
++    stop_fd: EventFd,
++    stop: Arc<AtomicBool>,
++}
++
++impl GuardedFsWorker {
++    pub(crate) fn new(queues: Vec<DeviceQueue>, memory: GuestMemoryMmap, access: Access, device: Device, share: Arc<ShareControl>, stop_fd: EventFd, stop: Arc<AtomicBool>) -> Result<Self, Fault> {
++        let (queues, events): (Vec<_>, Vec<_>) = queues.into_iter().map(|q| (q.queue, q.event)).unzip();
++        let port = FsPort::new(memory, queues, access, device)?;
++        let server = share.take(events[REQ_INDEX].clone()).ok_or(Fault::Busy)?;
++        Ok(GuardedFsWorker { port, events, share, server: Some(server), stop_fd, stop })
++    }
++
++    pub(crate) fn run(self, completed: impl FnMut() + Send + 'static) -> JoinHandle<()> {
++        std::thread::Builder::new().name("guarded fs worker".into()).spawn(move || self.work(completed)).unwrap()
++    }
++
++    fn work(mut self, mut completed: impl FnMut()) {
++        let result = self.event_loop(&mut completed);
++        let _ = self.stop_fd.read();
++        if result.is_err() {
++            self.port.access.stop();
++        }
++    }
++
++    /// Drains one queue, checking the revoke flag at every request boundary (the first one included, so a
++    /// wake by the revoker closes an idle thread at once). True when stopped.
++    fn drain(&mut self, index: usize, completed: &mut impl FnMut()) -> Result<bool, Fault> {
++        let server = self.server.as_mut().expect("the worker holds the server");
++        loop {
++            self.share.close_if_revoked(server);
++            let stop = &self.stop;
++            match service_next(&mut self.port, server, index, || stop.load(Ordering::Acquire))? {
++                Step::Completed => {
++                    self.share.forward_notices();
++                    completed()
++                }
++                Step::Empty => return Ok(false),
++                Step::Stopped => return Ok(true),
++            }
++        }
++    }
++
++    fn event_loop(&mut self, completed: &mut impl FnMut()) -> Result<(), Fault> {
++        let epoll = Epoll::new().map_err(|_| Fault::Stopped)?;
++        let fds = [self.events[HPQ_INDEX].as_raw_fd(), self.events[REQ_INDEX].as_raw_fd(), self.stop_fd.as_raw_fd()];
++        for fd in fds {
++            epoll.ctl(ControlOperation::Add, fd, &EpollEvent::new(EventSet::IN, fd as u64)).map_err(|_| Fault::Stopped)?;
++        }
++        loop {
++            // R11: the revoker wakes an idle thread through the request queue event; the drain's boundary check
++            // then closes at once.
++            if self.stop.load(Ordering::Acquire) {
++                return Ok(());
++            }
++            let mut ready = vec![EpollEvent::new(EventSet::empty(), 0); 8];
++            let count = epoll.wait(8, -1, &mut ready).map_err(|_| Fault::Stopped)?;
++            for event in &ready[..count] {
++                if event.fd() == fds[2] || self.stop.load(Ordering::Acquire) {
++                    return Ok(());
++                }
++                for index in [HPQ_INDEX, REQ_INDEX] {
++                    if event.fd() == fds[index] {
++                        let _ = self.events[index].read();
++                        if self.drain(index, completed)? {
++                            return Ok(());
++                        }
++                    }
++                }
++            }
++        }
++    }
++}
++
++impl Drop for GuardedFsWorker {
++    /// The server goes back to the share's slot (closed first if the share was revoked meanwhile), also when
++    /// the thread unwinds.
++    fn drop(&mut self) {
++        if let Some(mut server) = self.server.take() {
++            self.share.close_if_revoked(&mut server);
++            self.share.put_back(server);
++        }
++    }
++}
++
++#[cfg(test)]
++#[path = "cowork_tests.rs"]
++mod tests;
+diff --git a/src/devices/src/virtio/fs/cowork_tests.rs b/src/devices/src/virtio/fs/cowork_tests.rs
+new file mode 100644
+index 0000000..b93caaa
+--- /dev/null
++++ b/src/devices/src/virtio/fs/cowork_tests.rs
+@@ -0,0 +1,850 @@
++// The guarded fs device without a VM: real virtqueues of 1,024 entries in guest memory, a simulated guest
++// driver that lays chains out as the Linux virtio-fs driver does, real FUSE requests, the reclaim `Access`,
++// and the confined server on temporary trees under the system temp directory. No VM, no vCPU, no
++// Hypervisor.framework call.
++
++use std::fs;
++use std::os::fd::OwnedFd;
++use std::path::PathBuf;
++use std::sync::atomic::AtomicUsize;
++use std::sync::mpsc;
++
++use utils::eventfd::{EventFd, EFD_NONBLOCK};
++use vm_memory::ByteValued;
++
++use super::*;
++use crate::virtio::fs::fuse::*;
++
++const MEM: usize = 4 << 20;
++const HPQ_BASE: u64 = 0x10000;
++const REQ_BASE: u64 = 0x20000;
++const BUFFERS: u64 = 0x100000;
++const STRUCTURAL_PINS: usize = 12;
++const STRUCTURAL_BYTES: u64 = 4_289_930;
++
++static NEXT_TREE: AtomicUsize = AtomicUsize::new(0);
++
++struct TempTree(PathBuf);
++impl TempTree {
++    fn new() -> Self {
++        let path = std::env::temp_dir().join(format!("guarded-fs-{}-{}", std::process::id(), NEXT_TREE.fetch_add(1, Ordering::SeqCst)));
++        let _ = fs::remove_dir_all(&path);
++        fs::create_dir(&path).unwrap();
++        TempTree(path.canonicalize().unwrap())
++    }
++}
++impl Drop for TempTree {
++    fn drop(&mut self) {
++        let _ = fs::remove_dir_all(&self.0);
++    }
++}
++
++fn share(tree: &TempTree, tag: &str, events: Arc<ShareEvents>) -> Arc<ShareControl> {
++    let root = OwnedFd::from(fs::File::open(&tree.0).unwrap());
++    let flags = ShareFlags { read_only: false, winter_share: true, folder_rules: false };
++    ShareControl::new(tag, ConfinedConfig { root, flags, guest_path: CString::new("/workspace/outputs").unwrap() }, events).unwrap()
++}
++
++fn queue(base: u64) -> Queue {
++    let mut queue = Queue::new(QUEUE_SIZE);
++    queue.size = QUEUE_SIZE;
++    queue.ready = true;
++    queue.desc_table = GuestAddress(base);
++    queue.avail_ring = GuestAddress(base + 0x4000);
++    queue.used_ring = GuestAddress(base + 0x5000);
++    queue
++}
++
++/// The guest side: writes descriptors and available entries as a driver would, and reads used entries.
++struct Driver {
++    mem: GuestMemoryMmap,
++    next_desc: [u16; 2],
++    avail: [u16; 2],
++    next_buffer: u64,
++}
++
++impl Driver {
++    fn new(mem: &GuestMemoryMmap) -> Self {
++        Driver { mem: mem.clone(), next_desc: [0; 2], avail: [0; 2], next_buffer: BUFFERS }
++    }
++
++    fn base(index: usize) -> u64 {
++        if index == HPQ_INDEX { HPQ_BASE } else { REQ_BASE }
++    }
++
++    /// Places `bytes` (readable) or `len` zero bytes (writable) in guest memory.
++    fn buffer(&mut self, len: u64) -> u64 {
++        let at = self.next_buffer;
++        self.next_buffer += len.max(1).next_multiple_of(16);
++        assert!(self.next_buffer <= MEM as u64);
++        at
++    }
++
++    /// Queues one chain of (address, length, writable) descriptors with `flags` extra bits on the first.
++    fn push_raw(&mut self, index: usize, chain: &[(u64, u32, bool)], extra: u16) -> u16 {
++        let base = Self::base(index);
++        let head = self.next_desc[index];
++        for (i, (addr, len, write)) in chain.iter().enumerate() {
++            let slot = (head as usize + i) % QUEUE_SIZE as usize;
++            let last = i + 1 == chain.len();
++            let mut flags = if last { 0 } else { VIRTQ_DESC_F_NEXT };
++            if *write {
++                flags |= VIRTQ_DESC_F_WRITE;
++            }
++            if i == 0 {
++                flags |= extra;
++            }
++            let next = ((slot + 1) % QUEUE_SIZE as usize) as u16;
++            self.mem.write_obj(Descriptor { addr: *addr, len: *len, flags, next }, GuestAddress(base + 16 * slot as u64)).unwrap();
++        }
++        self.next_desc[index] = ((head as usize + chain.len()) % QUEUE_SIZE as usize) as u16;
++        let ring = base + 0x4000;
++        let at = self.avail[index] % QUEUE_SIZE;
++        self.mem.write_obj(head, GuestAddress(ring + 4 + 2 * at as u64)).unwrap();
++        self.avail[index] = self.avail[index].wrapping_add(1);
++        self.mem.write_obj(self.avail[index], GuestAddress(ring + 2)).unwrap();
++        head
++    }
++
++    /// A FUSE request as the Linux driver lays it out: the in header, each argument, then the out header in
++    /// its own descriptor and the rest of the reply. Returns the reply buffer's address.
++    fn request(&mut self, index: usize, opcode: u32, nodeid: u64, args: &[&[u8]], reply: u32) -> u64 {
++        let len: usize = std::mem::size_of::<InHeader>() + args.iter().map(|a| a.len()).sum::<usize>();
++        let header = InHeader { len: len as u32, opcode, unique: 7, nodeid, uid: 501, gid: 20, pid: 1, padding: 0 };
++        let mut chain = Vec::new();
++        for part in std::iter::once(header.as_slice()).chain(args.iter().copied()) {
++            let at = self.buffer(part.len() as u64);
++            self.mem.write_slice(part, GuestAddress(at)).unwrap();
++            chain.push((at, part.len() as u32, false));
++        }
++        let out = self.buffer(16 + u64::from(reply));
++        if reply > 0 || opcode != Opcode::Forget as u32 {
++            chain.push((out, 16, true));
++            if reply > 0 {
++                chain.push((out + 16, reply, true));
++            }
++        }
++        self.push_raw(index, &chain, 0);
++        out
++    }
++
++    /// A BATCH_FORGET in header at `at`: the request that fills a high-priority chain, with no reply.
++    fn batch_forget(&mut self, at: u64, len: u32) {
++        let header = InHeader { len, opcode: Opcode::BatchForget as u32, unique: 0, nodeid: 0, uid: 0, gid: 0, pid: 0, padding: 0 };
++        self.mem.write_slice(header.as_slice(), GuestAddress(at)).unwrap();
++    }
++
++    fn used_idx(&self, index: usize) -> u16 {
++        self.mem.read_obj(GuestAddress(Self::base(index) + 0x5000 + 2)).unwrap()
++    }
++
++    fn used(&self, index: usize, n: u16) -> (u32, u32) {
++        let at = Self::base(index) + 0x5000 + 4 + 8 * (n % QUEUE_SIZE) as u64;
++        (self.mem.read_obj(GuestAddress(at)).unwrap(), self.mem.read_obj(GuestAddress(at + 4)).unwrap())
++    }
++
++    fn reply(&self, out: u64) -> (i32, Vec<u8>) {
++        let header: OutHeader = self.mem.read_obj(GuestAddress(out)).unwrap();
++        let mut body = vec![0u8; header.len as usize - 16];
++        self.mem.read_slice(&mut body, GuestAddress(out + 16)).unwrap();
++        (-header.error, body)
++    }
++}
++
++struct Rig {
++    _tree: TempTree,
++    root: PathBuf,
++    access: Access,
++    port: FsPort,
++    server: Option<Server<ConfinedFs>>,
++    driver: Driver,
++}
++
++impl Rig {
++    fn new() -> Self {
++        let tree = TempTree::new();
++        let root = tree.0.clone();
++        let (max_devices, max_pins, max_bytes) = crate::workspace_disks::budget(1).unwrap();
++        let access = Access::new(max_devices, max_pins, max_bytes);
++        let device = access.register(crate::workspace_disks::FIRST_SHARE_DEVICE).unwrap();
++        let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++        let share = share(&tree, "winter-outputs", ShareEvents::new());
++        let port = FsPort::new(mem.clone(), vec![queue(HPQ_BASE), queue(REQ_BASE)], access.clone(), device).unwrap();
++        let server = share.take(Arc::new(EventFd::new(EFD_NONBLOCK).unwrap()));
++        Rig { _tree: tree, root, access, port, server, driver: Driver::new(&mem) }
++    }
++
++    fn step(&mut self, index: usize) -> Result<Step, Fault> {
++        service_next(&mut self.port, self.server.as_ref().unwrap(), index, || false)
++    }
++
++    fn call(&mut self, opcode: Opcode, nodeid: u64, args: &[&[u8]], reply: u32) -> (i32, Vec<u8>) {
++        let out = self.driver.request(REQ_INDEX, opcode as u32, nodeid, args, reply);
++        let before = self.driver.used_idx(REQ_INDEX);
++        assert_eq!(self.step(REQ_INDEX), Ok(Step::Completed));
++        assert_eq!(self.driver.used_idx(REQ_INDEX), before.wrapping_add(1));
++        let (_, len) = self.driver.used(REQ_INDEX, before);
++        let reply = self.driver.reply(out);
++        assert_eq!(len as usize, 16 + reply.1.len(), "the used length is the reply's");
++        reply
++    }
++
++    fn init(&mut self) {
++        let init = InitInCompat { major: KERNEL_VERSION, minor: KERNEL_MINOR_VERSION, max_readahead: 1 << 17, flags: 0 };
++        let (error, _) = self.call(Opcode::Init, 0, &[init.as_slice()], 256);
++        assert_eq!(error, 0);
++    }
++
++    fn ring_only(&self) -> (usize, u64) {
++        (2, 2 * RING_BYTES)
++    }
++}
++
++fn nul(name: &[u8]) -> Vec<u8> {
++    let mut v = name.to_vec();
++    v.push(0);
++    v
++}
++
++#[test]
++fn guarded_fs_the_limits_and_the_budget_are_the_designs() {
++    assert_eq!(MAX_CHAIN_DESCRIPTORS, 260);
++    assert_eq!(MAX_CHAIN_BYTES, 1_056_768);
++    assert_eq!(MAX_HPQ_BYTES, 4096);
++    assert_eq!(RING_BYTES, 26_636);
++    assert_eq!(PINS_PER_SHARE, 4);
++    assert_eq!(PINNED_BYTES_PER_SHARE, 1_114_136);
++    assert_eq!(MAX_SHARES, 12);
++    use crate::workspace_disks::budget;
++    assert_eq!(budget(0), Some((3, 48, 8_388_608)));
++    assert_eq!(budget(1), Some((4, 52, 9_502_744)));
++    assert_eq!(budget(12), Some((15, 96, 21_758_240)));
++    assert_eq!(budget(13), None);
++}
++
++#[test]
++fn guarded_fs_tags_and_guest_paths_are_checked() {
++    for good in [&b"a"[..], b"src-0", b"winter-guidance", b"0123456789abcdefghijklmnopqrstuv"] {
++        assert!(valid_tag(good), "{good:?}");
++    }
++    for bad in [&b""[..], b"A", b"src_0", b"src 0", b"src/0", b"0123456789abcdefghijklmnopqrstuvw", "é".as_bytes(), b"src\n"] {
++        assert!(!valid_tag(bad), "{bad:?}");
++    }
++    for good in [&b"/workspace/outputs"[..], b"/workspace/folders/g-1", b"/workspace/.winter/memory", b"/run/winter/shared-instructions"] {
++        assert!(valid_guest_path(good), "{good:?}");
++    }
++    let long = format!("/workspace/{}", "a".repeat(245));
++    assert!(!valid_guest_path(long.as_bytes()));
++    assert!(valid_guest_path(long[..255].as_bytes()));
++    for bad in [&b"/workspace"[..], b"/workspace/", b"/workspace//x", b"/workspace/x/", b"/workspace/./x", b"/workspace/../etc", b"/workspace/x/..",
++                b"/tmp/x", b"workspace/x", b"/run/winterx/a", b"/workspace/a b", b"/workspace/a\\b", b"/run/winter/"] {
++        assert!(!valid_guest_path(bad), "{bad:?}");
++    }
++    assert!(guest_paths_overlap(b"/workspace/a", b"/workspace/a"));
++    assert!(guest_paths_overlap(b"/workspace/a", b"/workspace/a/b"));
++    assert!(guest_paths_overlap(b"/workspace/a/b", b"/workspace/a"));
++    assert!(!guest_paths_overlap(b"/workspace/a", b"/workspace/ab"));
++    assert!(!guest_paths_overlap(b"/workspace/a", b"/run/winter/a"));
++}
++
++/// INIT, CREATE, WRITE and READ through the device: the reply lands in the guest's writable descriptors, the
++/// host file has the bytes, and every request pin is gone once its used entry is published.
++#[test]
++fn guarded_fs_a_fuse_round_trip_goes_through_the_bounce_copy() {
++    let mut rig = Rig::new();
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++    rig.init();
++    let create = CreateIn { flags: 2, mode: 0o644, umask: 0, open_flags: 0 };
++    let (error, body) = rig.call(Opcode::Create, ROOT_ID, &[create.as_slice(), &nul(b"file")], 4096);
++    assert_eq!(error, 0);
++    let open = *OpenOut::from_slice(&body[std::mem::size_of::<EntryOut>()..][..std::mem::size_of::<OpenOut>()]).unwrap();
++    let data: Vec<u8> = (0..20_000u32).map(|i| (i % 251) as u8).collect();
++    let write = WriteIn { fh: open.fh, offset: 0, size: data.len() as u32, ..Default::default() };
++    let (error, body) = rig.call(Opcode::Write, ROOT_ID + 1, &[write.as_slice(), &data], 64);
++    assert_eq!(error, 0);
++    assert_eq!(WriteOut::from_slice(&body[..8]).unwrap().size, data.len() as u32);
++    assert_eq!(fs::read(rig.root.join("file")).unwrap(), data);
++    let read = ReadIn { fh: open.fh, offset: 0, size: data.len() as u32, ..Default::default() };
++    let (error, body) = rig.call(Opcode::Read, ROOT_ID + 1, &[read.as_slice()], 1 << 20);
++    assert_eq!(error, 0);
++    assert_eq!(body, data);
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++    assert_eq!(rig.access.active_leases(), 0);
++    assert_eq!(rig.step(REQ_INDEX), Ok(Step::Empty));
++}
++
++/// R14 freeze: the request's ranges stay pinned (excluded from reclaim) while the server works with no
++/// lease held, and a capture or completion that meets a frozen gate waits for the resume.
++#[test]
++fn guarded_fs_freeze_is_honoured_and_pins_cover_the_request_until_completion() {
++    let mut rig = Rig::new();
++    rig.init();
++    let out = rig.driver.request(REQ_INDEX, Opcode::Statfs as u32, ROOT_ID, &[], 128);
++    let lease = rig.access.begin(rig.port.device).unwrap();
++    let captured = rig.port.capture(&lease, REQ_INDEX).unwrap().unwrap();
++    drop(lease);
++    let frozen = rig.access.freeze(1, Duration::from_secs(1)).unwrap();
++    assert_eq!(rig.access.active_leases(), 0, "no lease survives the capture");
++    for range in captured.readable.iter().chain(&captured.writable) {
++        assert!(frozen.exclusions().contains(range), "{range:?} not pinned");
++    }
++    assert!(frozen.exclusions().iter().any(|r| r.gpa == REQ_BASE && r.len == 16 * QUEUE_SIZE as u64), "ring pinned");
++    frozen.resume().unwrap();
++    let reply = rig.port.perform(rig.server.as_ref().unwrap(), &captured);
++    let frozen = rig.access.freeze(2, Duration::from_secs(1)).unwrap();
++    assert!(matches!(rig.access.begin(rig.port.device), Err(Fault::Frozen)));
++    frozen.resume().unwrap();
++    let lease = rig.access.begin(rig.port.device).unwrap();
++    rig.port.complete(&lease, &captured, &reply).unwrap();
++    drop(captured);
++    drop(lease);
++    assert_eq!(rig.driver.reply(out).0, 0);
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++
++    // The whole transaction waits on a frozen gate and completes after the resume.
++    rig.driver.request(REQ_INDEX, Opcode::Statfs as u32, ROOT_ID, &[], 128);
++    let probe = Driver::new(&rig.driver.mem);
++    let before = probe.used_idx(REQ_INDEX);
++    let frozen = rig.access.freeze(3, Duration::from_secs(1)).unwrap();
++    let (tx, rx) = mpsc::channel();
++    std::thread::scope(|scope| {
++        let worker = scope.spawn(|| {
++            let result = rig.step(REQ_INDEX);
++            tx.send(()).unwrap();
++            result
++        });
++        assert!(rx.recv_timeout(Duration::from_millis(50)).is_err(), "no progress while frozen");
++        assert_eq!(probe.used_idx(REQ_INDEX), before, "no used entry while frozen");
++        frozen.resume().unwrap();
++        assert_eq!(worker.join().unwrap(), Ok(Step::Completed));
++    });
++    assert_eq!(probe.used_idx(REQ_INDEX), before.wrapping_add(1));
++}
++
++/// R14 freeze at completion: a freeze that closes the gate after the filesystem work holds the used entry
++/// back until the resume.
++#[test]
++fn guarded_fs_a_completion_that_meets_a_freeze_waits_for_the_resume() {
++    let mut rig = Rig::new();
++    rig.init();
++    let out = rig.driver.request(REQ_INDEX, Opcode::Statfs as u32, ROOT_ID, &[], 128);
++    let probe = Driver::new(&rig.driver.mem);
++    let before = probe.used_idx(REQ_INDEX);
++    let access = rig.access.clone();
++    let calls = std::cell::Cell::new(0);
++    let resumer = std::cell::RefCell::new(None);
++    let resumed = Arc::new(AtomicBool::new(false));
++    let result = service_next(&mut rig.port, rig.server.as_ref().unwrap(), REQ_INDEX, || {
++        calls.set(calls.get() + 1);
++        // The third check is the completion loop's: the server already ran, no lease is held.
++        if calls.get() == 3 {
++            assert_eq!(access.active_leases(), 0);
++            let frozen = access.freeze(9, Duration::from_secs(1)).unwrap();
++            let flag = resumed.clone();
++            *resumer.borrow_mut() = Some(std::thread::spawn(move || {
++                std::thread::sleep(Duration::from_millis(50));
++                flag.store(true, Ordering::SeqCst);
++                frozen.resume().unwrap();
++            }));
++        }
++        false
++    });
++    assert_eq!(result, Ok(Step::Completed));
++    assert!(resumed.load(Ordering::SeqCst), "the used entry waited for the resume");
++    resumer.into_inner().unwrap().join().unwrap();
++    assert_eq!(probe.used_idx(REQ_INDEX), before.wrapping_add(1));
++    assert_eq!(rig.driver.reply(out).0, 0);
++}
++
++/// R14: a chain over `max_pages + 4` descriptors or over 1,048,576 + 8,192 bytes (4,096 on the high-priority
++/// queue) is refused before anything is pinned; a chain exactly at either bound is accepted.
++#[test]
++fn guarded_fs_over_long_or_over_large_chains_are_refused_before_pinning() {
++    let fresh = || {
++        let mut rig = Rig::new();
++        rig.init();
++        rig
++    };
++    let capture = |rig: &mut Rig, index: usize| {
++        let lease = rig.access.begin(rig.port.device).unwrap();
++        rig.port.capture(&lease, index).map(|c| c.map(|c| (c.readable.len() + c.writable.len(), total(&c.readable) + total(&c.writable))))
++    };
++    // 261 descriptors of 64 bytes, well under the byte bound.
++    let mut rig = fresh();
++    let base = rig.driver.buffer(64 * 261);
++    let chain: Vec<_> = (0..261u64).map(|i| (base + 64 * i, 64, i >= 200)).collect();
++    rig.driver.push_raw(REQ_INDEX, &chain, 0);
++    assert_eq!(capture(&mut rig, REQ_INDEX).err(), Some(Fault::Limit));
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "nothing pinned");
++    // Exactly 260 descriptors and exactly the byte bound: the shape of a 1 MiB WRITE.
++    let mut rig = fresh();
++    let chain = max_chain(&mut rig.driver);
++    rig.driver.push_raw(REQ_INDEX, &chain, 0);
++    assert_eq!(capture(&mut rig, REQ_INDEX), Ok(Some((260, MAX_CHAIN_BYTES))));
++    // One byte more.
++    let mut rig = fresh();
++    let mut chain = max_chain(&mut rig.driver);
++    chain.last_mut().unwrap().1 += 1;
++    rig.driver.push_raw(REQ_INDEX, &chain, 0);
++    assert_eq!(capture(&mut rig, REQ_INDEX).err(), Some(Fault::Limit));
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "nothing pinned");
++    // The high-priority queue: 4,096 bytes, then 4,097.
++    for (bytes, accepted) in [(4096u32, true), (4097, false)] {
++        let mut rig = fresh();
++        let at = rig.driver.buffer(u64::from(bytes));
++        rig.driver.batch_forget(at, bytes);
++        rig.driver.push_raw(HPQ_INDEX, &[(at, 40, false), (at + 40, bytes - 40, false)], 0);
++        let result = capture(&mut rig, HPQ_INDEX);
++        if accepted {
++            assert_eq!(result, Ok(Some((2, 4096))));
++        } else {
++            assert_eq!(result.err(), Some(Fault::Limit));
++            assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++        }
++    }
++}
++
++/// 260 descriptors carrying exactly `MAX_CHAIN_BYTES`: the in header and WRITE arguments, 256 pages, the out
++/// header and the rest of the reply.
++fn max_chain(driver: &mut Driver) -> Vec<(u64, u32, bool)> {
++    let base = driver.buffer(MAX_CHAIN_BYTES);
++    let mut chain = vec![(base, 40, false), (base + 40, 40, false)];
++    let mut at = base + 80;
++    for _ in 0..256 {
++        chain.push((at, 4096, false));
++        at += 4096;
++    }
++    let rest = (MAX_CHAIN_BYTES - 80 - 256 * 4096 - 16) as u32;
++    chain.push((at, 16, true));
++    chain.push((at + 16, rest, true));
++    assert_eq!(chain.len(), MAX_CHAIN_DESCRIPTORS);
++    chain
++}
++
++/// Malformed chains are terminal and never pinned: an indirect descriptor, a readable descriptor after a
++/// writable one, nothing to read, a buffer outside guest memory.
++#[test]
++fn guarded_fs_malformed_chains_are_refused_before_pinning() {
++    for case in 0..4 {
++        let mut rig = Rig::new();
++        let at = rig.driver.buffer(4096);
++        let (chain, extra): (Vec<(u64, u32, bool)>, u16) = match case {
++            0 => (vec![(at, 64, false)], 4),
++            1 => (vec![(at, 64, false), (at + 64, 64, true), (at + 128, 64, false)], 0),
++            2 => (vec![(at, 64, true)], 0),
++            _ => (vec![(MEM as u64 - 32, 64, false)], 0),
++        };
++        rig.driver.push_raw(REQ_INDEX, &chain, extra);
++        assert_eq!(rig.step(REQ_INDEX), Err(Fault::InvalidRange), "case {case}");
++        assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "case {case}");
++        assert_eq!(rig.driver.used_idx(REQ_INDEX), 0, "case {case}");
++    }
++}
++
++/// A chain whose writable area cannot hold the 16-byte out header is a terminal fault before anything is
++/// pinned, on both queues: READ, READDIR and READDIRPLUS with no writable byte and with 15 never reach the
++/// stock handlers' split of the header (which unwraps). A FORGET and a BATCH_FORGET with no writable
++/// descriptor on the high-priority queue are still served; on the request queue they fault, and so does a
++/// FORGET with 15 writable bytes on the high-priority queue.
++#[test]
++fn guarded_fs_a_reply_area_under_the_out_header_is_refused_before_pinning() {
++    let read = ReadIn { fh: 0, offset: 0, size: 4096, read_flags: 0, lock_owner: 0, flags: 0, padding: 0 };
++    for opcode in [Opcode::Read, Opcode::Readdir, Opcode::Readdirplus] {
++        for index in [REQ_INDEX, HPQ_INDEX] {
++            for writable in [0u32, 15] {
++                let mut rig = Rig::new();
++                rig.init();
++                let before = rig.driver.used_idx(index);
++                let header = InHeader { len: (40 + std::mem::size_of::<ReadIn>()) as u32, opcode: opcode as u32, unique: 9, nodeid: ROOT_ID, uid: 501, gid: 20, pid: 1, padding: 0 };
++                let mut request = header.as_slice().to_vec();
++                request.extend_from_slice(read.as_slice());
++                let at = rig.driver.buffer(request.len() as u64 + 16);
++                rig.driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++                let mut chain = vec![(at, request.len() as u32, false)];
++                if writable > 0 {
++                    chain.push((at + request.len() as u64, writable, true));
++                }
++                rig.driver.push_raw(index, &chain, 0);
++                assert_eq!(rig.step(index), Err(Fault::InvalidRange), "{opcode:?} queue {index} writable {writable}");
++                assert_eq!(rig.access.pinned_usage(), rig.ring_only(), "nothing pinned");
++                assert_eq!(rig.driver.used_idx(index), before, "nothing published");
++            }
++        }
++    }
++    let forget = ForgetIn { nlookup: 1 };
++    for (opcode, index, writable, served) in [
++        (Opcode::Forget, HPQ_INDEX, 0u32, true),
++        (Opcode::BatchForget, HPQ_INDEX, 0, true),
++        (Opcode::Forget, HPQ_INDEX, 15, false),
++        (Opcode::Forget, REQ_INDEX, 0, false),
++        (Opcode::BatchForget, REQ_INDEX, 0, false),
++    ] {
++        let mut rig = Rig::new();
++        rig.init();
++        let before = rig.driver.used_idx(index);
++        let header = InHeader { len: 48, opcode: opcode as u32, unique: 0, nodeid: ROOT_ID, uid: 0, gid: 0, pid: 0, padding: 0 };
++        let mut request = header.as_slice().to_vec();
++        request.extend_from_slice(if matches!(opcode, Opcode::Forget) { forget.as_slice() } else { &[0u8; 8] });
++        let at = rig.driver.buffer(64);
++        rig.driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++        let mut chain = vec![(at, 48, false)];
++        if writable > 0 {
++            chain.push((at + 48, writable, true));
++        }
++        rig.driver.push_raw(index, &chain, 0);
++        if served {
++            assert_eq!(rig.step(index), Ok(Step::Completed), "{opcode:?}");
++            assert_eq!(rig.driver.used_idx(index), before.wrapping_add(1), "{opcode:?}");
++            assert_eq!(rig.driver.used(index, before).1, 0, "{opcode:?}: no reply bytes");
++        } else {
++            assert_eq!(rig.step(index), Err(Fault::InvalidRange), "{opcode:?} queue {index} writable {writable}");
++            assert_eq!(rig.driver.used_idx(index), before, "nothing published");
++        }
++        assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++    }
++}
++
++/// On the device thread, a READ with no writable byte takes the exit-77 path: the worker stops the gate
++/// and returns, and the thread never panics.
++#[test]
++fn guarded_fs_a_read_with_no_reply_area_stops_the_gate_without_a_panic() {
++    let tree = TempTree::new();
++    let share = share(&tree, "src-3", ShareEvents::new());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, kicks) = device_queues();
++    let thread = GuardedFsWorker::new(queues, mem, access.clone(), device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap().run(|| panic!("no completion"));
++    let read = ReadIn { fh: 0, offset: 0, size: 4096, read_flags: 0, lock_owner: 0, flags: 0, padding: 0 };
++    let header = InHeader { len: (40 + std::mem::size_of::<ReadIn>()) as u32, opcode: Opcode::Read as u32, unique: 9, nodeid: ROOT_ID, uid: 501, gid: 20, pid: 1, padding: 0 };
++    let mut request = header.as_slice().to_vec();
++    request.extend_from_slice(read.as_slice());
++    let at = driver.buffer(request.len() as u64);
++    driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++    driver.push_raw(REQ_INDEX, &[(at, request.len() as u32, false)], 0);
++    kicks[REQ_INDEX].write(1).unwrap();
++    thread.join().expect("the device thread does not panic");
++    assert!(access.stopped(), "the exit-77 path");
++    assert_eq!(share.idle_descriptors(), Some(1), "the server is back in its slot");
++}
++
++/// A writable range outside guest memory is refused at capture, before the server touches the host: the
++/// CREATE never happens.
++#[test]
++fn guarded_fs_a_reply_range_outside_guest_memory_is_refused_before_any_host_work() {
++    let mut rig = Rig::new();
++    rig.init();
++    let create = CreateIn { flags: 2, mode: 0o644, umask: 0, open_flags: 0 };
++    let name = nul(b"never");
++    let header = InHeader { len: (40 + std::mem::size_of::<CreateIn>() + name.len()) as u32, opcode: Opcode::Create as u32, unique: 9, nodeid: ROOT_ID, uid: 501, gid: 20, pid: 1, padding: 0 };
++    let mut request = header.as_slice().to_vec();
++    request.extend_from_slice(create.as_slice());
++    request.extend_from_slice(&name);
++    let at = rig.driver.buffer(request.len() as u64);
++    rig.driver.mem.write_slice(&request, GuestAddress(at)).unwrap();
++    rig.driver.push_raw(REQ_INDEX, &[(at, request.len() as u32, false), (MEM as u64 - 16, 4096, true)], 0);
++    assert_eq!(rig.step(REQ_INDEX), Err(Fault::InvalidRange));
++    assert!(!rig.root.join("never").exists(), "no host work for a refused chain");
++    assert_eq!(rig.access.pinned_usage(), rig.ring_only());
++}
++
++/// R14, the budget computed: with the three workspace devices at their structural maximum (12 pins,
++/// 4,289,930 bytes), S share devices hold their rings and a maximum chain on both queues at once, and the
++/// budget built for that S admits every pin.
++#[test]
++fn guarded_fs_the_budget_holds_s_devices_at_their_chain_maximum_at_once() {
++    for shares in [1usize, 12] {
++        let (max_devices, max_pins, max_bytes) = crate::workspace_disks::budget(shares).unwrap();
++        let access = Access::new(max_devices, max_pins, max_bytes);
++        let mut held = Vec::new();
++        for id in 0..3u64 {
++            let device = access.register(id).unwrap();
++            let lease = access.begin(device).unwrap();
++            for pin in 0..4u64 {
++                let len = if id == 2 && pin == 3 { STRUCTURAL_BYTES - 11 * 4096 } else { 4096 };
++                held.push(lease.pin(&[Range { gpa: 0x1000 * (1 + 4 * id + pin), len }]).unwrap());
++            }
++        }
++        assert_eq!(access.pinned_usage(), (STRUCTURAL_PINS, STRUCTURAL_BYTES));
++        let refusals = crate::cowork_counters::pin_snapshot().budget_refusals;
++        let mut ports = Vec::new();
++        let mut captured = Vec::new();
++        for share in 0..shares as u64 {
++            let device = access.register(crate::workspace_disks::FIRST_SHARE_DEVICE + share).unwrap();
++            let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++            let mut driver = Driver::new(&mem);
++            let chain = max_chain(&mut driver);
++            driver.push_raw(REQ_INDEX, &chain, 0);
++            let at = driver.buffer(4096);
++            driver.batch_forget(at, 4096);
++            driver.push_raw(HPQ_INDEX, &[(at, 40, false), (at + 40, 4056, false)], 0);
++            let mut port = FsPort::new(mem, vec![queue(HPQ_BASE), queue(REQ_BASE)], access.clone(), device).unwrap();
++            let lease = access.begin(device).unwrap();
++            captured.push(port.capture(&lease, REQ_INDEX).unwrap().unwrap());
++            captured.push(port.capture(&lease, HPQ_INDEX).unwrap().unwrap());
++            drop(lease);
++            ports.push(port);
++        }
++        let usage = access.pinned_usage();
++        assert_eq!(usage, (STRUCTURAL_PINS + PINS_PER_SHARE * shares, STRUCTURAL_BYTES + PINNED_BYTES_PER_SHARE * shares as u64));
++        assert!(usage.0 <= max_pins && usage.1 <= max_bytes, "S = {shares}: {usage:?} over the budget");
++        assert_eq!(crate::cowork_counters::pin_snapshot().budget_refusals, refusals, "no pin refused");
++        // The headroom is today's: 36 pins and 8 MiB less the workspace maximum.
++        assert_eq!((max_pins - usage.0, max_bytes - usage.1), (48 - STRUCTURAL_PINS, 8_388_608 - STRUCTURAL_BYTES));
++        // A device too many does not fit: the budget is computed from the actual S.
++        assert_eq!(access.register(crate::workspace_disks::FIRST_SHARE_DEVICE + shares as u64).err(), Some(Fault::Limit));
++        drop(captured);
++        drop(ports);
++        drop(held);
++        assert_eq!(access.pinned_usage(), (0, 0));
++    }
++}
++
++/// R11 while no device thread runs: the revoker closes the share under the slot lock and reports once.
++#[test]
++fn guarded_fs_an_idle_share_is_closed_at_once_and_reported_once() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let share = share(&tree, "src-0", events.clone());
++    assert_eq!(share.idle_descriptors(), Some(1), "the root");
++    share.revoke();
++    assert!(share.is_revoked());
++    assert_eq!(share.idle_descriptors(), Some(0));
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Revoked { tag: "src-0".into() }));
++    share.revoke();
++    assert_eq!(events.next(Duration::from_millis(20)), None, "a repeat reports nothing");
++}
++
++fn open_fd_count() -> usize {
++    fs::read_dir("/dev/fd").unwrap().count()
++}
++
++fn device_queues() -> (Vec<DeviceQueue>, Vec<Arc<EventFd>>) {
++    let events: Vec<_> = (0..2).map(|_| Arc::new(EventFd::new(EFD_NONBLOCK).unwrap())).collect();
++    (vec![DeviceQueue::new(queue(HPQ_BASE), events[0].clone()), DeviceQueue::new(queue(REQ_BASE), events[1].clone())], events)
++}
++
++/// R11 on a running device thread: the revoker only sets the flag and writes the request queue event; the
++/// idle device thread wakes, closes its own descriptors and reports; every later request answers EACCES.
++/// R13: a stop joins the thread, which hands the (closed) server back to the share.
++#[test]
++fn guarded_fs_a_running_device_thread_closes_its_own_descriptors_when_woken() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let share = share(&tree, "winter-memory", events.clone());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, kicks) = device_queues();
++    let stop_fd = EventFd::new(EFD_NONBLOCK).unwrap();
++    let stop = Arc::new(AtomicBool::new(false));
++    let worker = GuardedFsWorker::new(queues, mem.clone(), access.clone(), device, share.clone(), stop_fd.try_clone().unwrap(), stop.clone()).unwrap();
++    assert_eq!(share.idle_descriptors(), None, "the device thread holds the server");
++    let (done_tx, done) = mpsc::channel();
++    let thread = worker.run(move || done_tx.send(()).unwrap());
++    let init = InitInCompat { major: KERNEL_VERSION, minor: KERNEL_MINOR_VERSION, max_readahead: 1 << 17, flags: 0 };
++    let out = driver.request(REQ_INDEX, Opcode::Init as u32, 0, &[init.as_slice()], 256);
++    kicks[REQ_INDEX].write(1).unwrap();
++    done.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert_eq!(driver.reply(out).0, 0);
++    let create = CreateIn { flags: 2, mode: 0o644, umask: 0, open_flags: 0 };
++    let out = driver.request(REQ_INDEX, Opcode::Create as u32, ROOT_ID, &[create.as_slice(), &nul(b"kept-open")], 4096);
++    kicks[REQ_INDEX].write(1).unwrap();
++    done.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert_eq!(driver.reply(out).0, 0);
++
++    let open = open_fd_count();
++    share.revoke();
++    assert_eq!(events.next(Duration::from_secs(2)), Some(ShareEvent::Revoked { tag: "winter-memory".into() }), "reported after the device thread closed");
++    assert!(open_fd_count() + 2 <= open, "the root and the open handle were closed before the report");
++    let out = driver.request(REQ_INDEX, Opcode::Getattr as u32, ROOT_ID, &[GetattrIn::default().as_slice()], 256);
++    kicks[REQ_INDEX].write(1).unwrap();
++    done.recv_timeout(Duration::from_secs(2)).unwrap();
++    assert_eq!(driver.reply(out).0, libc::EACCES);
++    assert!(tree.0.join("kept-open").exists(), "revocation removes nothing");
++
++    stop.store(true, Ordering::Release);
++    stop_fd.write(1).unwrap();
++    thread.join().unwrap();
++    assert_eq!(share.idle_descriptors(), Some(0), "every descriptor closed, the server back in its slot");
++    assert_eq!(access.pinned_usage(), (0, 0), "the ring pins go with the worker");
++    assert_eq!(events.next(Duration::from_millis(20)), None, "reported once");
++}
++
++/// R11 at a request boundary: a revocation that arrives while the device thread is draining its queue
++/// closes the descriptors before the next request is captured.
++#[test]
++fn guarded_fs_a_revocation_mid_drain_closes_at_the_next_request_boundary() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let share = share(&tree, "src-1", events.clone());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, _kicks) = device_queues();
++    let mut worker = GuardedFsWorker::new(queues, mem.clone(), access.clone(), device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap();
++    let init = InitInCompat { major: KERNEL_VERSION, minor: KERNEL_MINOR_VERSION, max_readahead: 1 << 17, flags: 0 };
++    let first = driver.request(REQ_INDEX, Opcode::Init as u32, 0, &[init.as_slice()], 256);
++    let second = driver.request(REQ_INDEX, Opcode::Statfs as u32, ROOT_ID, &[], 128);
++    let revoker = share.clone();
++    let mut completions = 0;
++    let mut completed = || {
++        completions += 1;
++        if completions == 1 {
++            revoker.revoke();
++        }
++    };
++    assert_eq!(worker.drain(REQ_INDEX, &mut completed), Ok(false));
++    assert_eq!(completions, 2);
++    assert_eq!(driver.reply(first).0, 0);
++    assert_eq!(driver.reply(second).0, libc::EACCES);
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Revoked { tag: "src-1".into() }), "closed at the boundary, by the draining thread");
++    assert_eq!(worker.server.as_ref().unwrap().confined_fs().open_descriptors(), 0);
++}
++
++/// The stop path of a running device: a stop joins the thread with the server returned, open, to the share.
++#[test]
++fn guarded_fs_a_stop_joins_the_worker_and_returns_the_server() {
++    let tree = TempTree::new();
++    let share = share(&tree, "winter-guidance", ShareEvents::new());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let (queues, _kicks) = device_queues();
++    let stop_fd = EventFd::new(EFD_NONBLOCK).unwrap();
++    let stop = Arc::new(AtomicBool::new(false));
++    let thread = GuardedFsWorker::new(queues, mem, access.clone(), device, share.clone(), stop_fd.try_clone().unwrap(), stop.clone()).unwrap().run(|| {});
++    std::thread::sleep(Duration::from_millis(20));
++    assert_eq!(share.idle_descriptors(), None);
++    stop.store(true, Ordering::Release);
++    stop_fd.write(1).unwrap();
++    thread.join().unwrap();
++    assert_eq!(share.idle_descriptors(), Some(1), "the root is still open: a stop is not a revocation");
++    assert!(stop_fd.read().is_err(), "the worker drained its stop event");
++    assert_eq!(access.pinned_usage(), (0, 0));
++    assert!(!access.stopped());
++}
++
++/// A terminal fault on the device thread stops the reclaim gate (the worker then exits 77).
++#[test]
++fn guarded_fs_a_terminal_fault_stops_the_gate() {
++    let tree = TempTree::new();
++    let share = share(&tree, "src-2", ShareEvents::new());
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, kicks) = device_queues();
++    let thread = GuardedFsWorker::new(queues, mem, access.clone(), device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap().run(|| panic!("no completion"));
++    let at = driver.buffer(64);
++    driver.push_raw(REQ_INDEX, &[(at, 64, false)], 4);
++    kicks[REQ_INDEX].write(1).unwrap();
++    thread.join().unwrap();
++    assert!(access.stopped());
++    assert_eq!(share.idle_descriptors(), Some(1), "the server is back in its slot");
++}
++
++#[test]
++fn guarded_fs_notices_are_queued_once_per_tag_and_kind() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let first = share(&tree, "src-3", events.clone());
++    let sink = first.notices();
++    sink.push(NoticeKind::Envrc);
++    sink.push(NoticeKind::Envrc);
++    sink.push(NoticeKind::GitProtected);
++    first.forward_notices();
++    first.revoke();
++    first.revoke();
++    sink.push(NoticeKind::GitProtected);
++    first.forward_notices();
++    let drained: Vec<_> = std::iter::from_fn(|| events.next(Duration::ZERO)).collect();
++    assert_eq!(drained, vec![
++        ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::Envrc },
++        ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::GitProtected },
++        ShareEvent::Revoked { tag: "src-3".into() },
++    ]);
++    assert_eq!(NoticeKind::ALL.map(notice_number), [6, 1, 2, 3, 4, 5]);
++    // The queue bounds itself whatever a sink hands it: one event per tag and kind, one revocation per tag.
++    let bounded = ShareEvents::new();
++    for _ in 0..3 {
++        bounded.push("src-9", Some(NoticeKind::Envrc));
++        bounded.push("src-9", None);
++    }
++    assert_eq!(std::iter::from_fn(|| bounded.next(Duration::ZERO)).count(), 2);
++    // A waiting drain wakes for an event forwarded from another thread.
++    let waiter = events.clone();
++    let wait = std::thread::spawn(move || waiter.next(Duration::from_secs(2)));
++    std::thread::sleep(Duration::from_millis(20));
++    sink.push(NoticeKind::IdeaProject);
++    first.forward_notices();
++    assert_eq!(wait.join().unwrap(), Some(ShareEvent::Notice { tag: "src-3".into(), kind: NoticeKind::IdeaProject }));
++}
++
++/// The confined server's R15 notices reach the share-event queue through the device: an R15 refusal and a
++/// write to a watched name, served by the device's drain, each come out once.
++#[test]
++fn guarded_fs_r15_notices_drain_through_the_device_once_each() {
++    let tree = TempTree::new();
++    let events = ShareEvents::new();
++    let root = OwnedFd::from(fs::File::open(&tree.0).unwrap());
++    let flags = ShareFlags { read_only: false, winter_share: false, folder_rules: true };
++    let share = ShareControl::new("src-4", ConfinedConfig { root, flags, guest_path: CString::new("/workspace/folders/g4").unwrap() }, events.clone()).unwrap();
++    let access = Access::new(4, 52, 9_502_744);
++    let device = access.register(3).unwrap();
++    let mem = GuestMemoryMmap::from_ranges(&[(GuestAddress(0), MEM)]).unwrap();
++    let mut driver = Driver::new(&mem);
++    let (queues, _kicks) = device_queues();
++    let mut worker = GuardedFsWorker::new(queues, mem.clone(), access, device, share.clone(), EventFd::new(EFD_NONBLOCK).unwrap(), Arc::new(AtomicBool::new(false))).unwrap();
++    let mut run = |driver: &mut Driver, opcode: Opcode, node: u64, args: &[&[u8]]| {
++        let out = driver.request(REQ_INDEX, opcode as u32, node, args, 4096);
++        assert_eq!(worker.drain(REQ_INDEX, &mut || {}), Ok(false));
++        driver.reply(out)
++    };
++    let init = InitInCompat { major: KERNEL_VERSION, minor: KERNEL_MINOR_VERSION, max_readahead: 1 << 17, flags: 0 };
++    assert_eq!(run(&mut driver, Opcode::Init, 0, &[init.as_slice()]).0, 0);
++    let mkdir = MkdirIn { mode: 0o755, umask: 0 };
++    let (error, body) = run(&mut driver, Opcode::Mkdir, ROOT_ID, &[mkdir.as_slice(), &nul(b".git")]);
++    assert_eq!(error, 0);
++    let git = EntryOut::from_slice(&body[..std::mem::size_of::<EntryOut>()]).unwrap().nodeid;
++    assert_eq!(events.next(Duration::ZERO), None, "an allowed git directory reports nothing");
++    // An R15 refusal: a hooks directory in the protected zone.
++    assert_eq!(run(&mut driver, Opcode::Mkdir, git, &[mkdir.as_slice(), &nul(b"hooks")]).0, libc::EPERM);
++    assert!(!tree.0.join(".git/hooks").exists());
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Notice { tag: "src-4".into(), kind: NoticeKind::GitProtected }));
++    // A watched name, written: allowed and reported.
++    let create = CreateIn { flags: 2, mode: 0o644, umask: 0, open_flags: 0 };
++    assert_eq!(run(&mut driver, Opcode::Create, ROOT_ID, &[create.as_slice(), &nul(b".envrc")]).0, 0);
++    assert_eq!(events.next(Duration::ZERO), Some(ShareEvent::Notice { tag: "src-4".into(), kind: NoticeKind::Envrc }));
++    // Again: refused again, but reported once only.
++    assert_eq!(run(&mut driver, Opcode::Mkdir, git, &[mkdir.as_slice(), &nul(b"hooks")]).0, libc::EPERM);
++    assert_eq!(events.next(Duration::from_millis(20)), None, "each kind once per incarnation");
++}
++
++/// The share device is built without a shared-memory region and without EVENT_IDX, and its read-only bit
++/// follows the share.
++#[test]
++fn guarded_fs_a_share_device_has_no_shm_region_and_no_event_idx() {
++    use crate::virtio::VirtioDevice;
++    let tree = TempTree::new();
++    let shared = share(&tree, "winter-outputs", ShareEvents::new());
++    let mut device = crate::virtio::Fs::new(
++        "winter-outputs".into(),
++        crate::virtio::fs::passthrough::PermissionSemantics::LinuxSimplified,
++        None,
++        Arc::new(std::sync::atomic::AtomicI32::new(0)),
++        false,
++        Vec::new(),
++    )
++    .unwrap();
++    let access = Access::new(4, 52, 9_502_744);
++    let token = access.register(3).unwrap();
++    device.set_shm_region(crate::virtio::VirtioShmRegion { host_addr: 0x1000, guest_addr: 0x1000, size: 0x1000 });
++    device.enable_cowork_share(shared, access, token);
++    assert_eq!(device.avail_features(), 1u64 << virtio_bindings::virtio_config::VIRTIO_F_VERSION_1);
++    assert!(device.shm_region().is_none());
++    assert_eq!(device.device_type(), 26);
++}
+diff --git a/src/devices/src/virtio/fs/device.rs b/src/devices/src/virtio/fs/device.rs
+index ae504cd..5f7c0d4 100644
+--- a/src/devices/src/virtio/fs/device.rs
++++ b/src/devices/src/virtio/fs/device.rs
+@@ -58,6 +58,9 @@ pub struct Fs {
+     exit_code: Arc<AtomicI32>,
+     #[cfg(target_os = "macos")]
+     map_sender: Option<Sender<WorkerMessage>>,
++    /// A Cowork share (`enable_cowork_share`): the guarded worker serves its confined server.
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    cowork: Option<super::cowork::CoworkDevice>,
+ }
+ 
+ impl Fs {
+@@ -108,9 +111,33 @@ impl Fs {
+             exit_code,
+             #[cfg(target_os = "macos")]
+             map_sender: None,
++            #[cfg(all(feature = "blk", target_os = "macos"))]
++            cowork: None,
+         })
+     }
+ 
++    /// Turns this device into the guarded device of one Cowork share (SH2): its own worker serves the
++    /// share's confined server, registered with the reclaim `Access` as `device`. No shared-memory region
++    /// (R6), no passthrough configuration and no `EVENT_IDX` (the guarded worker signals every completion).
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    pub fn enable_cowork_share(
++        &mut self,
++        share: Arc<super::cowork::ShareControl>,
++        access: crate::reclaim_access::Access,
++        device: crate::reclaim_access::Device,
++    ) {
++        self.avail_features = 1u64 << VIRTIO_F_VERSION_1;
++        self.shm_region = None;
++        self.passthrough_cfg = None;
++        self.read_only = share.flags().read_only;
++        self.cowork = Some(super::cowork::CoworkDevice {
++            share,
++            access,
++            device,
++            stop: Arc::new(std::sync::atomic::AtomicBool::new(false)),
++        });
++    }
++
+     pub fn id(&self) -> &str {
+         defs::FS_DEV_ID
+     }
+@@ -197,6 +224,26 @@ impl VirtioDevice for Fs {
+             panic!("virtio_fs: worker thread already exists");
+         }
+ 
++        #[cfg(all(feature = "blk", target_os = "macos"))]
++        if let Some(cowork) = &self.cowork {
++            let _ = self.worker_stopfd.read();
++            cowork.stop.store(false, Ordering::Release);
++            let worker = super::cowork::GuardedFsWorker::new(
++                queues,
++                mem.clone(),
++                cowork.access.clone(),
++                cowork.device,
++                cowork.share.clone(),
++                self.worker_stopfd.try_clone().unwrap(),
++                cowork.stop.clone(),
++            )
++            .map_err(|_| ActivateError::BadActivate)?;
++            let signal = interrupt.clone();
++            self.worker_thread = Some(worker.run(move || signal.signal_used_queue()));
++            self.device_state = DeviceState::Activated(mem, interrupt);
++            return Ok(());
++        }
++
+         // Extract queues and eventfds from DeviceQueues.
+         let mut worker_queues = Vec::with_capacity(queues.len());
+         let mut queue_evts = Vec::with_capacity(queues.len());
+@@ -240,13 +287,44 @@ impl VirtioDevice for Fs {
+     }
+ 
+     fn reset(&mut self) -> bool {
++        #[cfg(all(feature = "blk", target_os = "macos"))]
++        if let Some(cowork) = &self.cowork {
++            cowork.stop.store(true, Ordering::Release);
++        }
+         if let Some(worker) = self.worker_thread.take() {
+             let _ = self.worker_stopfd.write(1);
+             if let Err(e) = worker.join() {
+                 error!("error waiting for worker thread: {e:?}");
+             }
+         }
++        #[cfg(all(feature = "blk", target_os = "macos"))]
++        if let Some(cowork) = &mut self.cowork {
++            let _ = self.worker_stopfd.read();
++            match cowork.access.reset_generation(cowork.device) {
++                Ok(next) => cowork.device = next,
++                Err(_) => cowork.access.stop(),
++            }
++        }
+         self.device_state = DeviceState::Inactive;
+         true
+     }
+ }
++
++/// R13, the exit path: a share device's worker is stopped and joined, so no guest write reaches the host
++/// after the exit observers that follow (the final flush, then the exit hook) run. A stock device keeps
++/// the default no-op.
++impl crate::virtio::VmmExitObserver for Fs {
++    fn on_vmm_exit(&mut self) {
++        #[cfg(all(feature = "blk", target_os = "macos"))]
++        {
++            let Some(cowork) = &self.cowork else { return };
++            cowork.stop.store(true, Ordering::Release);
++            if let Some(worker) = self.worker_thread.take() {
++                let _ = self.worker_stopfd.write(1);
++                if let Err(e) = worker.join() {
++                    error!("error waiting for the share worker at exit: {e:?}");
++                }
++            }
++        }
++    }
++}
+diff --git a/src/devices/src/virtio/fs/mod.rs b/src/devices/src/virtio/fs/mod.rs
+index f8ef632..fd54c1d 100644
+--- a/src/devices/src/virtio/fs/mod.rs
++++ b/src/devices/src/virtio/fs/mod.rs
+@@ -1,4 +1,6 @@
+ mod augment_fs;
++#[cfg(all(feature = "blk", target_os = "macos"))]
++pub mod cowork;
+ mod device;
+ #[allow(dead_code)]
+ mod filesystem;
+diff --git a/src/devices/src/workspace_disks.rs b/src/devices/src/workspace_disks.rs
+index 635aecc..3be7a45 100644
+--- a/src/devices/src/workspace_disks.rs
++++ b/src/devices/src/workspace_disks.rs
+@@ -13,6 +13,23 @@ pub const RUNTIME_DEVICE: u64 = 2;
+ pub const MAX_DEVICES: usize = 3;
+ pub const MAX_PINS: usize = 48;
+ pub const MAX_PINNED_BYTES: u64 = 8 * 1024 * 1024;
++/// The first reclaim registration id of a share's fs device; share `i` registers as `FIRST_SHARE_DEVICE + i`.
++pub const FIRST_SHARE_DEVICE: u64 = 3;
++
++/// The reclaim budget of a workspace with `shares` share devices (R14): (`max_devices`, `max_pins`,
++/// `max_pinned_bytes`) = (3 + S, 48 + 4 S, 8 MiB + 1,114,136 S); 15 / 96 / 21,758,240 at the maximum S = 12.
++/// Computed from the actual S at context build, never larger; `None` above 12 shares.
++pub fn budget(shares: usize) -> Option<(usize, usize, u64)> {
++    use crate::virtio::fs::cowork::{MAX_SHARES, PINNED_BYTES_PER_SHARE, PINS_PER_SHARE};
++    if shares > MAX_SHARES {
++        return None;
++    }
++    Some((
++        MAX_DEVICES + shares,
++        MAX_PINS + PINS_PER_SHARE * shares,
++        MAX_PINNED_BYTES + PINNED_BYTES_PER_SHARE * shares as u64,
++    ))
++}
+ 
+ #[repr(C)]
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+diff --git a/src/libkrun/src/cowork_production_gate_matrix_tests.rs b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
+index d88a622..9a438f8 100644
+--- a/src/libkrun/src/cowork_production_gate_matrix_tests.rs
++++ b/src/libkrun/src/cowork_production_gate_matrix_tests.rs
+@@ -4,6 +4,7 @@
+ //! `--test-threads=1`: contexts, descriptors and the context map are process-wide.
+ use super::*;
+ use crate::cowork_production_profile_tests::{bare, machine, valid, Production};
++use crate::cowork_production_shares_tests::Shares;
+ use std::ffi::CString;
+ use std::os::raw::c_char;
+ 
+@@ -17,6 +18,12 @@ fn change(f: impl Fn(&mut ContextConfig) + 'static) -> Change {
+ /// it again (so the refusal is that clause and not a side effect), and only that clause is touched.
+ #[test]
+ fn every_reviewed_inventory_clause_refuses_a_production_context() {
++    every_reviewed_inventory_clause_refuses(0);
++}
++
++/// The same clauses on a production context that carries `shares` admitted shares (SH2): every TSI, vsock
++/// and other refusal still refuses, and undoing it admits the context with its shares again.
++pub(crate) fn every_reviewed_inventory_clause_refuses(shares: usize) {
+     let clauses: Vec<(&str, Change, Change)> = vec![
+         ("virtiofs device (r.fs)", change(|c| {
+             c.vmr.add_fs_device(FsDeviceConfig {
+@@ -26,8 +33,9 @@ fn every_reviewed_inventory_clause_refuses_a_production_context() {
+                 shm_size: None,
+                 read_only: false,
+                 virtual_entries: Vec::new(),
++                cowork_share: None,
+             })
+-        }), change(|c| c.vmr.fs.clear())),
++        }), change(|c| { c.vmr.fs.pop(); })),
+         ("extra virtio console (r.virtio_consoles)", change(|c| {
+             c.vmr.virtio_consoles.push(VirtioConsoleConfigMode::Explicit(Vec::new()))
+         }), change(|c| c.vmr.virtio_consoles.clear())),
+@@ -73,6 +81,8 @@ fn every_reviewed_inventory_clause_refuses_a_production_context() {
+     ];
+     let production = Production::new();
+     let id = production.id;
++    let _shares = Shares::add(id, shares);
++    assert!(valid(id));
+     for (name, apply, undo) in &clauses {
+         {
+             let mut map = CTX_MAP.lock().unwrap();
+@@ -119,6 +129,11 @@ enum Expect {
+ /// exhaustive context classification below is what forces it to be added.
+ #[test]
+ fn every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert() {
++    every_device_adding_setter_is_classified(0);
++}
++
++/// The same table on production contexts that carry `shares` admitted shares (SH2).
++pub(crate) fn every_device_adding_setter_is_classified(shares: usize) {
+     let path = CString::new("/nonexistent-never-opened").unwrap();
+     let tag = CString::new("tag").unwrap();
+     let name = CString::new("port").unwrap();
+@@ -180,6 +195,8 @@ fn every_device_adding_setter_flips_the_preflight_or_is_refused_or_is_inert() {
+     for (name, expect, call) in table {
+         let production = Production::new();
+         let id = production.id;
++        let _shares = Shares::add(id, shares);
++        assert!(valid(id), "{name}: not admitted with {shares} shares");
+         let status = call(id);
+         match expect {
+             Expect::Flips => {
+diff --git a/src/libkrun/src/cowork_production_profile_tests.rs b/src/libkrun/src/cowork_production_profile_tests.rs
+index 3570011..72b18c7 100644
+--- a/src/libkrun/src/cowork_production_profile_tests.rs
++++ b/src/libkrun/src/cowork_production_profile_tests.rs
+@@ -467,10 +467,13 @@ fn production_header_exposes_the_production_api_and_hides_the_fixture_entry_poin
+     assert_eq!(
+         production,
+         [
++            "krun_cowork_add_share_v1",
+             "krun_cowork_create_runtime_port_v1",
+             "krun_cowork_enable_profile_v1",
+             "krun_cowork_get_flush_counters_v1",
+             "krun_cowork_get_pin_counters_v1",
++            "krun_cowork_next_share_event_v1",
++            "krun_cowork_revoke_share_v1",
+             "krun_cowork_set_exit_hook_v1",
+             "krun_cowork_set_workspace_disks_v1",
+             "krun_cowork_validate_profile_v1",
+diff --git a/src/libkrun/src/cowork_production_shares_tests.rs b/src/libkrun/src/cowork_production_shares_tests.rs
+new file mode 100644
+index 0000000..c99111d
+--- /dev/null
++++ b/src/libkrun/src/cowork_production_shares_tests.rs
+@@ -0,0 +1,388 @@
++//! SH2: the host-backed shares in the production profile. `krun_cowork_add_share_v1` and its refusals, the
++//! gate clauses that admit `r.fs` only from it, every earlier TSI, vsock and inventory refusal with shares
++//! present, revocation and the share-event drain, and text pins on the device wiring. Pure context and
++//! validator checks: nothing here creates a VM, calls Hypervisor.framework or calls `krun_start_enter`.
++//! Temporary directories live under the system temp directory. Run with `--test-threads=1`.
++use super::*;
++use crate::cowork_production_gate_matrix_tests::{every_device_adding_setter_is_classified, every_reviewed_inventory_clause_refuses};
++use crate::cowork_production_profile_tests::{bare, open_fds, valid, Production};
++use devices::virtio::fs::cowork::{ShareControl, ShareEvents};
++use devices::virtio::fs::macos::confined::{ConfinedConfig, NoticeKind, ShareFlags};
++use std::os::fd::{AsRawFd, OwnedFd};
++use std::sync::atomic::AtomicU64;
++
++static NEXT: AtomicU64 = AtomicU64::new(0);
++
++pub(crate) struct Dir {
++    path: PathBuf,
++    pub(crate) fd: OwnedFd,
++}
++impl Dir {
++    pub(crate) fn new() -> Self {
++        let path = std::env::temp_dir().join(format!("winter-share-{}-{}", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
++        let _ = std::fs::remove_dir_all(&path);
++        std::fs::create_dir(&path).unwrap();
++        let fd = OwnedFd::from(File::open(&path).unwrap());
++        Dir { path, fd }
++    }
++}
++impl Drop for Dir {
++    fn drop(&mut self) {
++        let _ = std::fs::remove_dir_all(&self.path);
++    }
++}
++
++/// The shares of 2.1, in order: nine folder sources (even ones read-write with the folder rules, odd ones
++/// read-only), then the guidance, memory and outputs Winter shares.
++fn spec(index: usize) -> (String, String, u32) {
++    match index {
++        0..=8 => (format!("src-{index}"), format!("/workspace/folders/g{index}"), if index % 2 == 0 { 4 } else { 1 }),
++        9 => ("winter-guidance".into(), "/run/winter/shared-instructions".into(), 1 | 2),
++        10 => ("winter-memory".into(), "/workspace/.winter/memory".into(), 2),
++        _ => ("winter-outputs".into(), "/workspace/outputs".into(), 2),
++    }
++}
++
++fn add(id: u32, tag: &str, fd: i32, flags: u32, guest_path: &str) -> i32 {
++    let (tag, guest_path) = (CString::new(tag).unwrap(), CString::new(guest_path).unwrap());
++    unsafe { krun_cowork_add_share_v1(id, tag.as_ptr(), fd, flags, guest_path.as_ptr()) }
++}
++
++/// `count` admitted shares on a production context; the directories go away on drop.
++pub(crate) struct Shares(#[allow(dead_code)] Vec<Dir>);
++impl Shares {
++    pub(crate) fn add(id: u32, count: usize) -> Self {
++        let dirs: Vec<_> = (0..count).map(|_| Dir::new()).collect();
++        for (index, dir) in dirs.iter().enumerate() {
++            let (tag, path, flags) = spec(index);
++            assert_eq!(add(id, &tag, dir.fd.as_raw_fd(), flags, &path), 0, "{tag}");
++        }
++        Shares(dirs)
++    }
++}
++
++fn revoke(id: u32, tag: &str) -> i32 {
++    let tag = CString::new(tag).unwrap();
++    unsafe { krun_cowork_revoke_share_v1(id, tag.as_ptr()) }
++}
++
++fn next_event(id: u32, timeout_ms: u32) -> (i32, KrunCoworkShareEventV1) {
++    let mut out = KrunCoworkShareEventV1 { size: std::mem::size_of::<KrunCoworkShareEventV1>() as u32, ..Default::default() };
++    let status = unsafe { krun_cowork_next_share_event_v1(id, &mut out, timeout_ms) };
++    (status, out)
++}
++
++fn tag_of(event: &KrunCoworkShareEventV1) -> String {
++    let end = event.tag.iter().position(|b| *b == 0).unwrap();
++    String::from_utf8(event.tag[..end].to_vec()).unwrap()
++}
++
++#[test]
++fn production_contexts_with_shares_are_admitted_and_each_share_is_one_confined_device() {
++    for count in [1, 12] {
++        let production = Production::new();
++        let id = production.id;
++        let _shares = Shares::add(id, count);
++        assert!(valid(id));
++        assert_eq!(krun_cowork_validate_profile_v1(id), 0);
++        let map = CTX_MAP.lock().unwrap();
++        let fs = &map.get(&id).unwrap().vmr.fs;
++        assert_eq!(fs.len(), count);
++        for (index, entry) in fs.iter().enumerate() {
++            let (tag, _, flags) = spec(index);
++            let share = entry.cowork_share.as_ref().unwrap();
++            assert_eq!((entry.fs_id.as_str(), share.tag()), (tag.as_str(), tag.as_str()));
++            assert!(entry.shared_dir.is_none() && entry.shm_size.is_none() && entry.virtual_entries.is_empty());
++            assert!(matches!(entry.semantics, PermissionSemantics::LinuxSimplified));
++            assert_eq!(entry.read_only, flags & 1 != 0);
++            assert_eq!(share.flags(), ShareFlags::from_abi(flags).unwrap());
++        }
++    }
++}
++
++#[test]
++fn add_share_refuses_every_malformed_argument_and_keeps_no_descriptor() {
++    let before = open_fds();
++    {
++        let production = Production::new();
++        let id = production.id;
++        let dir = Dir::new();
++        let fd = dir.fd.as_raw_fd();
++        let file_path = std::env::temp_dir().join(format!("winter-share-file-{}", std::process::id()));
++        let file = File::create(&file_path).unwrap();
++        let baseline = open_fds();
++        let refused = |status: i32, what: &str| {
++            assert_eq!(status, -libc::EINVAL, "{what}");
++            assert_eq!(open_fds(), baseline, "{what}: a refusal keeps no descriptor");
++            assert!(valid(id), "{what}: the context is unchanged");
++            assert!(CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.fs.is_empty(), "{what}");
++        };
++        let path = CString::new("/workspace/outputs").unwrap();
++        refused(unsafe { krun_cowork_add_share_v1(id, std::ptr::null(), fd, 2, path.as_ptr()) }, "null tag");
++        let tag = CString::new("winter-outputs").unwrap();
++        refused(unsafe { krun_cowork_add_share_v1(id, tag.as_ptr(), fd, 2, std::ptr::null()) }, "null guest path");
++        for bad in ["", "A", "src_0", "src 0", "0123456789abcdefghijklmnopqrstuvw", "src/0"] {
++            refused(add(id, bad, fd, 2, "/workspace/outputs"), bad);
++        }
++        for bad in ["/workspace", "/workspace/", "/workspace/../etc", "/workspace/a//b", "/workspace/a/", "/tmp/a", "relative/a", "/run/winter/./a"] {
++            refused(add(id, "winter-outputs", fd, 2, bad), bad);
++        }
++        for bad in [8u32, 6, 1 << 31, u32::MAX] {
++            refused(add(id, "winter-outputs", fd, bad, "/workspace/outputs"), &format!("flags {bad:#x}"));
++        }
++        for bad in [-1, 0, 1, 2, 9999] {
++            refused(add(id, "winter-outputs", bad, 2, "/workspace/outputs"), &format!("descriptor {bad}"));
++        }
++        refused(add(id, "winter-outputs", file.as_raw_fd(), 2, "/workspace/outputs"), "a regular file");
++        // A standard descriptor is refused even when it is a directory.
++        let saved = unsafe { libc::dup(0) };
++        assert!(saved >= 3);
++        assert_eq!(unsafe { libc::dup2(fd, 0) }, 0);
++        let status = add(id, "winter-outputs", 0, 2, "/workspace/outputs");
++        assert_eq!(unsafe { libc::dup2(saved, 0) }, 0);
++        assert_eq!(unsafe { libc::close(saved) }, 0);
++        refused(status, "descriptor 0 holding a directory");
++        assert_eq!(add(u32::MAX, "winter-outputs", fd, 2, "/workspace/outputs"), -libc::ENOENT);
++        // Only a production context takes a share: neither a plain nor a fixture context does.
++        for fixture in [false, true] {
++            let other = bare();
++            if fixture {
++                assert_eq!(krun_enable_cowork_block_fixture_reclaim(other), 0);
++            }
++            assert_eq!(add(other, "winter-outputs", fd, 2, "/workspace/outputs"), -libc::EINVAL);
++            assert!(CTX_MAP.lock().unwrap().get(&other).unwrap().vmr.fs.is_empty());
++            assert_eq!(krun_free_ctx(other), 0);
++        }
++        assert_eq!(open_fds(), baseline);
++
++        // Accepted: one close-on-exec duplicate kept by the library; the caller's descriptor stays its own. The
++        // device set changed, so the start refuses until the preflight runs again.
++        assert!(cowork_start_admission(CTX_MAP.lock().unwrap().get(&id).unwrap()).is_ok());
++        assert_eq!(add(id, "src-0", fd, 4, "/workspace/folders/g0"), 0);
++        assert!(cowork_start_admission(CTX_MAP.lock().unwrap().get(&id).unwrap()).is_err());
++        assert_eq!(krun_cowork_validate_profile_v1(id), 0);
++        assert!(cowork_start_admission(CTX_MAP.lock().unwrap().get(&id).unwrap()).is_ok());
++        let after = open_fds();
++        assert_eq!(after.len(), baseline.len() + 1);
++        let identity = |fd: i32| {
++            let mut st: libc::stat = unsafe { std::mem::zeroed() };
++            (unsafe { libc::fstat(fd, &mut st) } == 0).then(|| (st.st_dev, st.st_ino))
++        };
++        let kept: Vec<_> = after.iter().copied().filter(|other| *other != fd && identity(*other) == identity(fd)).collect();
++        assert_eq!(kept.len(), 1, "one duplicate of the root");
++        let kept = kept[0];
++        assert!(kept >= 3);
++        assert_ne!(unsafe { libc::fcntl(kept, libc::F_GETFD) } & libc::FD_CLOEXEC, 0);
++        assert!(unsafe { libc::fcntl(fd, libc::F_GETFD) } >= 0, "the caller's descriptor is untouched");
++        // Once each: the tag, the root and the mount point.
++        let other = Dir::new();
++        let duplicate = unsafe { libc::dup(fd) };
++        let with_one = open_fds();
++        assert_eq!(add(id, "src-0", other.fd.as_raw_fd(), 4, "/workspace/folders/g1"), -libc::EINVAL, "same tag");
++        assert_eq!(add(id, "src-1", duplicate, 1, "/workspace/folders/g1"), -libc::EINVAL, "same root (another descriptor)");
++        assert_eq!(add(id, "src-1", other.fd.as_raw_fd(), 1, "/workspace/folders/g0"), -libc::EINVAL, "same mount point");
++        assert_eq!(add(id, "src-1", other.fd.as_raw_fd(), 1, "/workspace/folders/g0/inner"), -libc::EINVAL, "nested mount point");
++        assert_eq!(add(id, "src-1", other.fd.as_raw_fd(), 1, "/workspace/folders"), -libc::EINVAL, "enclosing mount point");
++        assert_eq!(open_fds(), with_one);
++        assert_eq!(unsafe { libc::close(duplicate) }, 0);
++        assert!(valid(id));
++        drop(file);
++        let _ = std::fs::remove_file(&file_path);
++    }
++    assert_eq!(open_fds(), before, "freeing the context closes its shares");
++}
++
++#[test]
++fn at_most_twelve_shares() {
++    let production = Production::new();
++    let id = production.id;
++    let _shares = Shares::add(id, 12);
++    let extra = Dir::new();
++    let baseline = open_fds();
++    assert_eq!(add(id, "src-x", extra.fd.as_raw_fd(), 1, "/workspace/folders/x"), -libc::EINVAL);
++    assert_eq!(open_fds(), baseline);
++    assert_eq!(CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.fs.len(), 12);
++    assert!(valid(id));
++}
++
++/// A share entry built outside `krun_cowork_add_share_v1` (the forged entries a later change could produce):
++/// the gate refuses each departure from what the function builds, and undoing it admits the context again.
++#[test]
++fn the_gate_admits_r_fs_only_as_built_by_add_share() {
++    type Change = Box<dyn Fn(&mut ContextConfig)>;
++    let extra = Dir::new();
++    let twin = Dir::new();
++    let events = ShareEvents::new();
++    let flags = ShareFlags::from_abi(1).unwrap();
++    let thirteenth = ShareControl::new("src-x", ConfinedConfig { root: extra.fd.try_clone().unwrap(), flags, guest_path: CString::new("/workspace/folders/x").unwrap() }, events.clone()).unwrap();
++    let same_tag = ShareControl::new("src-0", ConfinedConfig { root: twin.fd.try_clone().unwrap(), flags, guest_path: CString::new("/workspace/folders/y").unwrap() }, events).unwrap();
++    let entry = |share: &std::sync::Arc<ShareControl>| FsDeviceConfig {
++        fs_id: share.tag().to_string(),
++        shared_dir: None,
++        semantics: PermissionSemantics::LinuxSimplified,
++        shm_size: None,
++        read_only: true,
++        virtual_entries: Vec::new(),
++        cowork_share: Some(share.clone()),
++    };
++    let (thirteenth_entry, same_tag_entry) = (entry(&thirteenth), entry(&same_tag));
++    let clauses: Vec<(&str, usize, Change, Change)> = vec![
++        ("host path (shared_dir)", 2, Box::new(|c| c.vmr.fs[1].shared_dir = Some("/nonexistent".into())), Box::new(|c| c.vmr.fs[1].shared_dir = None)),
++        ("shared memory (R6)", 2, Box::new(|c| c.vmr.fs[1].shm_size = Some(1 << 20)), Box::new(|c| c.vmr.fs[1].shm_size = None)),
++        ("not Simplified (R7)", 2, Box::new(|c| c.vmr.fs[1].semantics = PermissionSemantics::LinuxComplete), Box::new(|c| c.vmr.fs[1].semantics = PermissionSemantics::LinuxSimplified)),
++        ("virtual entries", 2, Box::new(|c| c.vmr.fs[1].virtual_entries.push(VirtualDirEntry { name: CString::new("x").unwrap(), entry: VirtualEntry { mode: 0o755, one_shot: false, content: VirtualEntryContent::Dir { children: Vec::new() } } })), Box::new(|c| c.vmr.fs[1].virtual_entries.clear())),
++        ("device read-only bit differs from the share's", 2, Box::new(|c| c.vmr.fs[1].read_only = false), Box::new(|c| c.vmr.fs[1].read_only = true)),
++        ("device id differs from the tag", 2, Box::new(|c| c.vmr.fs[1].fs_id = "src-9".into()), Box::new(|c| c.vmr.fs[1].fs_id = "src-1".into())),
++        ("no share (a stock entry)", 2, Box::new(|c| { c.vmr.fs[1].cowork_share.take(); }), Box::new(|_| {})),
++        ("a thirteenth share", 12, Box::new(move |c| c.vmr.fs.push(thirteenth_entry.clone())), Box::new(|c| { c.vmr.fs.pop(); })),
++        ("two shares with one tag", 2, Box::new(move |c| c.vmr.fs.push(same_tag_entry.clone())), Box::new(|c| { c.vmr.fs.pop(); })),
++        ("shares without the production marker", 2, Box::new(|c| c.cowork_production = false), Box::new(|c| c.cowork_production = true)),
++    ];
++    for (name, count, apply, undo) in &clauses {
++        let production = Production::new();
++        let id = production.id;
++        let _shares = Shares::add(id, *count);
++        assert!(valid(id), "{name}");
++        let kept = CTX_MAP.lock().unwrap().get(&id).unwrap().vmr.fs[1].cowork_share.clone();
++        apply(CTX_MAP.lock().unwrap().get_mut(&id).unwrap());
++        assert!(!valid(id), "not refused: {name}");
++        assert_eq!(krun_cowork_validate_profile_v1(id), -libc::EINVAL, "preflight accepted: {name}");
++        {
++            let mut map = CTX_MAP.lock().unwrap();
++            let cfg = map.get_mut(&id).unwrap();
++            undo(cfg);
++            cfg.vmr.fs[1].cowork_share = kept;
++        }
++        assert!(valid(id), "not restored: {name}");
++    }
++    // The marker clause refuses because of the shares: the same context without them is admitted.
++    let production = Production::new();
++    let id = production.id;
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().cowork_production = false;
++    assert!(valid(id));
++    CTX_MAP.lock().unwrap().get_mut(&id).unwrap().cowork_production = true;
++}
++
++/// Every reviewed inventory clause (implicit and explicit vsock, TSI, consoles, gpu, firmware, disks, the
++/// shutdown GPIO) and every device-adding setter row (vsock ports and port maps refused, krun_add_vsock,
++/// krun_add_virtiofs* and krun_set_root flipping) keep their verdict with one share and with twelve.
++#[test]
++fn every_earlier_refusal_still_refuses_with_shares_present() {
++    for shares in [1, 12] {
++        every_reviewed_inventory_clause_refuses(shares);
++        every_device_adding_setter_is_classified(shares);
++    }
++}
++
++#[test]
++fn revocation_and_the_share_event_drain() {
++    let before = open_fds();
++    {
++        let production = Production::new();
++        let id = production.id;
++        let _shares = Shares::add(id, 2);
++        let with_shares = open_fds();
++        // The drain's argument checks.
++        assert_eq!(unsafe { krun_cowork_next_share_event_v1(id, std::ptr::null_mut(), 0) }, -libc::EINVAL);
++        let mut short = KrunCoworkShareEventV1 { size: 51, ..Default::default() };
++        assert_eq!(unsafe { krun_cowork_next_share_event_v1(id, &mut short, 0) }, -libc::EINVAL);
++        assert_eq!(short.kind, 0, "a refused call writes nothing");
++        assert_eq!(next_event(id, KRUN_COWORK_SHARE_EVENT_MAX_WAIT_MS + 1).0, -libc::EINVAL);
++        assert_eq!(next_event(u32::MAX, 0).0, -libc::ENOENT);
++        assert_eq!(next_event(id, 0).0, 0, "nothing yet");
++        // The revoke's argument checks.
++        assert_eq!(unsafe { krun_cowork_revoke_share_v1(id, std::ptr::null()) }, -libc::EINVAL);
++        assert_eq!(revoke(id, "Src-0"), -libc::EINVAL);
++        assert_eq!(revoke(id, "src-7"), -libc::ENOENT);
++        assert_eq!(revoke(u32::MAX, "src-0"), -libc::ENOENT);
++        assert_eq!(open_fds(), with_shares);
++        // Before the start no device thread holds the share: it is closed at once, then reported once.
++        assert_eq!(revoke(id, "src-0"), 0);
++        assert_eq!(open_fds().len(), with_shares.len() - 1, "the share's root descriptor is closed");
++        let (status, event) = next_event(id, 0);
++        assert_eq!((status, event.size, event.kind, event.notice), (1, 52, KRUN_COWORK_SHARE_EVENT_REVOKED, 0));
++        assert_eq!(tag_of(&event), "src-0");
++        assert_eq!(revoke(id, "src-0"), 0, "a repeat is accepted");
++        assert_eq!(next_event(id, 10).0, 0, "and reports nothing");
++        // A notice from a share's policy hooks, once per tag and kind.
++        // The confined server records it (R15); the drain forwards it.
++        let sink = COWORK_SHARES.lock().unwrap().get(&id).unwrap().shares[1].notices();
++        sink.push(NoticeKind::GitProtected);
++        sink.push(NoticeKind::GitProtected);
++        let (status, event) = next_event(id, 0);
++        assert_eq!((status, event.kind, event.notice), (1, KRUN_COWORK_SHARE_EVENT_NOTICE, 6));
++        assert_eq!(tag_of(&event), "src-1");
++        assert_eq!(next_event(id, 0).0, 0);
++        // A revoked share is inert; the context stays admissible.
++        assert!(valid(id));
++    }
++    assert_eq!(open_fds(), before);
++    // A freed context's shares and events are gone.
++    let production = Production::new();
++    let id = production.id;
++    let shares = Shares::add(id, 1);
++    drop(production);
++    assert_eq!(revoke(id, "src-0"), -libc::ENOENT);
++    assert_eq!(next_event(id, 0).0, -libc::ENOENT);
++    drop(shares);
++}
++
++/// The ABI block of the design and the header agree, and the structure has the header's layout.
++#[test]
++fn the_share_abi_is_the_designs() {
++    let header = include_str!("../../../include/libkrun.h");
++    assert!(header.contains("int32_t krun_cowork_add_share_v1(uint32_t ctx_id, const char *tag, int32_t root_fd, uint32_t flags, const char *guest_path);"));
++    assert!(header.contains("int32_t krun_cowork_revoke_share_v1(uint32_t ctx_id, const char *tag);"));
++    assert!(header.contains("int32_t krun_cowork_next_share_event_v1(uint32_t ctx_id, struct krun_cowork_share_event_v1 *out, uint32_t timeout_ms);"));
++    for line in ["#define KRUN_COWORK_MAX_SHARES 12", "#define KRUN_COWORK_SHARE_READ_ONLY (1u << 0)", "#define KRUN_COWORK_SHARE_WINTER (1u << 1)", "#define KRUN_COWORK_SHARE_FOLDER_RULES (1u << 2)",
++                 "#define KRUN_COWORK_SHARE_EVENT_REVOKED 1", "#define KRUN_COWORK_SHARE_EVENT_NOTICE 2", "#define KRUN_COWORK_SHARE_NOTICE_ENVRC 1", "#define KRUN_COWORK_SHARE_NOTICE_GIT_PROTECTED 6", "char tag[36];"] {
++        assert!(header.contains(line), "{line}");
++    }
++    assert_eq!(std::mem::size_of::<KrunCoworkShareEventV1>(), 52);
++    assert_eq!((ShareFlags::READ_ONLY, ShareFlags::WINTER_SHARE, ShareFlags::FOLDER_RULES), (1, 2, 4));
++    assert_eq!(devices::virtio::fs::cowork::MAX_SHARES, 12);
++    assert_eq!(devices::virtio::fs::cowork::TAG_MAX + 1, 33, "the tag and its NUL fit tag[36]");
++}
++
++/// The pin counters report the budget the VM was built with (R14), the base budget before any build.
++#[test]
++fn the_pin_counters_report_the_budget_the_vm_was_built_with() {
++    let read = || {
++        let mut out = KrunCoworkPinCountersV1 { size: std::mem::size_of::<KrunCoworkPinCountersV1>() as u32, ..Default::default() };
++        assert_eq!(unsafe { krun_cowork_get_pin_counters_v1(&mut out) }, 0);
++        (out.max_pins, out.max_pinned_bytes)
++    };
++    assert_eq!(read(), (48, 8 * 1024 * 1024));
++    let (_, pins, bytes) = devices::workspace_disks::budget(12).unwrap();
++    devices::cowork_counters::set_budget(pins, bytes);
++    assert_eq!(read(), (96, 21_758_240));
++    devices::cowork_counters::set_budget(0, 0);
++    assert_eq!(read(), (48, 8 * 1024 * 1024));
++}
++
++/// Text pins on the wiring: the builder sizes the reclaim budget from the actual share count, registers each
++/// share's device after the three workspace devices and puts it on the exit path (R13) where the device is
++/// built; the device's exit observer stops and joins its worker.
++#[test]
++fn the_share_devices_are_wired_into_the_budget_and_the_exit_path() {
++    let builder = include_str!("../../vmm/src/builder.rs");
++    assert!(builder.contains("let shares = vm_resources.fs.iter().filter(|config| config.cowork_share.is_some()).count();"));
++    assert!(builder.contains("devices::workspace_disks::budget(shares)"));
++    assert!(builder.contains("devices::cowork_counters::set_budget("));
++    let start = builder.find("fn attach_fs_devices(").unwrap();
++    let body = &builder[start..];
++    let body = &body[..body.find("\n}\n").unwrap()];
++    let register = body.find(".register(devices::workspace_disks::FIRST_SHARE_DEVICE + i as u64)").expect("registration");
++    let enable = body.find("enable_cowork_share(share.clone(), access, device)").expect("enable");
++    let observer = body.find("vmm.exit_observers.push(fs.clone());").expect("exit observer");
++    assert!(register < enable && enable < observer);
++    let device = include_str!("../../devices/src/virtio/fs/device.rs");
++    let at = device.find("impl crate::virtio::VmmExitObserver for Fs").expect("observer");
++    let body = &device[at..];
++    let body = &body[..body.find("\n}\n").unwrap()];
++    let stop = body.find("cowork.stop.store(true").expect("stop flag");
++    let wake = body.find("self.worker_stopfd.write(1)").expect("stop event");
++    let join = body.find("worker.join()").expect("join");
++    assert!(stop < wake && wake < join);
++    assert!(body.contains("let Some(cowork) = &self.cowork else { return };"), "stock devices keep the no-op");
++}
+diff --git a/src/libkrun/src/lib.rs b/src/libkrun/src/lib.rs
+index 7d46aa7..493dfb2 100644
+--- a/src/libkrun/src/lib.rs
++++ b/src/libkrun/src/lib.rs
+@@ -572,7 +572,12 @@ pub extern "C" fn krun_create_ctx() -> i32 {
+ #[no_mangle]
+ pub extern "C" fn krun_free_ctx(ctx_id: u32) -> i32 {
+     match CTX_MAP.lock().unwrap().remove(&ctx_id) {
+-        Some(_) => KRUN_SUCCESS,
++        Some(_) => {
++            // The context's shares close with it (a started context never comes back here).
++            #[cfg(all(feature = "blk", target_os = "macos"))]
++            COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).remove(&ctx_id);
++            KRUN_SUCCESS
++        }
+         None => -libc::ENOENT,
+     }
+ }
+@@ -637,6 +642,8 @@ pub unsafe extern "C" fn krun_set_root(ctx_id: u32, c_root_path: *const c_char)
+                     }
+                     v
+                 },
++                #[cfg(all(feature = "blk", target_os = "macos"))]
++                cowork_share: None,
+             });
+         }
+         Entry::Vacant(_) => return -libc::ENOENT,
+@@ -741,6 +748,8 @@ pub unsafe extern "C" fn krun_add_virtiofs4(
+                 shm_size: shm,
+                 read_only,
+                 virtual_entries,
++                #[cfg(all(feature = "blk", target_os = "macos"))]
++                cowork_share: None,
+             });
+         }
+         Entry::Vacant(_) => return -libc::ENOENT,
+@@ -2456,6 +2465,8 @@ pub unsafe extern "C" fn krun_set_root_disk_remount(
+                 shm_size: Some(1 << 29),
+                 read_only: false,
+                 virtual_entries,
++                #[cfg(all(feature = "blk", target_os = "macos"))]
++                cowork_share: None,
+             });
+ 
+             ctx_cfg.set_block_root(device, fstype, options);
+@@ -2965,7 +2976,7 @@ fn cowork_validate_profile_in_phase(cfg:&ContextConfig, phase:CoworkProfilePhase
+         || r.cowork_guarded_block!=cfg!(feature="blk")
+         || cfg.gpu_virgl_flags.is_some() || cfg.gpu_shm_size.is_some() || cfg.render_server_fd.is_some()
+         || !matches!(cfg.vsock_config,VsockConfig::Disabled) || !r.disable_implicit_console || !r.virtio_consoles.is_empty()
+-        || r.serial_consoles.len()!=1 || !r.fs.is_empty() || r.external_kernel.is_none() || r.kernel_bundle.is_some()
++        || r.serial_consoles.len()!=1 || !cowork_shares_admitted(cfg) || r.external_kernel.is_none() || r.kernel_bundle.is_some()
+         || r.firmware_config.is_some() || r.nested_enabled || r.gpu_virgl_flags.is_some() || r.gpu_shm_size.is_some()
+         || r.gpu_render_server_fd.is_some() || r.vm_config().vcpu_count!=Some(2)
+         || r.vm_config().mem_size_mib.is_none_or(|m|m>1024) {return Err(());}
+@@ -2979,6 +2990,36 @@ fn cowork_validate_profile_in_phase(cfg:&ContextConfig, phase:CoworkProfilePhase
+     }
+     Ok(())
+ }
++/// SH2: `r.fs` is admitted only when it is empty, or when every entry came from `krun_cowork_add_share_v1`
++/// on a production context: a confined share, no shared memory (R6), Simplified permissions and no xattr
++/// (R7: the confined server has none), no host path, no virtual entries, the device's read-only bit equal
++/// to the share's, the tag as the device id, at most 12 shares with distinct tags. `krun_add_virtiofs*` and
++/// `krun_set_root` add an entry without a share, so they keep flipping the context out of the profile.
++fn cowork_shares_admitted(cfg: &ContextConfig) -> bool {
++    let fs = &cfg.vmr.fs;
++    if fs.is_empty() {
++        return true;
++    }
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { false }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        let mut tags = std::collections::HashSet::new();
++        cfg.cowork_production
++            && fs.len() <= devices::virtio::fs::cowork::MAX_SHARES
++            && fs.iter().all(|entry| {
++                entry.cowork_share.as_ref().is_some_and(|share| {
++                    share.tag() == entry.fs_id
++                        && tags.insert(entry.fs_id.clone())
++                        && entry.shared_dir.is_none()
++                        && entry.shm_size.is_none()
++                        && matches!(entry.semantics, PermissionSemantics::LinuxSimplified)
++                        && entry.virtual_entries.is_empty()
++                        && entry.read_only == share.flags().read_only
++                })
++            })
++    }
++}
+ #[cfg(feature="blk")]
+ fn cowork_validate_blocks(guarded:bool,memory:Option<usize>,disks:&[BlockDeviceConfig])->Result<(),()> {
+     if guarded && (memory!=Some(768) || disks.len()!=1 || disks[0].disk_image_format!=ImageType::Raw
+@@ -3415,7 +3456,9 @@ pub unsafe extern "C" fn krun_cowork_get_pin_counters_v1(out: *mut KrunCoworkPin
+     {
+         if out.is_null() || (*out).size < std::mem::size_of::<KrunCoworkPinCountersV1>() as u32 { return -libc::EINVAL; }
+         let snapshot = devices::cowork_counters::pin_snapshot();
+-        *out = KrunCoworkPinCountersV1 { size: std::mem::size_of::<KrunCoworkPinCountersV1>() as u32, reserved: 0, max_pins: devices::workspace_disks::MAX_PINS as u64, max_pinned_bytes: devices::workspace_disks::MAX_PINNED_BYTES,
++        // The budget the VM was built with (it grows with the shares, R14); the base budget before any build.
++        let budget = devices::cowork_counters::budget().unwrap_or((devices::workspace_disks::MAX_PINS as u64, devices::workspace_disks::MAX_PINNED_BYTES));
++        *out = KrunCoworkPinCountersV1 { size: std::mem::size_of::<KrunCoworkPinCountersV1>() as u32, reserved: 0, max_pins: budget.0, max_pinned_bytes: budget.1,
+             high_water_pins: snapshot.high_water_pins, high_water_bytes: snapshot.high_water_bytes, budget_refusals: snapshot.budget_refusals };
+         0
+     }
+@@ -3460,6 +3503,157 @@ pub extern "C" fn krun_cowork_validate_profile_v1(ctx_id: u32) -> i32 {
+     0
+ }
+ 
++/// SH2: the shares of each context, kept apart from the context map because the worker revokes shares and
++/// drains their events after `krun_start_enter` has taken the context. `krun_free_ctx` drops an unstarted
++/// context's entry, which closes its shares.
++#[cfg(all(feature = "blk", target_os = "macos"))]
++struct CoworkShareSet {
++    events: std::sync::Arc<devices::virtio::fs::cowork::ShareEvents>,
++    shares: Vec<std::sync::Arc<devices::virtio::fs::cowork::ShareControl>>,
++}
++#[cfg(all(feature = "blk", target_os = "macos"))]
++static COWORK_SHARES: LazyLock<Mutex<HashMap<u32, CoworkShareSet>>> = LazyLock::new(|| Mutex::new(HashMap::new()));
++
++/// SH2: one host-backed share, served by its own guarded fs device through the confined virtio-fs server.
++/// `tag` is `[a-z0-9-]{1,32}` and distinct; `root_fd` a directory, borrowed (the library keeps its own
++/// close-on-exec duplicate, at least 3; the caller closes its own); `flags` bit 0 read-only, bit 1 Winter
++/// share, bit 2 folder rules, every other bit zero (and not both 1 and 2); `guest_path` the canonical guest
++/// mount path under `/workspace/` or `/run/winter/`, neither equal to nor nested with another share's. At
++/// most 12 shares, each root once, only on a production context, before `krun_cowork_validate_profile_v1` (an
++/// accepted share clears an earlier preflight, which must then run again).
++/// `-EINVAL` for every refusal, `-ENOENT` for an unknown context; a refusal keeps no descriptor.
++///
++/// # Safety
++/// `tag` and `guest_path` must be null or NUL-terminated strings.
++#[no_mangle]
++pub unsafe extern "C" fn krun_cowork_add_share_v1(ctx_id: u32, tag: *const c_char, root_fd: i32, flags: u32, guest_path: *const c_char) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = (ctx_id, tag, root_fd, flags, guest_path); -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        use devices::virtio::fs::cowork::{guest_paths_overlap, valid_guest_path, valid_tag, ShareControl, ShareEvents, MAX_SHARES};
++        use devices::virtio::fs::macos::confined::{ConfinedConfig, ShareFlags};
++        if tag.is_null() || guest_path.is_null() || root_fd < 3 { return -libc::EINVAL; }
++        let (tag, guest_path) = (CStr::from_ptr(tag), CStr::from_ptr(guest_path));
++        if !valid_tag(tag.to_bytes()) || !valid_guest_path(guest_path.to_bytes()) { return -libc::EINVAL; }
++        let Ok(tag) = tag.to_str() else { return -libc::EINVAL; };
++        let Ok(share_flags) = ShareFlags::from_abi(flags) else { return -libc::EINVAL; };
++        let mut st: libc::stat = std::mem::zeroed();
++        if libc::fstat(root_fd, &mut st) != 0 || st.st_mode & libc::S_IFMT != libc::S_IFDIR { return -libc::EINVAL; }
++        let identity = (st.st_dev as u64, st.st_ino);
++        let mut contexts = CTX_MAP.lock().unwrap();
++        let Some(cfg) = contexts.get_mut(&ctx_id) else { return -libc::ENOENT; };
++        if !cfg.cowork_production { return -libc::EINVAL; }
++        let shares: Vec<_> = cfg.vmr.fs.iter().filter_map(|entry| entry.cowork_share.as_ref()).collect();
++        if shares.len() >= MAX_SHARES
++            || cfg.vmr.fs.iter().any(|entry| entry.fs_id == tag)
++            || shares.iter().any(|share| share.identity() == identity || guest_paths_overlap(share.guest_path().to_bytes(), guest_path.to_bytes()))
++        {
++            return -libc::EINVAL;
++        }
++        let owned = libc::fcntl(root_fd, libc::F_DUPFD_CLOEXEC, 3);
++        if owned < 0 { return -libc::EINVAL; }
++        let root = std::os::fd::OwnedFd::from_raw_fd(owned);
++        let mut registry = COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++        let events = registry.get(&ctx_id).map(|set| set.events.clone()).unwrap_or_else(ShareEvents::new);
++        let Ok(share) = ShareControl::new(tag, ConfinedConfig { root, flags: share_flags, guest_path: guest_path.to_owned() }, events.clone()) else { return -libc::EINVAL; };
++        // The duplicate is the same open directory the caller passed (checked again, after the duplicate).
++        if share.identity() != identity { return -libc::EINVAL; }
++        cfg.vmr.add_fs_device(FsDeviceConfig {
++            fs_id: tag.to_string(),
++            shared_dir: None,
++            semantics: PermissionSemantics::LinuxSimplified,
++            shm_size: None,
++            read_only: share_flags.read_only,
++            virtual_entries: Vec::new(),
++            cowork_share: Some(share.clone()),
++        });
++        registry.entry(ctx_id).or_insert_with(|| CoworkShareSet { events, shares: Vec::new() }).shares.push(share);
++        // The device set changed: the mandatory preflight must run again.
++        cfg.cowork_validated = false;
++        0
++    }
++}
++
++/// SH2 R11: revokes one share, from any thread, before or after `krun_start_enter`. From the first request
++/// after this call every request on that share's device answers `EACCES`; the device's own thread closes the
++/// share's descriptors at its next request boundary, or at once when idle (a share whose device thread is not
++/// running is closed here), and only then is `KRUN_COWORK_SHARE_EVENT_REVOKED` queued for the tag. A repeat
++/// is accepted and changes nothing. `-EINVAL` for a malformed tag, `-ENOENT` for an unknown context or tag.
++///
++/// # Safety
++/// `tag` must be null or a NUL-terminated string.
++#[no_mangle]
++pub unsafe extern "C" fn krun_cowork_revoke_share_v1(ctx_id: u32, tag: *const c_char) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = (ctx_id, tag); -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        if tag.is_null() { return -libc::EINVAL; }
++        let tag = CStr::from_ptr(tag);
++        if !devices::virtio::fs::cowork::valid_tag(tag.to_bytes()) { return -libc::EINVAL; }
++        let registry = COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
++        let Some(set) = registry.get(&ctx_id) else { return -libc::ENOENT; };
++        let Some(share) = set.shares.iter().find(|share| share.tag().as_bytes() == tag.to_bytes()) else { return -libc::ENOENT; };
++        share.revoke();
++        0
++    }
++}
++
++/// `struct krun_cowork_share_event_v1`: one share event. `size` is set by the caller to `sizeof` and is
++/// rewritten to the bytes written; `kind` is `KRUN_COWORK_SHARE_EVENT_*`, `notice` a
++/// `KRUN_COWORK_SHARE_NOTICE_*` for a notice (0 otherwise), `tag` the NUL-terminated tag.
++#[repr(C)]
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub struct KrunCoworkShareEventV1 {
++    pub size: u32,
++    pub kind: u32,
++    pub notice: u32,
++    pub reserved: u32,
++    pub tag: [u8; 36],
++}
++impl Default for KrunCoworkShareEventV1 {
++    fn default() -> Self {
++        Self { size: 0, kind: 0, notice: 0, reserved: 0, tag: [0; 36] }
++    }
++}
++pub const KRUN_COWORK_SHARE_EVENT_REVOKED: u32 = 1;
++pub const KRUN_COWORK_SHARE_EVENT_NOTICE: u32 = 2;
++/// The longest wait `krun_cowork_next_share_event_v1` accepts, in milliseconds.
++pub const KRUN_COWORK_SHARE_EVENT_MAX_WAIT_MS: u32 = 60_000;
++
++/// SH2: the next share event of a context, for the worker's `share_revoked{tag}` and `share_notice{tag, kind}`
++/// statuses: 1 when one was written to `out`, 0 when none arrived within `timeout_ms` (0 polls; at most
++/// 60,000). Each revocation is reported once per tag, each notice once per tag and kind. `-EINVAL` for a
++/// null or short `out` or a longer wait, `-ENOENT` for a context with no share.
++///
++/// # Safety
++/// `out` must be null or point to a writable `KrunCoworkShareEventV1`.
++#[no_mangle]
++pub unsafe extern "C" fn krun_cowork_next_share_event_v1(ctx_id: u32, out: *mut KrunCoworkShareEventV1, timeout_ms: u32) -> i32 {
++    #[cfg(not(all(feature = "blk", target_os = "macos")))]
++    { let _ = (ctx_id, out, timeout_ms); -libc::EINVAL }
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    {
++        use devices::virtio::fs::cowork::ShareEvent;
++        if out.is_null() || (*out).size < std::mem::size_of::<KrunCoworkShareEventV1>() as u32 || timeout_ms > KRUN_COWORK_SHARE_EVENT_MAX_WAIT_MS { return -libc::EINVAL; }
++        let Some((events, shares)) = COWORK_SHARES.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).get(&ctx_id).map(|set| (set.events.clone(), set.shares.clone())) else { return -libc::ENOENT; };
++        // Notices the confined servers recorded (R15) join the queue before the wait.
++        for share in &shares {
++            share.forward_notices();
++        }
++        let Some(event) = events.next(std::time::Duration::from_millis(timeout_ms.into())) else { return 0; };
++        let (kind, notice, tag) = match event {
++            ShareEvent::Revoked { tag } => (KRUN_COWORK_SHARE_EVENT_REVOKED, 0, tag),
++            ShareEvent::Notice { tag, kind } => (KRUN_COWORK_SHARE_EVENT_NOTICE, devices::virtio::fs::cowork::notice_number(kind), tag),
++        };
++        let mut value = KrunCoworkShareEventV1 { size: std::mem::size_of::<KrunCoworkShareEventV1>() as u32, kind, notice, ..Default::default() };
++        value.tag[..tag.len()].copy_from_slice(tag.as_bytes());
++        *out = value;
++        1
++    }
++}
++
+ #[cfg(all(test,feature="blk",target_os="macos"))]mod cowork_admission_tests {
+  use super::*;
+  fn disk()->BlockDeviceConfig{BlockDeviceConfig{block_id:"fixture".into(),cache_type:CacheType::Writeback,disk_image_path:"/NO-OPEN-fixture-only".into(),disk_image_format:ImageType::Raw,is_disk_read_only:false,direct_io:false,sync_mode:SyncMode::Full}}
+@@ -3767,3 +3961,5 @@ mod cowork_production_quiet_tests;
+ mod cowork_production_counters_tests;
+ #[cfg(all(test,feature="blk",target_os="macos"))]
+ mod cowork_production_exit_tests;
++#[cfg(all(test,feature="blk",target_os="macos"))]
++mod cowork_production_shares_tests;
+diff --git a/src/vmm/src/builder.rs b/src/vmm/src/builder.rs
+index 5795ffd..4cfc396 100644
+--- a/src/vmm/src/builder.rs
++++ b/src/vmm/src/builder.rs
+@@ -961,7 +961,11 @@ pub fn build_microvm(
+     #[cfg(all(target_os="macos",feature="blk"))]
+     let cowork_access=if vm_resources.cowork_guarded_block {
+         let workspace = vm_resources.cowork_workspace_disks.is_some();
+-        let access=devices::reclaim_access::Access::new(if workspace {devices::workspace_disks::MAX_DEVICES} else if vm_resources.cowork_stream.is_some(){2}else{1},if workspace {devices::workspace_disks::MAX_PINS} else if vm_resources.cowork_stream.is_some(){32}else{16},devices::workspace_disks::MAX_PINNED_BYTES);
++        // R14: the workspace budget grows with the actual number of share devices, never beyond it.
++        let shares = vm_resources.fs.iter().filter(|config| config.cowork_share.is_some()).count();
++        let (max_devices, max_pins, max_pinned_bytes) = devices::workspace_disks::budget(shares).expect("at most 12 shares (the gate refuses more)");
++        let access=devices::reclaim_access::Access::new(if workspace {max_devices} else if vm_resources.cowork_stream.is_some(){2}else{1},if workspace {max_pins} else if vm_resources.cowork_stream.is_some(){32}else{16},max_pinned_bytes);
++        devices::cowork_counters::set_budget(if workspace {max_pins} else if vm_resources.cowork_stream.is_some(){32}else{16}, max_pinned_bytes);
+         let terminal_fd=exit_evt.try_clone().map_err(Error::EventFd).map_err(StartMicrovmError::Internal)?;
+         let terminal_code=exit_code.clone();
+         access.set_terminal_notifier(Arc::new(move||{crate::cowork_exit::note_terminal_fault(&terminal_code);crate::cowork_fixture::mark_stop();let _=terminal_fd.write(1);}));Some(access)
+@@ -2001,6 +2005,18 @@ fn attach_fs_devices(
+         #[cfg(target_os = "macos")]
+         fs.lock().unwrap().set_map_sender(map_sender.clone());
+ 
++        // A Cowork share: the guarded worker, registered with the reclaim Access after the three
++        // workspace devices, and stopped and joined on the exit path before the exit hook (R13).
++        #[cfg(all(target_os = "macos", feature = "blk"))]
++        if let Some(share) = &config.cowork_share {
++            let access = vmm.cowork_access.clone().expect("a share runs only in the production profile");
++            let device = access
++                .register(devices::workspace_disks::FIRST_SHARE_DEVICE + i as u64)
++                .expect("share registration (the budget counts every share)");
++            fs.lock().unwrap().enable_cowork_share(share.clone(), access, device);
++            vmm.exit_observers.push(fs.clone());
++        }
++
+         // The device mutex mustn't be locked here otherwise it will deadlock.
+         attach_mmio_device(vmm, id, intc.clone(), fs).map_err(RegisterFsDevice)?;
+     }
+diff --git a/src/vmm/src/resources.rs b/src/vmm/src/resources.rs
+index feefc38..a61b0da 100644
+--- a/src/vmm/src/resources.rs
++++ b/src/vmm/src/resources.rs
+@@ -488,7 +488,7 @@ mod tests {
+             #[cfg(feature = "tee")]
+             initrd_bundle: _,            // tee builds only (the tee feature is refused)
+             #[cfg(not(feature = "tee"))]
+-            fs: _,                       // DEVICE: virtiofs; must be empty
++            fs: _,                       // DEVICE: virtiofs; only Cowork shares from krun_cowork_add_share_v1 (confined, no shm, Simplified)
+             vsock: _,                    // DEVICE: legacy vsock builder; reached only through a non-Disabled vsock config, which is refused
+             #[cfg(feature = "blk")]
+             block: _,                    // DEVICE: virtio-blk; built only from the admitted pair
+diff --git a/src/vmm/src/vmm_config/fs.rs b/src/vmm/src/vmm_config/fs.rs
+index 9f29895..1bfffd5 100644
+--- a/src/vmm/src/vmm_config/fs.rs
++++ b/src/vmm/src/vmm_config/fs.rs
+@@ -14,4 +14,8 @@ pub struct FsDeviceConfig {
+     pub read_only: bool,
+     #[cfg(not(feature = "aws-nitro"))]
+     pub virtual_entries: Vec<VirtualDirEntry>,
++    /// A Cowork share, set only by `krun_cowork_add_share_v1`: the device serves this share's confined
++    /// server through the guarded worker. `None` for every stock virtio-fs device.
++    #[cfg(all(feature = "blk", target_os = "macos"))]
++    pub cowork_share: Option<std::sync::Arc<devices::virtio::fs::cowork::ShareControl>>,
+ }
