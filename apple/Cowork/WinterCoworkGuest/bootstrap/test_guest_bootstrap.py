@@ -1797,6 +1797,18 @@ class ConversationSetTests(unittest.TestCase):
                 self.refused(lambda m, p=policy: plan(m, policy=p))
         self.refused(lambda m: plan(m, others_read_only=False))                 # under plan it is the ONLY writable root
         self.refused(lambda m: plan(m, twice=True))                             # at most once
+        # PID 1 makes the directory from `source`, the supervisor admits the root by `guestPath`: for anything under /workspace/plan on either side they are one path.
+        def apart(m, guest, source):
+            plan(m)
+            item(m)["roots"][-1].update(guestPath=guest, source=source)
+        view = "/workspace/plan/%s/7" % sid
+        self.refused(lambda m: apart(m, view, "/workspace/plan/%s/8" % sid))         # the supervisor admits epoch 7, PID 1 makes epoch 8
+        self.refused(lambda m: apart(m, view, "/workspace/repos/elsewhere"))        # a plan view whose directory is somewhere else
+        self.refused(lambda m: apart(m, "/workspace/repos/elsewhere", view))        # an ordinary root whose directory PID 1 would treat as a plan view
+        def ordinary_with_plan_source(m):
+            item(m)["roots"][0]["source"] = "/workspace/plan/%s/9" % sid
+        self.refused(ordinary_with_plan_source)
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/plan"))
 
     def test_a_host_query_conversation_has_a_narrower_view_and_plan_is_read_only(self):
         item = lambda m: m["conversations"][0]

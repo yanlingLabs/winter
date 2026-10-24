@@ -41,7 +41,7 @@ static long plan_view_epoch(const char *source, const char *session_id) {
 
 /* The data disk is the record of which epochs were ever made: an epoch below one that already exists beside it is stale and is never made again (the supervisor refuses it too).
  * The walk never follows a link and an unreadable parent refuses. A missing /workspace/plan or /workspace/plan/<sid> means no earlier epoch. 0 = fine, -1 = refuse. */
-static int plan_epoch_is_current(int workspace, const char *session_id, long epoch, uid_t root_owner, uid_t tool_owner) {
+static int plan_epoch_is_current(int workspace, const char *session_id, long epoch, const struct wg_dataroots_ops *ops) {
     int plan = openat(workspace, &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (plan < 0) return errno == ENOENT ? 0 : -1;
     int parent = openat(plan, session_id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
@@ -49,13 +49,13 @@ static int plan_epoch_is_current(int workspace, const char *session_id, long epo
     close(plan);
     if (parent < 0) return saved == ENOENT ? 0 : -1;
     struct stat st;
-    if (fstat(parent, &st) != 0 || (st.st_uid != root_owner && st.st_uid != tool_owner)) { close(parent); return -1; }
+    if (fstat(parent, &st) != 0 || st.st_uid != ops->owner) { close(parent); return -1; }   /* the folder of the id is root's (PID 1 made it) */
     DIR *directory = fdopendir(parent);
     if (!directory) { close(parent); return -1; }
     int result = 0;
     struct dirent *entry;
     errno = 0;
-    while ((entry = readdir(directory)) != NULL) {
+    while ((entry = ops->read_entry ? ops->read_entry(directory, ops->ctx) : readdir(directory)) != NULL) {
         const char *name = entry->d_name;
         size_t n = strlen(name);
         if (n < 1 || n > 9 || (n > 1 && name[0] == '0')) continue;       /* not a canonical epoch name */
@@ -77,7 +77,7 @@ static int real_fchown(int fd, uid_t uid, gid_t gid, void *ctx) {
     (void)ctx;
     return fchown(fd, uid, gid);
 }
-const struct wg_dataroots_ops wg_dataroots_production = { NULL, real_fchown, 0, 0, NULL };
+const struct wg_dataroots_ops wg_dataroots_production = { NULL, real_fchown, 0, 0, NULL, NULL, 0 };
 
 /* One component below `parent`: created (mode `create_mode`) when missing, opened without following a link. */
 static int open_component(int parent, const char *name, mode_t create_mode) {
@@ -119,10 +119,11 @@ static int make_one(int workspace, const char *source, gid_t gid, const struct w
     }
 }
 
-/* One directory the plan view is made of, `name` below `parent` (a held descriptor): created 0700, opened without following a link, then owned by the conversation's tool uid and
- * group (the group is the same id: the tool's own primary group, never the workspace group) with mode 0700. What the descriptor then says is checked, not what the calls returned. */
-static int make_tool_dir(int parent, const char *name, uid_t uid, gid_t gid, const struct wg_dataroots_ops *ops) {
-    int fd = open_component(parent, name, 0700);
+/* A directory of the plan view, `name` below `parent` (a held descriptor): created, opened without following a link, and only ever one that PID 1 (root) made before: a directory
+ * of any other owner is refused BEFORE anything is changed on it. `uid` and `gid` are the owner to give it (root's own, or the conversation's tool uid and its group, never the workspace
+ * group) and `mode` its bits (0711 for the two that are only walked through, 0700 for the epoch). What the descriptor says afterwards is checked, not what the calls returned. */
+static int make_plan_dir(int parent, const char *name, uid_t uid, gid_t gid, mode_t mode, const struct wg_dataroots_ops *ops) {
+    int fd = open_component(parent, name, mode);
     if (fd < 0) return -1;
     struct stat st;
     uid_t want_uid = uid;
@@ -131,27 +132,27 @@ static int make_tool_dir(int parent, const char *name, uid_t uid, gid_t gid, con
     int rc = fstat(fd, &st);
     if (rc == 0 && st.st_uid != ops->parent_owner && st.st_uid != want_uid) rc = -1;   /* made by PID 1 (root) or by an earlier boot of it; never somebody else's */
     if (rc == 0) rc = ops->fchown_fd(fd, uid, gid, ops->ctx);
-    if (rc == 0) rc = fchmod(fd, PLAN_MODE);
-    if (rc == 0 && (fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid || (st.st_mode & 07777) != PLAN_MODE)) rc = -1;
+    if (rc == 0) rc = fchmod(fd, mode);                                                  /* after the chown: a chown clears the setgid bit; mkdirat's mode is filtered by umask(077) */
+    if (rc == 0 && (fstat(fd, &st) != 0 || st.st_uid != want_uid || st.st_gid != want_gid)) rc = -1;
     close(fd);
     return rc;
 }
 
-/* /workspace/plan (root, 0711: it is only walked through), then /workspace/plan/<sid> and the epoch below it, both the conversation's tool uid's, 0700. */
+/* /workspace/plan and /workspace/plan/<sid>: root:root 0711 (walked through, never listed by the tool), then the epoch below it: the conversation's tool uid and group, 0700. */
 static int make_plan_view(int workspace, const char *session_id, const char *source, uint32_t tool_uid, const struct wg_dataroots_ops *ops) {
     const char *epoch = strrchr(source, '/') + 1;
-    int plan = open_component(workspace, &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], PARENT_MODE);
-    if (plan < 0) return -1;
-    struct stat st;
-    if (fstat(plan, &st) != 0 || st.st_uid != ops->parent_owner || fchmod(plan, PARENT_MODE) != 0 || fstat(plan, &st) != 0 || (st.st_mode & 07777) != PARENT_MODE) { close(plan); return -1; }
-    int folder = -1;
-    int rc = -1;
-    if (make_tool_dir(plan, session_id, (uid_t)tool_uid, (gid_t)tool_uid, ops) == 0) folder = openat(plan, session_id, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
-    close(plan);
-    if (folder >= 0) {
-        rc = make_tool_dir(folder, epoch, (uid_t)tool_uid, (gid_t)tool_uid, ops);
-        close(folder);
+    const char *names[2] = { &PLAN_ROOT[sizeof WORKSPACE_PREFIX - 1], session_id };
+    int current = dup(workspace);
+    if (current < 0) return -1;
+    for (int level = 0; level < 2; level++) {
+        int next = -1;
+        if (make_plan_dir(current, names[level], ops->owner, ops->owner_group, PARENT_MODE, ops) == 0) next = openat(current, names[level], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        close(current);
+        if (next < 0) return -1;
+        current = next;
     }
+    int rc = make_plan_dir(current, epoch, (uid_t)tool_uid, (gid_t)tool_uid, PLAN_MODE, ops);
+    close(current);
     return rc;
 }
 
@@ -166,10 +167,7 @@ static int make_roots(const char *workspace_path, const struct wg_conversation_s
             if (wg_data_root_is_share_mount(source)) continue;
             if (under(source, PLAN_ROOT)) {
                 long epoch = plan_view_epoch(source, set->session_id[i]);
-                uid_t tool_owner = (uid_t)set->tool_uid[i];
-                gid_t tool_group = (gid_t)set->tool_uid[i];
-                if (ops->stored) ops->stored(&tool_owner, &tool_group, ops->ctx);
-                if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops->parent_owner, tool_owner) != 0) { rc = -1; break; }
+                if (epoch < 0 || plan_epoch_is_current(workspace, set->session_id[i], epoch, ops) != 0) { rc = -1; break; }
                 rc = make_plan_view(workspace, set->session_id[i], source, set->tool_uid[i], ops);
                 continue;
             } else if (plan_only) {

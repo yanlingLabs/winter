@@ -397,6 +397,10 @@ def _runtime(value):
     return True
 
 
+def _under_plan(path):
+    return path == "/workspace/plan" or path.startswith("/workspace/plan/")
+
+
 def _roots(value, session_id):
     if type(value) is not list or not 1 <= len(value) <= MAX_ROOTS:
         return False
@@ -408,6 +412,9 @@ def _roots(value, session_id):
     if len({root["id"] for root in value}) != len(value) or len(set(views)) != len(views):
         return False
     if any(a != b and b.startswith(a + "/") for a in views for b in views):
+        return False
+    # PID 1 makes a plan view from the root's `source`, the supervisor admits it by `guestPath`: for anything at or under /workspace/plan on either side they must be the same path.
+    if any((_under_plan(root["guestPath"]) or _under_plan(root["source"])) and root["source"] != root["guestPath"] for root in value):
         return False
     return all(_allowed_view(view, session_id) for view in views)
 

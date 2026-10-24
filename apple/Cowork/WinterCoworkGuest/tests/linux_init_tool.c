@@ -170,9 +170,10 @@ int main(int argc, char **argv) {
         snprintf(set.session_id[0], sizeof set.session_id[0], "s1");
         for (int i = 4; i < argc && set.root_count[0] < WG_ROOTS_MAX; i++) snprintf(set.root_source[0][set.root_count[0]++], WG_ROOT_SOURCE_MAX + 1, "%s", argv[i]);
         sys_calls.fchown_fn = chown_log;                     /* the per-conversation directories: a non-root test cannot chown to another uid */
-        static const struct wg_dataroots_ops own = { NULL, own_chown, 0, 0, own_stored };
+        static const struct wg_dataroots_ops own = { NULL, own_chown, 0, 0, own_stored, NULL, 0 };
         struct wg_dataroots_ops mine = own;
         mine.owner = mine.parent_owner = getuid();
+        mine.owner_group = getgid();
         static struct wg_dataroots_ops installed;
         installed = mine;
         dataroots_ops = &installed;
