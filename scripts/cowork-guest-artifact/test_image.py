@@ -205,7 +205,8 @@ class PinTests(unittest.TestCase):
     def test_every_guest_pin_is_a_real_digest_of_the_current_sources(self):
         build=load_guest_build()
         for name,entry in PINS['guest']['programs'].items():
-            self.assertRegex(entry['binarySha256'],r'^[0-9a-f]{64}$');self.assertNotEqual(entry['binarySha256'],'0'*64)
+            self.assertIn('binarySha256',entry)       # an explicit null is an unpinned binary (build 5 reports it); a missing key is an error
+            if entry['binarySha256'] is not None:self.assertRegex(entry['binarySha256'],r'^[0-9a-f]{64}$');self.assertNotEqual(entry['binarySha256'],'0'*64)
             self.assertEqual(entry['sourceSha256'],build.source_digest(build.PROGRAMS[name]+build.HEADERS),name+' source changed: rebuild and re-pin')
         for name,entry in PINS['guest']['scripts'].items():
             path=GUEST/PINS['guest']['scriptPaths'][name]
@@ -218,7 +219,7 @@ class PinTests(unittest.TestCase):
         if not zig:self.skipTest('set WINTER_PINNED_ZIG to the pinned Zig 0.14.1 to rebuild and compare')
         with tempfile.TemporaryDirectory() as folder:
             programs,scripts,receipt=image.build_guest(Path(zig),Path(folder)/'guest',PINS)
-        self.assertEqual(sha(programs['init']),PINS['guest']['programs']['init']['binarySha256'])
+        if PINS['guest']['programs']['init']['binarySha256'] is not None:self.assertEqual(sha(programs['init']),PINS['guest']['programs']['init']['binarySha256'])
 
 class GuestBuildCheckTests(unittest.TestCase):
     def fake_build(self,receipt):
@@ -229,17 +230,61 @@ class GuestBuildCheckTests(unittest.TestCase):
         return run
     def receipt(self,**changes):
         pins=PINS['guest'];base={'programs':{n:dict(e) for n,e in pins['programs'].items()},'scripts':{n:dict(e) for n,e in pins['scripts'].items()},'zig':'0.14.1'}
+        for name,entry in base['programs'].items():
+            if entry['binarySha256'] is None:entry['binarySha256']=sha(name.encode()+b'-built')    # what a build produces while the pin is still null
         for key,value in changes.items():base[key]=value
         return base
-    def build(self,receipt):
+    def pins_with(self,**binary):
+        pins=json.loads(json.dumps(PINS))
+        for name,value in binary.items():
+            if value is ...:del pins['guest']['programs'][name]['binarySha256']
+            else:pins['guest']['programs'][name]['binarySha256']=value
+        return pins
+    def build(self,receipt,pins=PINS):
         with tempfile.TemporaryDirectory() as folder,patch.object(image.subprocess,'run',self.fake_build(receipt)):
-            return image.build_guest(Path('zig'),Path(folder)/'guest',PINS)
+            return image.build_guest(Path('zig'),Path(folder)/'guest',pins)
+    def test_a_null_binary_pin_is_unpinned_and_reports_the_built_digest_while_a_set_pin_that_differs_stays_a_hard_failure(self):
+        receipt=self.receipt();built={name:entry['binarySha256'] for name,entry in receipt['programs'].items()}
+        # null: the build goes on, and the problem names the program and the digest this build produced
+        pins=self.pins_with(**{'init':None,'winter-guest-relay':None})
+        self.build(receipt,pins)
+        problems=image.guest_binary_problems(receipt,pins)
+        self.assertEqual(len(problems),2)
+        for name in built:self.assertTrue(any(name in line and built[name] in line and 'not pinned' in line for line in problems),name)
+        # one null, one set and right: only the null is reported
+        pins=self.pins_with(**{'init':built['init'],'winter-guest-relay':None})
+        self.build(receipt,pins);self.assertEqual([line.split()[2] for line in image.guest_binary_problems(receipt,pins)],['winter-guest-relay'])
+        # all set and right: nothing is reported
+        pins=self.pins_with(**built);self.build(receipt,pins);self.assertEqual(image.guest_binary_problems(receipt,pins),[])
+        # a set pin that differs is NOT unpinned: it is refused, whatever the other program's pin says
+        for name in built:
+            with self.subTest(name):
+                pins=self.pins_with(**{name:'f'*64})
+                with self.assertRaisesRegex(ValueError,'is not the pinned build'):self.build(receipt,pins)
+                pins=self.pins_with(**{'init':None,'winter-guest-relay':None,name:'f'*64})
+                with self.assertRaisesRegex(ValueError,'is not the pinned build'):self.build(receipt,pins)
+    def test_the_build_counts_the_unpinned_guest_binaries_among_its_problems(self):
+        self.assertIn("problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems+guest_binary_problems(guest_receipt,pins)",Path(image.__file__).read_text())
+    def test_an_empty_or_wrongly_typed_binary_pin_is_a_hard_failure_never_unpinned(self):
+        receipt=self.receipt()
+        for value in ('',0,False,[],{},'F'*64):
+            for name in receipt['programs']:
+                with self.subTest(name=name,value=value):
+                    pins=self.pins_with(**{'init':None,'winter-guest-relay':None,name:value})
+                    with self.assertRaisesRegex(ValueError,'is not the pinned build'):self.build(receipt,pins)
+                    self.assertEqual([line.split()[2] for line in image.guest_binary_problems(receipt,pins)],[n for n in receipt['programs'] if n!=name])    # (only the nulls are ever UNPINNED)
+    def test_a_missing_binary_key_is_an_error_not_unpinned(self):
+        receipt=self.receipt()
+        for name in receipt['programs']:
+            with self.subTest(name):
+                with self.assertRaisesRegex(ValueError,'no binarySha256 key'):self.build(receipt,self.pins_with(**{name:...}))
     def test_a_matching_build_is_accepted(self):
         programs,scripts,_=self.build(self.receipt())
         self.assertEqual(set(programs),set(PINS['guest']['programs']));self.assertEqual(set(scripts),set(PINS['guest']['scripts']))
     def test_a_different_binary_or_drifted_source_or_script_is_refused(self):
+        pinned=self.pins_with(**{name:entry['binarySha256'] for name,entry in self.receipt()['programs'].items()})
         receipt=self.receipt();receipt['programs']['init']['binarySha256']='f'*64
-        with self.assertRaises(ValueError):self.build(receipt)
+        with self.assertRaises(ValueError):self.build(receipt,pinned)
         receipt=self.receipt();receipt['programs']['winter-guest-relay']['sourceSha256']='f'*64
         with self.assertRaises(ValueError):self.build(receipt)
         receipt=self.receipt();receipt['scripts']['guest_bootstrap.py']['sha256']='f'*64
@@ -291,18 +336,92 @@ class CpioReadbackTests(unittest.TestCase):
     def test_a_root_with_exactly_the_pinned_init_verifies(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
-            result=cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            result=cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             self.assertTrue(result['startupPresent']);self.assertEqual(result['startupEntries'],['init'])
     def test_an_unpinned_receipt_is_refused_unless_the_flag_names_it(self):
         with tempfile.TemporaryDirectory() as folder:
             for value in (False, None, 'true', 1):
                 root=Path(folder)/str(value);self.write(root,self.tree(self.INIT),pinned=value)
-                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
-                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True)['startupPresent'])
+                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
+                self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),allow_unpinned=True,require_environment=False)['startupPresent'])
             root=Path(folder)/'missing';self.write(root,self.tree(self.INIT));receipt=json.loads((root/'receipt.json').read_text());del receipt['reproducibilityPinned'];(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'ok';self.write(root,self.tree(self.INIT))
-            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT))['startupPresent'])
+            self.assertTrue(cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)['startupPresent'])
+    def test_a_null_init_pin_is_read_back_only_as_unpinned_evidence_and_never_accepted(self):
+        pins=json.loads(json.dumps(PINS));pins['guest']['programs']['init']['binarySha256']=None
+        with tempfile.TemporaryDirectory() as folder:
+            fake=Path(folder)/'pins';fake.mkdir();(fake/'pins.json').write_text(json.dumps(pins))
+            root=Path(folder)/'root';self.write(root,self.tree(self.INIT),pinned=False)
+            with patch.object(cpio_verify,'HERE',fake):
+                result=cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+                self.assertEqual((result['initSha256'],result['initPinned']),(sha(self.INIT),False))     # the unpinned read-back says so
+                with self.assertRaisesRegex(ValueError,'reproducibility'):cpio_verify.verify(root,require_environment=False)        # and without the flag it is never accepted
+                accepted=Path(folder)/'accepted';self.write(accepted,self.tree(self.INIT),pinned=True)                              # even a receipt that CLAIMS a pinned build
+                with self.assertRaisesRegex(ValueError,'not pinned in pins.json'):cpio_verify.verify(accepted,require_environment=False)
+                # the receipt and the cpio still have to agree about the init, flag or not
+                liar=Path(folder)/'liar';self.write(liar,self.tree(self.INIT),init_digest=sha(b'other'),pinned=False)
+                with self.assertRaises(ValueError):cpio_verify.verify(liar,allow_unpinned=True,require_environment=False)
+                nodigest=Path(folder)/'nodigest';self.write(nodigest,self.tree(self.INIT),pinned=False);receipt=json.loads((nodigest/'receipt.json').read_text());del receipt['initSha256'];(nodigest/'receipt.json').write_text(json.dumps(receipt))
+                with self.assertRaisesRegex(ValueError,'no init digest'):cpio_verify.verify(nodigest,allow_unpinned=True,require_environment=False)
+                # a pin that is set stays the rule: a root whose init is not the pinned one is refused
+            pins['guest']['programs']['init']['binarySha256']=sha(b'something else');(fake/'pins.json').write_text(json.dumps(pins))
+            with patch.object(cpio_verify,'HERE',fake):
+                with self.assertRaises(ValueError):cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+            del pins['guest']['programs']['init']['binarySha256'];(fake/'pins.json').write_text(json.dumps(pins))
+            with patch.object(cpio_verify,'HERE',fake):
+                with self.assertRaisesRegex(ValueError,'no init binarySha256 key'):cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+    RELAY=b'\x7fELF-pinned-relay'
+    def relay_tree(self,relay=None):
+        tree=self.tree(self.INIT);tree.add(cpio_verify.RELAY_PATH.lstrip('/'),'file',self.RELAY if relay is None else relay,True);return tree
+    def write_relay(self,folder,tree=None,claim=None,**kw):
+        self.write(folder,tree or self.relay_tree(),**kw)
+        receipt=json.loads((folder/'receipt.json').read_text());receipt['relaySha256']=claim or sha(self.RELAY);(folder/'receipt.json').write_text(json.dumps(receipt))
+    def with_pins(self,folder,**binary):
+        pins=json.loads(json.dumps(PINS))
+        for name,value in binary.items():
+            if value is ...:del pins['guest']['programs'][name]['binarySha256']
+            else:pins['guest']['programs'][name]['binarySha256']=value
+        fake=Path(folder)/('pins-%d'%len(list(Path(folder).glob('pins-*'))));fake.mkdir();(fake/'pins.json').write_text(json.dumps(pins))
+        return patch.object(cpio_verify,'HERE',fake)
+    def test_an_empty_or_wrongly_typed_init_or_relay_pin_is_refused_even_where_a_null_is_read_back(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root=Path(folder)/'root';self.write_relay(root,pinned=False)
+            good={'init':sha(self.INIT),'winter-guest-relay':sha(self.RELAY)}
+            with self.with_pins(folder,**good):
+                self.assertEqual(cpio_verify.verify(root,allow_unpinned=True,require_environment=False)['relayPinned'],True)
+            for value in ('',0,False,[],{},'F'*64,sha(b'other')):
+                for name in good:
+                    with self.subTest(name=name,value=value):
+                        with self.with_pins(folder,**{**good,name:value}):
+                            with self.assertRaises(ValueError):cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+            for name in good:      # a missing key, and the one value that is read back as unpinned (null) only with the flag
+                with self.subTest(name=name,case='missing'):
+                    with self.with_pins(folder,**{**good,name:...}):
+                        with self.assertRaisesRegex(ValueError,'key'):cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+                with self.subTest(name=name,case='null'):
+                    with self.with_pins(folder,**{**good,name:None}):
+                        result=cpio_verify.verify(root,allow_unpinned=True,require_environment=False)
+                        self.assertEqual((result['initPinned'],result['relayPinned']),(name!='init',name!='winter-guest-relay'))
+                        accepted=Path(folder)/('accepted-'+name);self.write_relay(accepted,pinned=True)
+                        with self.assertRaisesRegex(ValueError,'not pinned in pins.json'):cpio_verify.verify(accepted,require_environment=False)
+    def test_the_relay_in_the_cpio_must_be_the_pinned_one_and_the_receipt_must_say_so(self):
+        with tempfile.TemporaryDirectory() as folder:
+            good={'init':sha(self.INIT),'winter-guest-relay':sha(self.RELAY)}
+            with self.with_pins(folder,**good):
+                cases={'other bytes':dict(tree=self.relay_tree(b'other')),'receipt claims another':dict(claim=sha(b'other'))}
+                plain=self.tree(self.INIT);plain.add(cpio_verify.RELAY_PATH.lstrip('/'),'file',self.RELAY,False)
+                cases['not executable']=dict(tree=plain)
+                for label,kw in cases.items():
+                    root=Path(folder)/label.replace(' ','-');self.write_relay(root,pinned=True,**kw)
+                    with self.subTest(label):
+                        with self.assertRaises(ValueError):cpio_verify.verify(root,require_environment=False)
+                root=Path(folder)/'fine';self.write_relay(root,pinned=True)
+                self.assertEqual(cpio_verify.verify(root,require_environment=False)['relaySha256'],sha(self.RELAY))
+                hidden=Path(folder)/'hidden';self.write(hidden,self.relay_tree(),pinned=True)         # the receipt cannot hide a relay the cpio ships
+                with self.assertRaises(ValueError):cpio_verify.verify(hidden,require_environment=False)
+            with self.with_pins(folder,**{**good,'winter-guest-relay':None}):                          # a null pin read back with no claim to read it against
+                with self.assertRaisesRegex(ValueError,'no relay digest'):cpio_verify.verify(hidden,allow_unpinned=True,require_environment=False)
     def test_the_command_line_needs_the_named_flag_for_an_unpinned_receipt(self):
         script=Path(cpio_verify.__file__)
         with tempfile.TemporaryDirectory() as folder:
@@ -316,46 +435,46 @@ class CpioReadbackTests(unittest.TestCase):
     def test_a_different_init_missing_init_or_extra_startup_entry_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree(b'other'))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'b';self.write(root,self.tree())
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             tree=self.tree(self.INIT);tree.add('linuxrc','file',b'#!/bin/sh',True);root=Path(folder)/'c';self.write(root,tree)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_receipt_that_does_not_describe_the_init_is_refused(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree(self.INIT),init_digest='0'*64)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
             root=Path(folder)/'b';self.write(root,self.tree(self.INIT),present=False)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_the_no_init_mode_still_demands_that_there_is_none(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder)/'a';self.write(root,self.tree())
-            self.assertFalse(cpio_verify.verify(root,require_init=False)['startupPresent'])
+            self.assertFalse(cpio_verify.verify(root,require_init=False,require_environment=False)['startupPresent'])
             root=Path(folder)/'b';self.write(root,self.tree(self.INIT))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,require_init=False)
+            with self.assertRaises(ValueError):cpio_verify.verify(root,require_init=False,require_environment=False)
     def test_an_init_that_is_not_executable_is_refused_even_with_the_pinned_bytes(self):
         with tempfile.TemporaryDirectory() as folder:
             tree=self.tree();tree.add('init','file',self.INIT,False)   # same bytes, mode 0444
             root=Path(folder);self.write(root,tree)
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_member_whose_bytes_changed_is_caught_even_when_the_whole_file_digest_was_updated(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_changed_member_other_than_init_is_caught_by_its_own_digest(self):
         # init is also held to the pinned digest by the startup rule, so only a member the rule does not cover shows that each member is read back
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(b'tool-content')]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
             receipt=json.loads((root/'receipt.json').read_text());receipt['cpioSha256']=sha(bytes(data));(root/'receipt.json').write_text(json.dumps(receipt))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
     def test_a_tampered_cpio_byte_is_caught(self):
         with tempfile.TemporaryDirectory() as folder:
             root=Path(folder);self.write(root,self.tree(self.INIT))
             data=bytearray((root/'immutable-root.cpio').read_bytes());data[data.index(self.INIT)]^=1;(root/'immutable-root.cpio').write_bytes(bytes(data))
-            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT))
+            with self.assertRaises(ValueError):cpio_verify.verify(root,pinned_init=sha(self.INIT),require_environment=False)
 
 
 
@@ -463,18 +582,18 @@ class RuntimeArtifactTests(unittest.TestCase):
             (folder/'receipt.json').write_text(json.dumps({'cpioSha256':sha((folder/'immutable-root.cpio').read_bytes()),'initSha256':sha(b'INIT'),'initPresent':True,'reproducibilityPinned':True,**receipt_extra}))
         with tempfile.TemporaryDirectory() as folder:
             good=Path(folder)/'good';write(good,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}})
-            self.assertEqual(cpio_verify.verify(good,pinned_init=sha(b'INIT'))['runtimeArtifacts'],digests)
+            self.assertEqual(cpio_verify.verify(good,pinned_init=sha(b'INIT'),require_environment=False)['runtimeArtifacts'],digests)
             lying=Path(folder)/'lying';write(lying,{'hostQuery':{'artifacts':{key:{'sha256':'0'*64} for key in digests}}})
-            with self.assertRaisesRegex(ValueError,'receipt does not describe'):cpio_verify.verify(lying,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'receipt does not describe'):cpio_verify.verify(lying,pinned_init=sha(b'INIT'),require_environment=False)
             # an artifact whose bytes no longer match the pin in the same cpio
             other=Tree()
             for node_path,node in tree.nodes.items():other.add(node_path,node['kind'],node['data'] if node_path!=cpio_verify.RUNTIME_ARTIFACT_PATHS['executable'].lstrip('/') else b'tampered',node['kind']=='file' and node['mode']==0o555)
             tampered=Path(folder)/'tampered';write(tampered,{'hostQuery':{'artifacts':{key:{'sha256':value} for key,value in digests.items()}}},other)
-            with self.assertRaisesRegex(ValueError,'do not match their pin|bytes'):cpio_verify.verify(tampered,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'do not match their pin|bytes'):cpio_verify.verify(tampered,pinned_init=sha(b'INIT'),require_environment=False)
             # no artifacts file at all in a root whose receipt claims a host-query runtime
             bare=Tree();bare.add('init','file',b'INIT',True)
             missing=Path(folder)/'missing';write(missing,{'hostQuery':{'artifacts':{}}},bare)
-            with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'))
+            with self.assertRaisesRegex(ValueError,'missing from the cpio'):cpio_verify.verify(missing,pinned_init=sha(b'INIT'),require_environment=False)
             # the environment gitconfig: a receipt that claims the pinned one must find exactly it in the cpio
             git=(HERE/'environment'/'gitconfig').read_bytes()
             def with_git(data):
@@ -492,7 +611,14 @@ class RuntimeArtifactTests(unittest.TestCase):
             hidden=Path(folder)/'hidden';write(hidden,{},with_git(git))
             with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(hidden,pinned_init=sha(b'INIT'))
             with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'),require_environment=True)
-            self.assertTrue(cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'))['startupPresent'])    # (a root built before the gitconfig, checked without the requirement)
+            with self.assertRaisesRegex(ValueError,'does not describe the environment gitconfig'):cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'))    # the library requires the claim by default
+            # the image ships the file only under /opt/winter/environment/base: a system gitconfig of the cpio's own is refused, whatever its kind, claim or no claim
+            for label,kind,data in (('file','file',git),('empty','file',b''),('directory','directory',None)):
+                stray=with_git(git);stray.add('etc/gitconfig',kind,data) if data is not None else stray.add('etc/gitconfig',kind)
+                for extra in (claim,{}):
+                    folder_name=Path(folder)/('stray-%s-%d'%(label,len(extra)));write(folder_name,extra,stray)
+                    with self.assertRaisesRegex(ValueError,'literal etc/gitconfig'):cpio_verify.verify(folder_name,pinned_init=sha(b'INIT'),require_environment=False)
+            self.assertTrue(cpio_verify.verify(plain_root,pinned_init=sha(b'INIT'),require_environment=False)['startupPresent'])    # (a root built before the gitconfig, checked without the requirement)
             # the command line (the image build's check) requires the claim unless told the root is older than the gitconfig
             noinit=Tree();noinit.add('etc/value','file',b'x');old=Path(folder)/'old';write(old,{},noinit)
             run=lambda *flags:subprocess.run([sys.executable,'-I','-S','-B',str(HERE/'verify.py'),str(old),'--no-init','--allow-unpinned',*flags],capture_output=True,text=True)
@@ -502,7 +628,7 @@ class RuntimeArtifactTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'missing or not a regular file'):cpio_verify.verify(gitabsent,pinned_init=sha(b'INIT'))
             # a root without a host-query claim is unaffected
             plain=Path(folder)/'plain';write(plain,{},bare)
-            self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'))['runtimeArtifacts'])
+            self.assertIsNone(cpio_verify.verify(plain,pinned_init=sha(b'INIT'),require_environment=False)['runtimeArtifacts'])
 
 class TwoPassTests(unittest.TestCase):
     def test_two_passes_must_agree_byte_for_byte(self):

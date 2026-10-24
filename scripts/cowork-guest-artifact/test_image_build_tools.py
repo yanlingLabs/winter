@@ -1,6 +1,7 @@
 """The two small tools the one-run image build uses: the Bun unpacker and the two-build report. Synthetic inputs only; nothing is built."""
 import contextlib, hashlib, io, json, shutil, tempfile, unittest, zipfile
 from pathlib import Path
+from unittest.mock import patch
 
 import image
 import image_build_report as ibr
@@ -85,11 +86,11 @@ def write_kernel(folder, image=b"image", vmlinux=b"vmlinux", config=b"config"):
     (folder / "kernel-receipt.json").write_text(json.dumps({"ImageSha256": sha(image), "ImageBytes": len(image), "vmlinuxSha256": sha(vmlinux), "resolvedConfigSha256": sha(config)}))
 
 
-def write_image(folder, cpio=b"cpio", manifest=b"manifest", runtime=None, init="i" * 64):
+def write_image(folder, cpio=b"cpio", manifest=b"manifest", runtime=None, init="i" * 64, relay="r" * 64):
     folder.mkdir()
     (folder / "immutable-root.cpio").write_bytes(cpio)
     (folder / "root.manifest.json").write_bytes(manifest)
-    (folder / "receipt.json").write_text(json.dumps({"runtimeSha256": runtime or PINS["expectedArtifact"]["runtimeSha256"], "initSha256": init, "reproducibilityPinned": True}))
+    (folder / "receipt.json").write_text(json.dumps({"runtimeSha256": runtime or PINS["expectedArtifact"]["runtimeSha256"], "initSha256": init, "relaySha256": relay, "reproducibilityPinned": True}))
 
 
 class ReportTests(unittest.TestCase):
@@ -129,7 +130,7 @@ class ReportTests(unittest.TestCase):
             self.assertIn("the two kernel builds differ", ibr.problems(self.build(kernel2=kw)), kw)
 
     def test_every_image_difference_is_a_problem(self):
-        for kw in ({"cpio": b"other"}, {"manifest": b"other"}, {"runtime": "f" * 64}, {"init": "j" * 64}):
+        for kw in ({"cpio": b"other"}, {"manifest": b"other"}, {"runtime": "f" * 64}, {"init": "j" * 64}, {"relay": "k" * 64}):
             self.assertIn("the two image builds differ", ibr.problems(self.build(image2=kw)), kw)
 
     def test_a_nonzero_image_status_is_a_problem_even_when_the_files_agree(self):
@@ -139,12 +140,41 @@ class ReportTests(unittest.TestCase):
     def test_all_pins_holding_and_all_builds_agreeing_is_clean(self):
         digests = self.build()
         digests["image"]["pinsHold"] = {key: True for key in digests["image"]["pinsHold"]}
+        digests["image"]["initPinned"] = digests["image"]["relayPinned"] = True
         digests["kernel"]["pinnedBefore"] = digests["kernel"]["ImageSha256"]            # the pinned kernel is the built one
         self.assertEqual(ibr.problems(digests), [])
         digests["kernel"]["pinnedBefore"] = None
         self.assertIn("the kernel Image is not pinned yet (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
         digests["kernel"]["pinnedBefore"] = "0" * 64
         self.assertIn("the built kernel is not the pinned kernel (kernel/pins.json expectedOutputs.Image)", ibr.problems(digests))
+
+    def test_both_guest_binary_digests_are_in_digests_json_with_whether_each_is_pinned(self):
+        digests = self.build()
+        self.assertEqual((digests["image"]["initSha256"], digests["image"]["relaySha256"]), ("i" * 64, "r" * 64))
+        self.assertEqual((digests["image"]["initPinned"], digests["image"]["relayPinned"]), (False, False))     # pins.json holds null for both (or another digest): not pinned to this build
+        found = ibr.problems(digests)
+        self.assertTrue(any("guest.programs.init.binarySha256 is null or does not hold" in line and "image.initSha256" in line for line in found))
+        self.assertTrue(any("guest.programs.winter-guest-relay.binarySha256 is null or does not hold" in line and "image.relaySha256" in line for line in found))
+        pins = json.loads(json.dumps(ibr.PINS))
+        pins["guest"]["programs"]["init"]["binarySha256"] = "i" * 64
+        pins["guest"]["programs"]["winter-guest-relay"]["binarySha256"] = "q" * 64                                   # set, but not what this build produced
+        with patch.object(ibr, "PINS", pins):
+            digests = self.build()
+        self.assertEqual((digests["image"]["initPinned"], digests["image"]["relayPinned"]), (True, False))
+        found = ibr.problems(digests)
+        self.assertFalse(any("guest.programs.init." in line for line in found))
+        self.assertTrue(any("guest.programs.winter-guest-relay." in line for line in found))
+        pins["guest"]["programs"]["init"]["binarySha256"] = "p" * 64                                                 # and the other way round: init stale, relay right
+        pins["guest"]["programs"]["winter-guest-relay"]["binarySha256"] = "r" * 64
+        with patch.object(ibr, "PINS", pins):
+            digests = self.build()
+        self.assertEqual((digests["image"]["initPinned"], digests["image"]["relayPinned"]), (False, True))
+        self.assertTrue(any("guest.programs.init." in line for line in ibr.problems(digests)))
+        pins["guest"]["programs"]["init"]["binarySha256"] = "i" * 64
+        with patch.object(ibr, "PINS", pins):
+            digests = self.build()
+        self.assertEqual((digests["image"]["initPinned"], digests["image"]["relayPinned"]), (True, True))
+        self.assertFalse(any("guest.programs" in line for line in ibr.problems(digests)))
 
     def test_a_package_lock_that_is_not_the_pinned_one_is_reported_with_its_digest_and_turns_the_run_red(self):
         digests = self.build()

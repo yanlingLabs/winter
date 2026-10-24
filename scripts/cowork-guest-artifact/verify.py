@@ -47,6 +47,8 @@ def check_runtime_artifacts(files,config_bytes):
 
 # ---- the environment's fixed system gitconfig (agent-sdk SH6b mounts base/etc/gitconfig read-only into the process worker) ---------------------
 ENVIRONMENT_GITCONFIG_PATH='/opt/winter/environment/base/etc/gitconfig'
+SYSTEM_GITCONFIG_PATH='/etc/gitconfig'   # where the tool launcher mounts the file above, at run time. The image's top-level etc is a SYMLINK to opt/winter/environment/base/etc, so a literal etc/gitconfig cpio entry would be written through that symlink: it is refused (the pinned file is only ever the one under the base)
+RELAY_PATH='/opt/winter/libexec/winter-guest-relay'
 GIT_TEMPLATE_DIRECTORY='/opt/winter/environment/base/usr/share/winter/git-empty-template'   # init.templateDir below: an empty, root-owned directory, so git never makes .git/hooks
 MAX_GITCONFIG_BYTES=64*1024                  # the tool launcher's own bound
 # The ONLY settings the file may carry, with their only values. Anything else (an include, includeIf, alias, hook path, fsmonitor command, credential helper, url rewrite,
@@ -89,15 +91,26 @@ def check_environment_gitconfig(files,expected_sha256):
     if any(path.startswith(GIT_TEMPLATE_DIRECTORY+'/') for path in files):raise ValueError('git template directory is not empty')
     return expected_sha256
 
-def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_environment=False):
+def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_environment=True,pinned_relay=None):
     """Read the cpio back. With `require_init` the root must carry exactly one startup program: `init`, a regular 0555 file of
     uid/gid 0 whose bytes hash to the digest pinned in pins.json (or `pinned_init`). `require_init=False` is for roots built
-    before slice S5, which must still have NO startup program."""
+    before slice S5, which must still have NO startup program. `require_environment` (default True) demands the receipt's claim of the environment gitconfig; only a root built
+    before that file existed is checked with False (the command line's --no-environment)."""
     receipt=json.loads((root/'receipt.json').read_text())
     # image.py writes a full receipt with reproducibilityPinned false (and exits 3) while expectedArtifact is null: such a root is evidence of a build, not an accepted artifact
     if receipt.get('reproducibilityPinned') is not True and not allow_unpinned:raise ValueError('receipt is not reproducibility-pinned')
     manifest=json.loads((root/'root.manifest.json').read_text())
-    if pinned_init is None and require_init:pinned_init=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']['binarySha256']
+    init_pinned=True
+    if pinned_init is None and require_init:
+        init_pins=json.loads((HERE/'pins.json').read_text())['guest']['programs']['init']
+        if 'binarySha256' not in init_pins:raise ValueError('pins.json has no init binarySha256 key (null means unpinned; a missing key is an error)')
+        pinned_init=init_pins['binarySha256']
+        if pinned_init is None:
+            # An explicit null is a build that has not been pinned yet. It is only ever read back in the one-run build's allow_unpinned mode (an evidence read of a root image.py reported
+            # UNPINNED), against the init digest that root's own receipt claims; the receipt and the cpio must still agree. Without allow_unpinned it is refused.
+            if not allow_unpinned:raise ValueError('the init binary is not pinned in pins.json (binarySha256 is null)')
+            init_pinned=False;pinned_init=receipt.get('initSha256')
+            if not isinstance(pinned_init,str) or not re.fullmatch(r'[0-9a-f]{64}',pinned_init):raise ValueError('receipt carries no init digest to read an unpinned init back against')
     startup={};records={};config_bytes=None
     expected={entry['path'].lstrip('/'):entry for entry in manifest};seen=set();inodes=set();count=0
     with (root/'immutable-root.cpio').open('rb') as stream:
@@ -140,6 +153,24 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_
         if set(startup)!={'init'} or startup['init']!=('file',0o555,pinned_init):raise ValueError('cpio startup program is not exactly the pinned init')
         if receipt.get('initSha256')!=pinned_init or receipt.get('initPresent') is not True:raise ValueError('receipt does not describe the pinned init')
     elif startup:raise ValueError('cpio carries a startup program')
+    # The relay is held to its pin the same way (pins.json guest.programs.winter-guest-relay.binarySha256, or `pinned_relay`): checked whenever the root carries it or its receipt names it.
+    # null is unpinned (read back only with allow_unpinned, against the receipt's own claim); ANY other value, an empty string or a wrong type included, must be the relay's digest.
+    relay_pinned=None;relay_digest=None
+    if require_init and (pinned_relay is not None or RELAY_PATH in records or 'relaySha256' in receipt):
+        relay_pinned=True
+        if pinned_relay is None:
+            relay_pins=json.loads((HERE/'pins.json').read_text())['guest']['programs']['winter-guest-relay']
+            if 'binarySha256' not in relay_pins:raise ValueError('pins.json has no relay binarySha256 key (null means unpinned; a missing key is an error)')
+            pinned_relay=relay_pins['binarySha256']
+            if pinned_relay is None:
+                if not allow_unpinned:raise ValueError('the relay binary is not pinned in pins.json (binarySha256 is null)')
+                relay_pinned=False;pinned_relay=receipt.get('relaySha256')
+                if not isinstance(pinned_relay,str) or not re.fullmatch(r'[0-9a-f]{64}',pinned_relay):raise ValueError('receipt carries no relay digest to read an unpinned relay back against')
+        found=records.get(RELAY_PATH)
+        if found is None or found['kind']!='file' or found['mode']!=0o555 or found['sha256']!=pinned_relay:raise ValueError('cpio relay is not exactly the pinned relay')
+        if receipt.get('relaySha256')!=pinned_relay:raise ValueError('receipt does not describe the pinned relay')
+        relay_digest=pinned_relay
+    if SYSTEM_GITCONFIG_PATH in records:raise ValueError('cpio carries a literal etc/gitconfig (the top-level etc is a symlink into the base, so it would be written through it): the environment gitconfig is only under /opt/winter/environment/base')
     runtime=None
     if receipt.get('hostQuery') is not None:   # a root built for the host-query runtime must carry exactly the artifacts its receipt describes
         if config_bytes is None:raise ValueError('runtime artifacts file missing from the cpio')
@@ -153,6 +184,6 @@ def verify(root,pinned_init=None,require_init=True,allow_unpinned=False,require_
         pinned=json.loads((HERE/'pins.json').read_text())['environment']['gitconfigSha256']
         if receipt['environment'].get('gitconfigSha256')!=pinned:raise ValueError('receipt does not describe the pinned environment gitconfig')
         environment=check_environment_gitconfig(records,pinned)
-    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'runtimeArtifacts':runtime}
+    return {'cpioVerified':True,'entries':count,'uid':0,'gid':0,'regularModes':['0444','0555'],'directoryMode':'0555','deviceNodes':0,'startupPresent':bool(startup),'startupEntries':sorted(startup),'initSha256':pinned_init if require_init else None,'initPinned':init_pinned,'relayPinned':relay_pinned,'relaySha256':relay_digest,'runtimeArtifacts':runtime}
 if __name__=='__main__':
     parser=argparse.ArgumentParser();parser.add_argument('root',type=Path);parser.add_argument('--allow-unpinned',action='store_true',help='accept a receipt with reproducibilityPinned false (a build whose expectedArtifact is still null)');parser.add_argument('--no-init',action='store_true',help='a root built before N2 slice S5: it must have no startup program');parser.add_argument('--no-environment',action='store_true',help='a root built before the environment gitconfig existed: its receipt need not claim it');args=parser.parse_args();print(json.dumps(verify(args.root,require_init=not args.no_init,allow_unpinned=args.allow_unpinned,require_environment=not args.no_environment),sort_keys=True))
