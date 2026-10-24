@@ -257,6 +257,9 @@ class FileChannelPid1Tests(unittest.TestCase):
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp(prefix="guest-pid1-fc-case-"))
         self.addCleanup(shutil.rmtree, self.dir, ignore_errors=True)
+        # The workspace is shared by the whole class, and the plan view's record of epochs is the disk itself: an epoch an earlier test made (rightly) makes every lower one stale, so each
+        # test starts with no plan folder, as a fresh data volume would.
+        shutil.rmtree(self.workspace / "plan", ignore_errors=True)
 
     def run_tool(self, *args):
         result = subprocess.run([str(self.tool), *map(str, args)], capture_output=True, text=True, timeout=60)
