@@ -367,6 +367,26 @@ def add_guest_files(tree,programs,scripts,helper_digests,runtime_digests=None):
     tree.add('opt/winter/etc/supervisor-base.json','file',supervisor_base_config(helper_digests)+b'\n',False,'derived:supervisor-static-config')
     if runtime_digests is not None:tree.add(verify.RUNTIME_ARTIFACTS_PATH,'file',runtime_artifacts_config(runtime_digests)+b'\n',False,'derived:supervisor-runtime-artifacts')
 
+# R15 (design 2026-10-18): git copies its template directory into every new `.git` (`git init`, `git clone`, submodule clones), hooks/*.sample included, and dies
+# when an entry cannot be made. A read-write folder share refuses every `.git/hooks` entry, so the system gitconfig points init.templateDir at an EMPTY,
+# root-owned (cpio uid 0, mode 0555) directory: git then never makes a hooks directory at all. The directory sits under /usr so a tool compartment, which
+# mounts bin, lib, lib64 and usr of the environment base, sees the same path.
+GIT_TEMPLATE_DIR='/usr/share/winter-git-template'
+SYSTEM_GITCONFIG=b'# Winter Cowork guest: an empty template directory, so git init, clone and submodule clones never create .git/hooks (design 2026-10-18, R15).\n[init]\n\ttemplateDir = '+GIT_TEMPLATE_DIR.encode()+b'\n'
+
+def add_git_config(tree,base):
+    """The image's system gitconfig (`/etc/gitconfig`, the environment base's etc) and the empty template directory it names."""
+    tree.add(base+GIT_TEMPLATE_DIR,'directory',origin='derived:empty-git-template-directory')
+    tree.add(base+'/etc/gitconfig','file',SYSTEM_GITCONFIG,False,'derived:system-gitconfig-empty-template')
+
+def check_git_config(tree):
+    """The template directory is empty and the system gitconfig names exactly it; refused otherwise (a package that ships either is a conflict in Tree.add already)."""
+    target,node=tree.resolve('/etc/gitconfig')
+    if node['kind']!='file' or node['data']!=SYSTEM_GITCONFIG:raise ValueError('system gitconfig is not the pinned one')
+    target,node=tree.resolve(GIT_TEMPLATE_DIR)
+    if node['kind']!='directory' or node['mode']!=0o555:raise ValueError('git template directory missing')
+    if any(name.startswith(target+'/') for name in tree.nodes):raise ValueError('git template directory is not empty')
+
 def refuse_blkid(tree):
     """The probe is `dumpe2fs -h` plus a direct superblock read (decision D9); the image must not grow a blkid for anything to lean on."""
     if any(name.endswith('/blkid') or name=='blkid' for name in tree.nodes):raise ValueError('blkid is not part of the image')
@@ -469,11 +489,13 @@ def main():
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
     if base+'/bin/sh' not in tree.nodes:tree.add(base+'/bin/sh','symlink',b'dash',origin='derived:explicit-dash-shell')
+    add_git_config(tree,base)
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
     check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
     records=verify_elfs(tree)
     refuse_blkid(tree)
     refuse_provider_bridge(tree)
+    check_git_config(tree)
     verify.check_runtime_artifacts(tree_files(tree),tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data'])
     required=REQUIRED_PROGRAMS
     for path in required:

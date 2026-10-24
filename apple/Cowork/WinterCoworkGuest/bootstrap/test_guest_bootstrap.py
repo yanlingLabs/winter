@@ -1994,6 +1994,12 @@ class ConversationSessionTests(unittest.TestCase):
 
 
 
+class LateChannel(FakeChannel):
+    """The host's next message is not there yet when the helper looks for one; it arrives later (while PID 1 mounts, or after the answer)."""
+    def has_pending(self):
+        return False
+
+
 class ShareSessionTests(unittest.TestCase):
     """The helper's half of the share step (revision 3, design 2026-10-18 section 2.5): it judges and binds the host's `shares`, hands PID 1 the set, and turns
     PID 1's one-byte answer into `shares_mounted` or a share fault. A set that follows a share step that did not end in `shares_mounted` never reaches PID 1."""
@@ -2068,7 +2074,10 @@ class ShareSessionTests(unittest.TestCase):
             with self.subTest(key):
                 message = self.shares_message()
                 message[key] = value
-                status, channel = self.run_session([self.body(message), down("bootstrap-down-conversations-guided")])
+                status, channel = self.run_session([self.body(message)])
+                self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:share_mount_failed"))
+                self.assertNotIn("S", self.kinds(channel))
+                status, channel = self.run_session([self.body(message), down("bootstrap-down-conversations-guided")], LateChannel)
                 self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
                 self.assertNotIn("S", self.kinds(channel))
                 self.assertNotIn("C", self.kinds(channel))
@@ -2083,21 +2092,16 @@ class ShareSessionTests(unittest.TestCase):
         self.assertNotIn("S", self.kinds(channel))
 
     def test_a_host_message_that_arrives_while_pid_1_mounts_turns_the_answer_into_a_fault(self):
-        class LateChannel(FakeChannel):
-            """The host's next message is not there yet when the helper looks; it arrives while PID 1 mounts."""
-            def has_pending(self):
-                return False
-
         status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_DOWN, payload_of(POSITIVE["bootstrap-down-conversations-guided"])), self.OK], LateChannel)
         self.assertEqual(self.kinds(channel)[-3:], ["S", "fault:share_mount_failed", "fault:bad_conversations"])
         self.assertNotIn("shares_mounted", self.kinds(channel))
         self.assertNotIn("C", self.kinds(channel))
 
     def test_a_second_share_set_or_one_after_the_conversation_set_mounts_nothing(self):
-        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")])
+        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")], LateChannel)
         self.assertEqual(self.kinds(channel)[-3:], ["shares_mounted", "fault:share_mount_failed", "fault:bad_conversations"])
         self.assertEqual(self.kinds(channel).count("S"), 1)
-        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), down("bootstrap-down-shares")])
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), down("bootstrap-down-shares")], LateChannel)
         self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:share_mount_failed"])
         self.assertNotIn("S", self.kinds(channel))
 
