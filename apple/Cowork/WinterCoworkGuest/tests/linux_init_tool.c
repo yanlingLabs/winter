@@ -201,6 +201,20 @@ int main(int argc, char **argv) {
         printf("rc=%d mounted=%u errno=%d\n", rc, mounted, saved);
         return 0;
     }
+    if (argc == 3 && strcmp(argv[1], "umountshare") == 0) {  /* GUEST_PATH below SHARES_ROOT */
+        printf("rc=%d\n", op_umount_share(NULL, argv[2]));
+        return 0;
+    }
+    if (argc == 3 && strcmp(argv[1], "mountinfo") == 0) {    /* WHERE: this process's real mount table, read and parsed as PID 1 does */
+        static char table[WG_MOUNTINFO_MAX];
+        long length = sop_read_mountinfo(NULL, table, sizeof table);
+        struct wg_mountinfo_entry entry;
+        memset(&entry, 0, sizeof entry);
+        int count = length < 0 ? -2 : wg_mountinfo_find(table, (size_t)length, argv[2], &entry);
+        printf("count=%d\n", count);
+        if (count > 0) printf("root=%s\nmount_point=%s\noptions=%s\nfstype=%s\nsource=%s\nsuper=%s\n", entry.root, entry.mount_point, entry.options, entry.fstype, entry.source, entry.super_options);
+        return 0;
+    }
     if (argc >= 5 && strcmp(argv[1], "realstep") == 0) {     /* FSTYPE DATA SHARE...: the whole share step for real (root, in a private mount namespace), then every share unmounted */
         static struct wg_share_set set;
         if (share_set(argc, argv, 4, &set) != 0) return 2;

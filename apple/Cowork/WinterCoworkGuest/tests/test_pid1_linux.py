@@ -26,6 +26,28 @@ INIT = ROOT / "init"
 PATH_ENV = "PATH=/usr/sbin:/usr/bin:/sbin:/bin"
 
 
+class LinuxToolSubcommandTests(unittest.TestCase):
+    """Runs everywhere, macOS included: every subcommand these Linux-only tests hand tests/linux_init_tool.c is one the tool has, and the CI build of the tool is
+    the one these tests make (the workflow runs this module; it compiles nothing itself). A lost subcommand fails here, not only on the Linux runner."""
+
+    def test_every_subcommand_the_tests_use_exists_in_the_tool(self):
+        import re
+        tests = Path(__file__).read_text()
+        tool = (ROOT / "tests/linux_init_tool.c").read_text()
+        known = set(re.findall(r'strcmp\(argv\[1\], "([a-z]+)"\) == 0', tool))
+        used = set(re.findall(r'(?:run_tool|private)\(\s*"([a-z]+)"', tests)) | set(re.findall(r'str\(self\.tool\), "([a-z]+)"', tests))
+        self.assertGreaterEqual(len(used), 12)
+        self.assertEqual(sorted(used - known), [])
+        self.assertIn('"mountinfo"', tests)
+        self.assertIn("mountinfo", used)
+
+    def test_the_workflow_runs_these_tests_and_builds_nothing_itself(self):
+        workflow = (ROOT.parents[2] / ".github/workflows/cowork-guest-boot.yml").read_text()
+        self.assertIn("-p 'test_pid1_linux.py' -k realmount", workflow)
+        self.assertIn("discover -s apple/Cowork/WinterCoworkGuest/tests -p 'test_*.py'", workflow)
+        self.assertNotIn("linux_init_tool", workflow)
+
+
 @unittest.skipUnless(CC and LINUX, "needs Linux and a C compiler")
 class Pid1LinuxTests(unittest.TestCase):
     @classmethod
