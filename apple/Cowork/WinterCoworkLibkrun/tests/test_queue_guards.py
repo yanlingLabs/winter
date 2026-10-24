@@ -200,8 +200,8 @@ class Pins(unittest.TestCase):
     def test_the_queue_is_contiguous_and_every_hash_matches_its_file(self):
         entries = self.queue['basePatches'] + self.queue['newPatches']
         numbers = [int(Path(p['patchFile']).name[:4]) for p in entries]
-        self.assertEqual(numbers, list(range(4, 25)))
-        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.queue['newPatches']], list(range(14, 25)))
+        self.assertEqual(numbers, list(range(4, 26)))
+        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.queue['newPatches']], list(range(14, 26)))
         for entry in entries:
             path = ROOT / entry['patchFile']
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), entry['patchSha256'], entry['patchFile'])
@@ -317,7 +317,7 @@ class Readme(unittest.TestCase):
         self.assertIn('no signal handler is installed', self.text)
 
     def test_the_stated_counts_match(self):
-        self.assertIn('21 patches, 0004-0024', self.text)
+        self.assertIn('22 patches, 0004-0025', self.text)
         self.assertIn('69 `krun_*` symbols', self.text)
 
 
@@ -335,7 +335,8 @@ class ConfinedServer(unittest.TestCase):
     def test_it_touches_only_the_fs_server(self):
         self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', self.text, re.M))), self.FILES)
         queue = json.loads((ROOT / 'patch-queue.json').read_text())
-        self.assertEqual(sorted(queue['newPatches'][-1]['allowedFiles']), self.FILES)
+        entry = next(p for p in queue['newPatches'] if p['patchFile'] == 'patches/' + self.PATCH.name)
+        self.assertEqual(sorted(entry['allowedFiles']), self.FILES)
         self.assertTrue(set(self.FILES[:4]) <= set(queue['allAddedFiles']))
 
     def test_it_wires_no_device_export_or_gate(self):
@@ -363,6 +364,79 @@ class ConfinedServer(unittest.TestCase):
     def test_its_suite_is_run(self):
         import run_cargo_tests
         self.assertIn(('krun-devices', 'blk', 'fs::macos::confined'), run_cargo_tests.RUNS)
+
+
+class GitRulesAndQuarantine(unittest.TestCase):
+    """Patch 0025: R15 (the git rules, as revised for H1-H5) and R16 (the quarantine tag) inside the confined server. It
+    touches only the confined server, wires no device, export or gate, keeps the one xattr call R7 allows, pins the design's
+    limits and the config allowlist, and its suite runs with the confined filter."""
+    PATCH = ROOT / 'patches/0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch'
+    DIR = 'src/devices/src/virtio/fs/macos/confined/'
+    NEW = ['git.rs', 'git_tests.rs', 'gitconfig.rs', 'notice.rs', 'quarantine.rs']
+    CHANGED = ['mod.rs', 'sys.rs', 'tests.rs']
+
+    def setUp(self):
+        self.text = self.PATCH.read_text()
+        self.by_file = prep.added_lines_by_file(self.text)
+        self.code = {f: '\n'.join(lines) for f, lines in self.by_file.items() if not f.endswith(('/tests.rs', '/git_tests.rs'))}
+
+    def test_it_touches_only_the_confined_server(self):
+        files = sorted(self.DIR + f for f in self.NEW + self.CHANGED)
+        self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', self.text, re.M))), files)
+        queue = json.loads((ROOT / 'patch-queue.json').read_text())
+        entry = next(p for p in queue['newPatches'] if p['patchFile'] == 'patches/' + self.PATCH.name)
+        self.assertEqual(sorted(entry['allowedFiles']), files)
+        self.assertEqual(sorted(re.findall(r'^diff --git a/\S+ b/(\S+)\nnew file mode', self.text, re.M)), sorted(self.DIR + f for f in self.NEW))
+        self.assertTrue({self.DIR + f for f in self.NEW} <= set(queue['allAddedFiles']))
+
+    def test_it_wires_no_device_export_or_gate(self):
+        code = '\n'.join(self.code.values())
+        for needle in ['#[no_mangle]', 'extern "C"', 'fn krun_', 'krun_cowork_', ' Fs::new(', 'device::Fs', 'FsServer', 'attach_', 'register_mmio', 'shm_region', 'VirtioShmRegion', 'map_sender', 'umask(', 'Command::new']:
+            self.assertNotIn(needle, code, needle)
+
+    def test_the_one_xattr_call_is_the_quarantine_tag(self):
+        calls = {f: c.count('libc::fsetxattr(') for f, c in self.code.items() if 'libc::fsetxattr(' in c}
+        self.assertEqual(calls, {self.DIR + 'quarantine.rs': 1})
+        self.assertIn('libc::fsetxattr(fd, QUARANTINE_NAME.as_ptr(),', self.code[self.DIR + 'quarantine.rs'])
+        for needle in ['libc::setxattr(', 'removexattr(', 'getxattr(', 'listxattr(']:
+            self.assertNotIn(needle, '\n'.join(self.code.values()), needle)
+
+    def test_the_limits_and_the_tag_are_the_designs(self):
+        added = '\n'.join(self.code.values())
+        for line in ['pub const POINTER_MAX: usize = 4096;', 'pub const CONFIG_MAX: u64 = 1 << 20;', 'pub const INCLUDE_DEPTH: usize = 10;',
+                     'pub const QUARANTINE_NAME: &CStr = c"com.apple.quarantine";', 'pub const QUARANTINE_FLAGS: &str = "0081";',
+                     'pub const QUARANTINE_AGENT: &str = "Winter Cowork";', 'format!("{QUARANTINE_FLAGS};{seconds:08x};{QUARANTINE_AGENT};")',
+                     'libc::fpathconf(fd, libc::_PC_CASE_SENSITIVE) == 1']:
+            self.assertIn(line, added)
+
+    def test_the_allowlist_named_refusals_and_suffixes_are_pinned(self):
+        source = self.code[self.DIR + 'gitconfig.rs']
+        table = lambda name: re.findall(r'"([^"]+)"', re.search(rf'pub const {name}: \[[^\]]+\]\s*=\s*\[(.*?)\];', source, re.S).group(1))
+        admitted = table('ADMITTED')
+        self.assertEqual(admitted, ['core.repositoryformatversion', 'core.filemode', 'core.bare', 'core.logallrefupdates', 'core.ignorecase', 'core.precomposeunicode',
+                                    'core.symlinks', 'core.sparsecheckout', 'core.sparsecheckoutcone', 'extensions.objectformat', 'extensions.worktreeconfig',
+                                    'remote.*.url', 'remote.*.pushurl', 'remote.*.fetch', 'remote.*.tagopt', 'remote.*.prune', 'branch.*.remote', 'branch.*.merge',
+                                    'branch.*.rebase', 'branch.*.pushremote', 'submodule.*.url', 'submodule.*.active', 'user.name', 'user.email', 'push.default',
+                                    'rebase.autostash', 'fetch.prune', 'init.defaultbranch', 'index.sparse', 'submodule.*.update'])
+        self.assertEqual(table('ADMITTED_SECTIONS'), ['lfs', 'pull'])
+        suffixes = table('REFUSED_SUFFIXES')
+        self.assertEqual(suffixes, ['cmd', 'command', 'program', 'path', 'helper', 'hook', 'editor', 'pager', 'driver', 'textconv', 'proxy'])
+        self.assertFalse([k for k in admitted + ['core.worktree'] if k.rsplit('.', 1)[1].endswith(tuple(suffixes))])
+        refused = table('NAMED_REFUSALS')
+        for key in ['core.worktree', 'core.fsmonitor', 'core.hookspath', 'core.sshcommand', 'core.editor', 'core.pager', 'core.askpass', 'core.gitproxy',
+                    'core.alternaterefscommand', 'diff.external', 'sequence.editor', 'commit.gpgsign', 'tag.gpgsign', 'push.gpgsign', 'web.browser']:
+            self.assertIn(key, refused)
+        self.assertFalse(set(refused) & set(admitted))
+
+    def test_the_notice_kinds_are_the_abi_values(self):
+        source = self.code[self.DIR + 'notice.rs']
+        self.assertEqual(re.findall(r'NoticeKind::\w+ => "(\w+)"', source), ['git_protected', 'envrc', 'vscode_tasks', 'vscode_settings', 'code_workspace', 'idea_project'])
+        self.assertIn('pub const NOTICE_CAPACITY: usize = NoticeKind::ALL.len();', source)
+
+    def test_its_suite_is_run(self):
+        import run_cargo_tests
+        self.assertIn(('krun-devices', 'blk', 'fs::macos::confined'), run_cargo_tests.RUNS)
+        self.assertIn('#[path = "git_tests.rs"]', '\n'.join(self.by_file[self.DIR + 'tests.rs']))
 
 
 class Composition(unittest.TestCase):

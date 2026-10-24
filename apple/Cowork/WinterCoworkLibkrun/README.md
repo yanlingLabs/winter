@@ -14,9 +14,9 @@ and its two review rounds (a rejected first round, a rejected delta round, then 
 |---|---|---|
 | Upstream libkrun | `upstream-pin.json` | v1.19.6, commit `227b2de6ed323fe180e02f871c5f325a90c13cc2`, source archive SHA-256 `373bed12b9d8b59dd8cb526cf91aa4ea4d94b468c761b98eb8fd3f345aee0050`, git tree `16c2ac4cdd03e394e813b244e4be3b6325215f0b`, `Cargo.lock` SHA-256 `a73d2ee0e4f2d2b63c7b4a00d2639076e4f7884a40cec495d5d82eed14dcd873` |
 | Rust toolchain | `upstream-pin.json` | 1.90.0 (`1159e78c4747b02ef996e55082b704c09b970588`), aarch64-apple-darwin, archive SHA-256 `9772d20d5cd736079a0ee84d00e6697cf2084f0fc4621b011e24e6f2d08d2d7f` |
-| Patch queue | `patch-queue.json` | 21 patches, 0004-0024, each SHA-256 pinned (table below) |
-| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `625e5c9fd59c370e53c0360c19d358af06ee5319edcafd4bb46985328b0f9790` |
-| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `34a009494d6d650fb42550779fb8d4114404460a9cd3823490debcdce64752c5`, stripped `b0d10be490358c91f761a902a95098bdf21d0e268d82757d0024210e52c20c26` |
+| Patch queue | `patch-queue.json` | 22 patches, 0004-0025, each SHA-256 pinned (table below) |
+| Composed source | `expected-hashes.json` | `git diff` of the pristine tree after the whole queue: `3e7cd2681d8b4053a5b5d7d1273e860f234bb36be7e892552957299707df2510` |
+| Production archive | `expected-hashes.json` | features `blk,cowork-production-only`; raw `75c458241a45b67d9d924fbb044c2502110ad527dce2cf40018c62aa7c655d15`, stripped `06e8b8f39f8666eaa19c57090f03a321d24f7e8d468e77a48fc4242cd21566a4` |
 | Exports | `expected-hashes.json` | 69 `krun_*` symbols: the 62 upstream ones for this feature set plus 7 `krun_cowork_*_v1`; no `fixture` symbol |
 
 No downloads happen except in `scripts/fetch_inputs.py`. The build is rebuilt only when a patch, the upstream pin or the build
@@ -27,7 +27,7 @@ differs from `expected-hashes.json` (review the change, then update that file on
 
 ```
 upstream-pin.json      libkrun + Rust pins          patch-queue.json   patch hashes, declared file scope, limits, inventory
-expected-hashes.json   composed / archive / exports  patches/           0004-0024 (git-diff format, applied in order)
+expected-hashes.json   composed / archive / exports  patches/           0004-0025 (git-diff format, applied in order)
 scripts/               fetch_inputs.py  prepare_queue.py  build_archive.py  run_cargo_tests.py  libkrun_common.py  abi_smoke.c
 tests/                 test_queue_guards.py (pure Python: no network, no cargo, no VM)
 out/                   git-ignored: fetched inputs, composed source, archives
@@ -41,7 +41,7 @@ python3 -I -B tests/test_queue_guards.py       # guards only: offline, no cargo 
 python3 -I -B scripts/fetch_inputs.py          # the only networked step: pinned source archive, toolchain, crates
 python3 -I -B scripts/prepare_queue.py         # compose and prove the queue (hashes, per-patch deltas, scope, no-VM audit)
 python3 -I -B scripts/build_archive.py         # reproducible archive; checks the expected hashes; rebuilds at a second path
-python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (592 test executions, 3 ignored)
+python3 -I -B scripts/run_cargo_tests.py       # the native suites, one thread, never --ignored (627 test executions, 3 ignored)
 ```
 
 The build uses fixed release-profile settings, `--remap-path-prefix` for the source, cargo home and toolchain, and
@@ -77,6 +77,7 @@ supersedes them. 0004-0013 are the admitted two-disk fixture queue, unchanged.
 | `0022-proposed-production-exit-path-final-flush-and-hook.patch` | one exit path, final flush of both volumes, exit hook | production | `965d43e3c06f5f73f249c4a808600ab378464e5e1e5cd13b11f82196fc8c397a` |
 | `0023-proposed-production-exit-and-final-flush-pins.patch` | running pins for the exit path and the final flush | tests (plus `finish` takes its budget as a parameter) | `0877eaec2bfce5a0b59915c1eb3c61f29fdf20e06ce83cfead1e44eb66ab83fc` |
 | `0024-proposed-confined-virtiofs-server-core.patch` | the confined virtio-fs server core for Cowork shares (R0-R13 server half): closed opcode allowlist, checked names, descriptor-relative host calls, read-only, bounds, revoke flag; FUSE-message harness tests | production code, not wired yet (the device, ABI and gate come in later patches) | `c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85` |
+| `0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch` | the git rules (R15, as revised for H1-H5) and the quarantine tag (R16) of the confined server: protected names folded and held by (dev, ino), git directories recognised anywhere, the protected zone, creation order, checked pointer files, immutable hooks, config only through a checked lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets, watched names; `com.apple.quarantine` on what the guest creates or makes executable; FUSE-message tests | production code, not wired yet (the device, ABI and gate come in a later patch) | `c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af` |
 
 **Fixture-only code.** Nothing could be dropped. 0006 and 0011 add fixture evidence rows and 0007-0009 contain the oracle-only stream
 entry points, but later patches (0007 onward, 0016, 0020) edit the files they create, so leaving one out means rewriting the stack and
@@ -95,6 +96,32 @@ equivalents), confirmed by (dev, ino); `O_UNIQUE`/`AT_UNIQUE` on the Winter shar
 (`ENFILE`), a directory LRU of 1,024, 1 s timeouts, modes masked to `0o755`. A directory handle reads its own directory stream
 (one `DIR` and at most one entry read ahead); no handle caches a listing. The constants the pinned `libc` crate lacks are defined with their SDK header
 lines. Nothing serves it yet: no device, export or gate change is in this patch, and the export list is unchanged.
+
+## Git rules and quarantine (0025)
+
+The same server, on the devices whose flags say so. **R15** (read-write folder sources, `folder_rules`): protected names compare
+folded on a case-insensitive volume (`fpathconf(_PC_CASE_SENSITIVE)`) and an existing protected node is held by (dev, ino); a git
+directory is a directory named `.git` or holding `HEAD`, `commondir` or `gitdir`; the protected zone is every git directory and
+everything below a `.git`, except `refs/` and `logs/` directly under a git directory. In the zone `hooks` (any type) and everything
+below an existing one are immutable, and `config`/`config.worktree` change only by git's own `<name>.lock` renamed in the same
+directory: a single-link regular file of at most 1 MiB, no writable handle, parsed strictly, adding or changing only allowlisted
+keys (`gitconfig.rs`: what git writes, `lfs.*` minus custom transfers and extensions, plainly inert settings, a suffix backstop).
+`HEAD`, `commondir` or `gitdir` never appear beside `hooks` or a non-admitted config (creation order), `HEAD`/`commondir`/`gitdir`
+never outside a `.git` chain, `objects` never beside `refs` there, and git directories are never moved or removed nor a directory
+renamed into the zone. Pointer files (`.git` as a file, `commondir`, `gitdir`) are buffered until FLUSH or RELEASE (4 KiB at most)
+and reach the host only if their one line names an admissible target. `core.hooksPath` trees, husky v9's `.husky/<hook>` and every
+include target are read before a repository's directory is served and refused to the guest, creation and ancestor renames included.
+Refusals are `EPERM`; refusals and writes to watched names (`.envrc`, `.vscode/tasks.json`, `.vscode/settings.json`,
+`*.code-workspace`, `.idea/*.xml`, `.idea/runConfigurations/**`) go to a bounded `share_notice` sink (one per kind per incarnation)
+that the device layer will drain. **R16** (every read-write share): `com.apple.quarantine` = `0081;<hex seconds>;Winter Cowork;` by
+`fsetxattr` on the server's own descriptor, on CREATE, MKDIR, a SETATTR adding an execute bit, and a write-open or truncate of an
+executable; a tag failure is `EIO` and a new node is removed. Still not wired: no device, export or gate change.
+Symbolic links (follow-up after review): no link is made, moved or hard-linked into a `.git` chain or the zone except git's own
+`core.symlinks` probe; a protected name or a `.git` that is a link made on the Mac is resolved by the server's own walk inside the share
+and what it reaches is held immutable (a linked `.git` makes its git directory the zone instead); the written path of every tracked
+target, and each link on its way, is a protected name that cannot be removed, moved, replaced or re-pointed; a config the server cannot
+read or parse fails closed (held immutable, reported); nested git directories below `modules/` and `worktrees/` are read at discovery,
+and past 4,096 directories the whole git directory is held immutable.
 
 ## Production ABI (`include/libkrun.h` after the queue)
 
@@ -142,10 +169,15 @@ Stop is a guest drain frame followed by guest power-off. Every setter that can a
 3. 0016/0020 change the production block and reclaim paths (a production guest no longer ends itself after about 12,000 block requests); 0022/0023 change how the process exits for every stop, the oracle included.
 4. Fatal-stop policy: pin overflow, a stale queue, a long freeze all stop the worker with 77; decide whether a failed request should degrade to `EIO`.
 5. The shipped release profile has overflow checks on and debug assertions off; G4 should run on it.
-6. Independent code review of all 21 patches before any run; every VM or live gate needs the owner's approval.
+6. Independent code review of all 22 patches before any run; every VM or live gate needs the owner's approval.
 7. 0024 (the confined virtio-fs server core) is not reachable yet: no device, entry point or gate serves it until the guarded fs
    device patch. Its decisions (ownership changes refused, MKNOD always `EPERM`, the revoke answer for requests that take no reply,
    `O_NOFOLLOW_ANY` in place of `O_NOFOLLOW`) are listed in its pull request and need review with it.
+8. 0025 (R15, R16) is not reachable yet either. Its decisions need review with it, in particular two where the design's literal
+   text would break a guest `git submodule update`: `core.worktree` is admitted in a submodule's own git directory when it names a
+   work tree inside the share outside every `.git`, and a gitfile may name a git directory still to be made below `modules/` or
+   `worktrees/` (git writes the gitfile first). A guest-made worktree of a Mac-made repository (which carries `hooks/*.sample`) is
+   refused at its `commondir`, as the design's H5 re-validation says. The quarantine flag word `0081` is checked at G7.
 
 ## Licences
 

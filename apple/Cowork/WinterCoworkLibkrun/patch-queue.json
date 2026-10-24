@@ -1,5 +1,5 @@
 {
-  "_comment": "basePatches (0004-0013) are the admitted two-disk fixture queue, applied unchanged; newPatches (0014-0024) are the production profile. Every patch applies to the previous composed state, so the queue is a stack.",
+  "_comment": "basePatches (0004-0013) are the admitted two-disk fixture queue, applied unchanged; newPatches (0014-0025) are the production profile. Every patch applies to the previous composed state, so the queue is a stack.",
   "status": "native-source-only-independent-review-required",
   "profile": "n2-production-admitted-raw-pair-and-generic-runtime-port",
   "basePatches": [
@@ -185,6 +185,21 @@
       ],
       "purpose": "the confined virtio-fs server core for Cowork shares (SH2 R0-R13, the server halves of R6 and R11): closed opcode allowlist with an ENOSYS fallthrough and a confined INIT (max_pages 256), checked names, descriptor-relative host calls with O_NOFOLLOW_ANY | O_RESOLVE_BENEATH and (dev, ino) confirmation, a directory LRU of 1,024, EXDEV across devices, O_UNIQUE on the Winter shares, masked modes, read-only refusals, 4,096 handles and 262,144 nodes, directory handles that read their own stream (no listing cache), a revoke flag and an owner-only close, F_FULLFSYNC on the Winter shares; FUSE-message harness tests. Not wired: no device, entry point or gate",
       "patchSha256": "c4a1016dd03cc45d2fa91742a10118f43251ea85d32a6907b3abcb2cfe1ccb85"
+    },
+    {
+      "patchFile": "patches/0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch",
+      "allowedFiles": [
+        "src/devices/src/virtio/fs/macos/confined/git.rs",
+        "src/devices/src/virtio/fs/macos/confined/git_tests.rs",
+        "src/devices/src/virtio/fs/macos/confined/gitconfig.rs",
+        "src/devices/src/virtio/fs/macos/confined/mod.rs",
+        "src/devices/src/virtio/fs/macos/confined/notice.rs",
+        "src/devices/src/virtio/fs/macos/confined/quarantine.rs",
+        "src/devices/src/virtio/fs/macos/confined/sys.rs",
+        "src/devices/src/virtio/fs/macos/confined/tests.rs"
+      ],
+      "purpose": "the git rules and the quarantine tag of the confined virtio-fs server (SH2 R15 as revised for H1-H5, R16): on read-write folder sources, folded and (dev, ino) protected names (_PC_CASE_SENSITIVE), git directories recognised anywhere and none new outside a .git chain, git directories never moved or removed and no directory renamed into the zone, the creation-order check, pointer files buffered until FLUSH/RELEASE and checked, hooks immutable, config only through a checked config.lock rename (strict parser, allowlist, suffix backstop), tracked hooks and include targets discovered before serving, watched names reported to a bounded share_notice sink; on every read-write share, com.apple.quarantine on CREATE, MKDIR, an exec-bit SETATTR and a write-open or truncate of an executable (a tag failure is EIO, a new node removed); FUSE-message tests. Not wired: no device, entry point or gate",
+      "patchSha256": "c66073efe6319cb9173a6f3d0c6611480baf1491ce1e52516308c1590ded52af"
     }
   ],
   "allAddedFiles": [
@@ -220,7 +235,12 @@
     "src/devices/src/virtio/fs/macos/confined/mod.rs",
     "src/devices/src/virtio/fs/macos/confined/names.rs",
     "src/devices/src/virtio/fs/macos/confined/sys.rs",
-    "src/devices/src/virtio/fs/macos/confined/tests.rs"
+    "src/devices/src/virtio/fs/macos/confined/tests.rs",
+    "src/devices/src/virtio/fs/macos/confined/git.rs",
+    "src/devices/src/virtio/fs/macos/confined/git_tests.rs",
+    "src/devices/src/virtio/fs/macos/confined/gitconfig.rs",
+    "src/devices/src/virtio/fs/macos/confined/notice.rs",
+    "src/devices/src/virtio/fs/macos/confined/quarantine.rs"
   ],
   "forbiddenAddedText": [
     "register_mmio_gpio(",
