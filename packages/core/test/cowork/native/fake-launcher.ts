@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { fstatSync } from "node:fs";
 import { CoworkNativeSimulatedCrash, type CoworkLauncherPort, type CoworkLauncherSession } from "../../../src/cowork/native/host";
 import {
@@ -25,7 +26,11 @@ export interface FakeBehavior {
   bootstrap?: "ok" | "fault" | "silent" | "wrong-nonce" | "wrong-operation" | "tampered-receipt" | "duplicate-receipt" | "runtime-frame";
   mounted?: "ok" | "silent";
   /** What the guest does with the conversation set: answer, stay silent, fault, echo wrongly, or announce readiness before it was sent anything / twice. */
-  conversations?: "ok" | "silent" | "bad" | "supervisor-failed" | "second" | "wrong-count" | "wrong-nonce" | "wrong-operation" | "duplicate-ready" | "late-ready" | "early-ready";
+  /** What the guest does with bootstrap `shares`: mount them (`shares_mounted`), fault, or stay silent. */
+  shares?: "ok" | "fault" | "silent" | "wrong-nonce";
+  /** How the guest reports the continuation it ran: as decided (default), the other one, or too many entries. */
+  continuationEcho?: "as-sent" | "flipped" | "extra" | "none";
+  conversations?: "store-missing" | "fresh-store-not-empty" | "ok" | "silent" | "bad" | "supervisor-failed" | "second" | "wrong-count" | "wrong-nonce" | "wrong-operation" | "duplicate-ready" | "late-ready" | "early-ready";
   /** What the launcher does when asked to stop. */
   stop?: "orderly" | "late-orderly" | "uncertain" | "eof" | "silent" | "wrong-nonce" | "bad-invariants" | "other-incarnation" | "wrong-volume" | "fault" | "other-request-id" | "other-launcher" | "denies-attach" | "denies-boot";
   /** Hello with another boot id. */
@@ -37,6 +42,7 @@ export const FIXTURE_KEY = CoworkNativeReceiptKey.fromBytes(Uint8Array.from({ le
 interface Received { readonly message: CoworkNativeToLauncher; readonly rights: readonly number[] }
 export class FakeLauncher implements CoworkLauncherPort {
   behavior: FakeBehavior;
+  confirmations = 0;
   readonly sessions: FakeSession[] = [];
   readonly spawned: { workspaceId: string; incarnationId: string; leaseEpoch: number }[] = [];
   constructor(readonly options: { behavior: FakeBehavior; homeId: string; hostBootId: () => string; receipts: Map<string, string>; events: string[] }) { this.behavior = options.behavior; }
@@ -75,7 +81,9 @@ export class FakeSession implements CoworkLauncherSession {
   /** Every conversation set the guest received (the host must send at most one). */
   readonly conversationSets: { operationId: string; nonce: string; incarnationId: string; profile: string | null; conversations: readonly unknown[] }[] = [];
   private plan: { operationId: string; nonce: string; plan: Record<string, unknown> } | null = null;
-  private confirmCounter = 0;
+  /** Shared by every session of one launcher: a real launcher never repeats a confirmation id, and the host spends each one once. */
+  private get confirmCounter(): number { return this.owner.confirmations; }
+  private set confirmCounter(value: number) { this.owner.confirmations = value; }
   constructor(private readonly owner: FakeLauncher, readonly request: { workspaceId: string; incarnationId: string; leaseEpoch: number }) {
     this.hostBootId = owner.behavior.helloBoot ?? owner.options.hostBootId();
   }
@@ -101,6 +109,25 @@ export class FakeSession implements CoworkLauncherSession {
     const typed = parseCoworkNativeLauncherLine(serializeCoworkNativeLauncherLine(message, "to-daemon"), "to-daemon", 0) as CoworkNativeToDaemon;
     queueMicrotask(() => { if (this.live) for (const handler of [...this.handlers]) handler(typed); });
   }
+  /** The `continuations` the fake guest reports for a set: one per host-query conversation, `fresh`/`resume` as decided (`either` runs fresh here). */
+  private echo(set: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>["message"]): ("fresh" | "resume")[] {
+    if (set.t !== "conversations") return [];
+    const sent = set.conversations.flatMap(item => item.runtime === null ? [] : [item.runtime.continuation === "resume" ? "resume" as const : "fresh" as const]);
+    switch (this.behavior.continuationEcho ?? "as-sent") {
+      case "none": return [];
+      case "extra": return [...sent, "fresh"];
+      case "flipped": return sent.map(entry => entry === "fresh" ? "resume" as const : "fresh" as const);
+      default: return sent;
+    }
+  }
+  /** The guest's boot id: a real guest's is unique per boot (and the host's record demands it), so the fake derives one from the incarnation it serves. */
+  get bootId(): string {
+    const scope = this.scope as { workspaceId: string; incarnationId: string } | null;
+    const hex = createHash("sha256").update(`${scope?.workspaceId ?? ""}|${scope?.incarnationId ?? ""}`).digest("hex");
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-8${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+  }
+  /** The bootstrap `shares` messages the guest received (tests). */
+  readonly bootstrapShares: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>["message"][] = [];
   private muxUp(message: Extract<CoworkNativeMuxFrame, { class: "bootstrap" }>["message"]): void {
     this.upSeq += 1;
     this.deliver({ t: "mux_up", frame: { class: "bootstrap", seq: this.upSeq, message } });
@@ -142,7 +169,7 @@ export class FakeSession implements CoworkLauncherSession {
     if (this.behavior.volumes === "silent") {
       for (const item of this.behavior.chatter ?? []) {
         if (item === "vm_running") { this.deliver({ t: "worker_state", state: "vm_running" }); this.vmRunning = true; }
-        else this.muxUp({ t: "hello", guestBootId: "66666666-6666-4666-8666-666666666666", dataSerial: "winter-data", environmentSerial: "winter-environment" });
+        else this.muxUp({ t: "hello", guestBootId: this.bootId, dataSerial: "winter-data", environmentSerial: "winter-environment" });
       }
       return;
     }
@@ -150,7 +177,7 @@ export class FakeSession implements CoworkLauncherSession {
     this.deliver({ t: "volumes_accepted", id: message.id });
     if (this.behavior.quietVm) return;
     this.deliver({ t: "worker_state", state: "vm_running" }); this.vmRunning = true;
-    if (this.behavior.guestHello !== "silent") { this.guestBooted = true; this.muxUp({ t: "hello", guestBootId: "66666666-6666-4666-8666-666666666666", dataSerial: "winter-data", environmentSerial: "winter-environment" }); }
+    if (this.behavior.guestHello !== "silent") { this.guestBooted = true; this.muxUp({ t: "hello", guestBootId: this.bootId, dataSerial: "winter-data", environmentSerial: "winter-environment" }); }
   }
   private onMux(frame: CoworkNativeMuxFrame): void {
     this.down.accept(frame, "down");
@@ -171,22 +198,34 @@ export class FakeSession implements CoworkLauncherSession {
       if (this.behavior.bootstrap === "duplicate-receipt") this.muxUp({ t: "receipt", operationId, nonce, receipt: receipt as unknown as Record<string, unknown> });
       return;
     }
-    if (message.t === "ready" && this.behavior.conversations === "early-ready") this.muxUp({ t: "runtime_ready", operationId: message.operationId, nonce: message.nonce, conversations: 1 });
+    if (message.t === "ready" && this.behavior.conversations === "early-ready") this.muxUp({ t: "runtime_ready", operationId: message.operationId, nonce: message.nonce, conversations: 1, continuations: [] });
     if (message.t === "ready" && this.behavior.mounted !== "silent") this.muxUp({ t: "mounted", operationId: message.operationId, nonce: message.nonce });
+    if (message.t === "shares") {
+      this.bootstrapShares.push(message);
+      const { operationId, nonce } = message;
+      switch (this.behavior.shares ?? "ok") {
+        case "silent": return;
+        case "fault": return this.muxUp({ t: "fault", operationId, nonce, code: "share_inventory" });
+        case "wrong-nonce": return this.muxUp({ t: "shares_mounted", operationId, nonce: "ee".repeat(16) });
+        default: return this.muxUp({ t: "shares_mounted", operationId, nonce });
+      }
+    }
     if (message.t === "conversations") {
       this.conversationSets.push(message);
       const { operationId, nonce } = message, count = message.conversations.length;
       switch (this.behavior.conversations ?? "ok") {
         case "silent": return;
+        case "store-missing": return this.muxUp({ t: "fault", operationId, nonce, code: "resume_store_missing" });
+        case "fresh-store-not-empty": return this.muxUp({ t: "fault", operationId, nonce, code: "fresh_store_not_empty" });
         case "bad": return this.muxUp({ t: "fault", operationId, nonce, code: "bad_conversations" });
         case "supervisor-failed": return this.muxUp({ t: "fault", operationId, nonce, code: "supervisor_failed" });
         case "second": return this.muxUp({ t: "fault", operationId, nonce, code: "second_conversations" });
-        case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1 });
-        case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count });
-        case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count });
-        case "late-ready": { setTimeout(() => { if (this.scope) this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); }, 600); return; }
-        case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
-        default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count });
+        case "wrong-count": return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count + 1, continuations: this.echo(message) });
+        case "wrong-nonce": return this.muxUp({ t: "runtime_ready", operationId, nonce: "ee".repeat(16), conversations: count, continuations: this.echo(message) });
+        case "wrong-operation": return this.muxUp({ t: "runtime_ready", operationId: "filesystem_other", nonce, conversations: count, continuations: this.echo(message) });
+        case "late-ready": { setTimeout(() => { if (this.scope) this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: this.echo(message) }); }, 600); return; }
+        case "duplicate-ready": this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: this.echo(message) }); return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: this.echo(message) });
+        default: return this.muxUp({ t: "runtime_ready", operationId, nonce, conversations: count, continuations: this.echo(message) });
       }
     }
   }

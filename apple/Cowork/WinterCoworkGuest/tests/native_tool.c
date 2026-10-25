@@ -241,6 +241,29 @@ static int cmd_frame(int argc, char **argv) {
     return 0;
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+#include "../common/fileflow.h"
+/* fileflow: stdin lines "STREAM BYTES NEWLINES" (stream file_in or file_out; the last NEWLINES bytes of a step are line ends, the rest are 'x').
+ * Prints one line per step: ok, or the first refusal's status name (and stops). */
+static int cmd_fileflow(void) {
+    struct wg_fileflow flow;
+    wg_fileflow_init(&flow);
+    char line[128];
+    static uint8_t bytes[1u << 20];
+    while (fgets(line, sizeof line, stdin)) {
+        char stream[16];
+        unsigned long count, newlines;
+        if (sscanf(line, "%15s %lu %lu", stream, &count, &newlines) != 3 || count > sizeof bytes || newlines > count) return 2;
+        memset(bytes, 'x', count);
+        memset(bytes + (count - newlines), '\n', newlines);
+        enum wmx_status status = strcmp(stream, "file_in") == 0 ? wg_fileflow_request(&flow, bytes, count) : wg_fileflow_response(&flow, bytes, count);
+        printf("%s\n", wmx_status_name(status));
+        if (status != WMX_OK) return 0;
+    }
+    return 0;
+}
+#endif
+
 int main(int argc, char **argv) {
     if (argc < 2) return 2;
     if (strcmp(argv[1], "frame") == 0) return cmd_frame(argc, argv);
@@ -249,5 +272,8 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "stream") == 0) return cmd_stream(argc, argv);
     if (strcmp(argv[1], "encode") == 0) return cmd_encode(argc, argv);
     if (strcmp(argv[1], "ctl") == 0) return cmd_ctl(argc, argv);
+#ifdef WG_FILE_CHANNEL_V1
+    if (strcmp(argv[1], "fileflow") == 0) return cmd_fileflow();
+#endif
     return 2;
 }

@@ -9,7 +9,9 @@ const root = realpathSync(mkdtempSync(join(tmpdir(), "winter-embedded-descendant
 const home = join(root, "home"), cwd = join(root, "project");
 mkdirSync(join(home, "cowork"), { recursive: true }); mkdirSync(cwd);
 // This fixture covers the floor of an SDK WITHOUT the host-code protection capability (the installed one has it since 0.0.54), so the capability is injected as absent.
-const host = createEmbeddedSessionHost({ home, hostPathProtectionCapability: null });
+// Real events, not time: `started` is the engine release (the `start` lifecycle event), `received` counts what the engine has streamed back.
+let started = 0, received = 0;
+const host = createEmbeddedSessionHost({ home, hostPathProtectionCapability: null, onLifecycle: event => { if (event.event === "start") started++; } });
 const mode = process.argv[2];
 const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", WINTER_HOME: home, WINTER_DISABLE_GIT_INSTRUCTIONS: "1", WINTER_KEYCHAIN_SERVICE: "com.winter.core.test-isolated" };
 if (mode === "daemon-capable") {
@@ -52,12 +54,15 @@ if (mode === "daemon") {
   process.exit(0);
 }
 const q = query({ prompt: "go", options: { model: mode === "live" ? "winter-test/hang" : "winter-test/tooluse", cwd, env, spawnClaudeCodeProcess: options => host.spawn(options) } });
-const draining = (async () => { for await (const _message of q) { /* fixture protocol only */ } })();
+const draining = (async () => { for await (const _message of q) { received++; } })();
 try {
   if (mode === "live") {
-    const deadline = Date.now() + 5000;
-    while (!host.live().length && Date.now() < deadline) await Bun.sleep(5);
-    if (!host.live().length) throw new Error("real Worker did not start");
+    // The storage transition kills the Worker and gives it 1000 ms to close, while the SDK's kill grace is 1500 ms: a Worker killed BEFORE its engine is running and answering closes only at
+    // the grace, which is past that budget. So activation waits for the real events (engine released, and the engine has streamed its first message), never for the spawn alone and never
+    // for a time. The deadline below is a failsafe for a Worker that never gets there, not a pacing delay.
+    const deadline = Date.now() + 30_000;
+    while ((!host.live().length || started < 1 || received < 1) && Date.now() < deadline) await Bun.sleep(5);
+    if (!host.live().length || started < 1 || received < 1) throw new Error("real Worker did not start");
   } else {
     await draining;
     const deadline = Date.now() + 5000;

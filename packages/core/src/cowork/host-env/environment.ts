@@ -16,6 +16,10 @@ import { createCoworkRecoverGuards, processStartToken } from "./guards";
 import { createCoworkLauncherPort, type CoworkLauncherPortOptions } from "./launcher-port";
 import { createCoworkHomeBindingStore, createCoworkLaunchJournal, createCoworkReceiptStore } from "./stores";
 import { readVolumeId } from "./volume-identity";
+import { createCoworkOutputsPreparer, createCoworkShareDirectoryOpener } from "./guest-dirs";
+import { CoworkGuestRecords } from "./guest-records";
+import { createCoworkProvisioningPort, type CoworkVerifiedGuestImage } from "./provisioning";
+import { CoworkError } from "../types";
 import type { CoordinationPathInputs } from "../native/admission-probes";
 
 /*
@@ -28,9 +32,11 @@ import type { CoordinationPathInputs } from "../native/admission-probes";
  */
 
 export const COWORK_LAUNCHER_IDENTIFIER = "com.winter.cowork.launcher";
+/** What `dev:cowork-native` signs the dev launcher as: the launcher reads which daemon it serves from its OWN signing identifier, so a dev daemon expects this one. */
+export const COWORK_LAUNCHER_DEV_IDENTIFIER = "com.winter.cowork.launcher.dev";
 export const COWORK_DEFAULT_TEAM = "37N77U9RSZ";
 /** Identifier + Winter's team under Apple's anchor, the same form as `scripts/embed-cowork-native.sh` states and `embed-computer-helper.sh` uses. */
-export const coworkLauncherRequirement = (team: string = COWORK_DEFAULT_TEAM): string => `identifier "${COWORK_LAUNCHER_IDENTIFIER}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`;
+export const coworkLauncherRequirement = (team: string = COWORK_DEFAULT_TEAM, identifier: string = COWORK_LAUNCHER_IDENTIFIER): string => `identifier "${identifier}" and anchor apple generic and certificate leaf[subject.OU] = "${team}"`;
 /** `Winter.app/Contents/Helpers/WinterCowork/{winter-cowork-launcher,winter-cowork-worker}`, next to `Contents/Resources/winter-core`. */
 export function coworkNativeBinaryPaths(executablePath: string): { launcherPath: string; workerPath: string } {
   const base = resolve(dirname(executablePath), "..", "Helpers", "WinterCowork");
@@ -52,6 +58,8 @@ export interface CoworkNativeProductionOptions {
   /** The daemon's own executable (`process.execPath` in production). */
   readonly executablePath: string;
   readonly team?: string;
+  /** The launcher's signing identifier: the dist one by default, the dev one for the dev daemon (`WINTER_PROFILE=dev`, chosen by the activation seam). */
+  readonly launcherIdentifier?: string;
   /** `ioreg`, `sysctl` and the process table. The default is the real ones, created lazily and only here. */
   readonly adapters?: { runCommand: HostCommandRunner; sysctl: SysctlReader; processes: ProcessTable };
   readonly space?: FilesystemSpaceReader;
@@ -59,6 +67,10 @@ export interface CoworkNativeProductionOptions {
   readonly launcher?: Partial<Pick<CoworkLauncherPortOptions, "spawn" | "openChannel" | "closeChannelDescriptor" | "verifyProcess" | "checkExecutable" | "helloTimeoutMs">>;
   readonly daemonPid?: number;
   readonly now?: () => number;
+  /** The installed image's verified facts (the image lane's manifest check), or null. No reader exists yet, so the default is null and the provisioning port stays unavailable. */
+  readonly image?: () => CoworkVerifiedGuestImage | null;
+  /** Records the image pin for a workspace (the lifecycle authority behind it is the caller's). The default refuses. */
+  readonly pin?: (workspaceId: string, digests: { baseImageDigest: string; runtimeImageDigest: string }) => unknown;
 }
 
 export interface CoworkNativeProductionEnvironment extends CoworkNativeEnvironment {
@@ -135,7 +147,7 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   const journal = createCoworkLaunchJournal(journalDirectory);
 
   const { launcherPath, workerPath } = coworkNativeBinaryPaths(options.executablePath);
-  const launcher = createCoworkLauncherPort({ launcherPath, workerPath, receiptDirectory, requirement: coworkLauncherRequirement(options.team), processes: adapters.processes, ...options.launcher });
+  const launcher = createCoworkLauncherPort({ launcherPath, workerPath, receiptDirectory, requirement: coworkLauncherRequirement(options.team, options.launcherIdentifier), processes: adapters.processes, ...options.launcher });
 
   const instanceNonce = randomBytes(12).toString("hex"), daemonPid = options.daemonPid ?? process.pid;
   const daemon = (): AdmissionOwner => {
@@ -145,8 +157,11 @@ export function createCoworkNativeProductionEnvironment(options: CoworkNativePro
   };
 
   let timer: ReturnType<typeof setInterval> | null = null;
+  const guestRecords = new CoworkGuestRecords(options.db);
   return {
     launcher, admission: ledger, backup: timeMachineVolumeBackup, hostBoot, daemon, receipts, journal,
+    guestRecords, outputs: createCoworkOutputsPreparer(options.home), shareDirectories: createCoworkShareDirectoryOpener(),
+    provisioningPort: createCoworkProvisioningPort({ db: options.db, home: options.home, backup: timeMachineVolumeBackup, guestRecords, environmentActive: () => true, image: options.image ?? (() => null), pin: options.pin ?? (() => { throw new CoworkError("unsupported_topology"); }) }),
     guards: ({ volumes }) => createCoworkRecoverGuards({ journal, processes: adapters.processes, bootId: () => probes.hostIdentity()?.bootId ?? null, home: canonicalHome, ownersHeld: workspaceId => volumes.records(workspaceId).some(volume => volume.owner !== null) }),
     probes, ledger, pressure: guard, homeId, installationId, receiptDirectory, journalDirectory,
     bindHost(host) { halt = async () => { const outcomes = await Promise.all(host.activeWorkspaces().map(workspaceId => host.stop(workspaceId, "shutdown").then(outcome => outcome.released, () => false))); return outcomes.every(Boolean); }; },

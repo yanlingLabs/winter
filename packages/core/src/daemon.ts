@@ -3049,9 +3049,14 @@ async function startDaemonInner(onEmbeddedHost: (host: { shutdown(budgetMs?: num
     ? createCoworkNativeWiring({ db: runtime.db, records: coworkRecords!, home: winterHome, secrets, ...opts.coworkNative, ...(nativeEnvironment ? { environment: nativeEnvironment } : {}) }) : undefined;
   const coworkNativePort = nativeEnvironment ? coworkNative : undefined;
   const baseCoworkHost = runtime ? (opts.coworkHost ?? createMacCoworkHost(winterHome, undefined, runtime.db, coworkNativePort)) : undefined;
-  const coworkHostPorts = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
+  const withNative = baseCoworkHost && coworkNativePort && !baseCoworkHost.native ? { ...baseCoworkHost, native: coworkNativePort } : baseCoworkHost;
+  // The provisioning port exists only where an environment was injected (production has none: the activation seam answers undefined), and only when the host has not got one.
+  const coworkProvisioning = withNative && coworkNativePort && !withNative.provisioning ? coworkNativePort.provisioningPort() : undefined;
+  const coworkHostPorts = coworkProvisioning ? { ...withNative!, provisioning: coworkProvisioning } : withNative;
   coworkService = runtime ? new CoworkWorkspaceService(coworkRecords!, coworkHostPorts!, opts.coworkScheduleNow, winterHome, { broker: approvalBroker, emit: (sessionId, event) => { hub.append(sessionId, event); } }) : undefined;
   // Boot steps are best effort: a throw here (a locked or damaged Cowork table) must neither abort startup nor, later, kill the process.
+  // The host that supplies the provisioning port drives the creations still pending (a crash between COMMIT and `provision`) once at boot. It never rejects.
+  if (coworkProvisioning) void coworkService?.resumeProvisioning();
   try { coworkService?.schedules.recover(); } catch (error) { console.error(`cowork: schedule recovery failed at boot (${describeCoworkBootError(error)}); continuing`); }
   try { coworkService?.schedules.tick(); } catch (error) { console.error(`cowork: schedule tick failed at boot (${describeCoworkBootError(error)}); continuing`); }
   // Boot-time reconcile (D1): record-and-refuse. Without an environment this only reads the records; with one it runs the host's own

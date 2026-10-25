@@ -551,6 +551,16 @@ targets:
         script: |
           set -euo pipefail
           "${SRCROOT}/../../scripts/embed-computer-helper.sh"
+      # N2 (Cowork native worker): the launcher and the VM worker, two nested tools the DAEMON spawns itself, at
+      # Contents/Helpers/WinterCowork. Release only (a Debug app embeds neither). The inputs are built by
+      # scripts/build-cowork-native.ts into dist/cowork-native (release.ts runs it first). The body (checks, per-binary signing
+      # with a STATED designated requirement, the pin manifest) is scripts/embed-cowork-native.sh, tested standalone by
+      # scripts/embed-cowork-native.test.ts. Shipping the pair activates nothing: the daemon still refuses Cowork sessions.
+      - name: Embed Cowork native
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          "${SRCROOT}/../../scripts/embed-cowork-native.sh"
       # Every configuration: Winter.app's own CEF runs from the Chromium inside this helper (Debug nests
       # "Winter Headless Dev.app" the same way, so Winter Dev exercises the Release layout every day).
       - name: Embed Winter Headless

@@ -1,6 +1,9 @@
 """Offline checks of native_build.py's pure parts and of ci-build.json. Builds nothing, downloads nothing, needs no network."""
-import calendar, json, shutil, subprocess, tempfile, time, unittest
+import calendar, json, shutil, subprocess, sys, tempfile, time, unittest
 from pathlib import Path
+
+# Under `python3 -I` neither the script's folder nor the working directory is on sys.path: the sibling modules one level up (image_build_report) are reached by an explicit insert.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import native_build as nb
 from test_kernel_pins import PINS, HERE, effective_config, parse_config
@@ -76,6 +79,42 @@ class CommandTests(unittest.TestCase):
         self.assertEqual(set(env) - set(PINS["environment"]), {"SOURCE_DATE_EPOCH", "KBUILD_BUILD_TIMESTAMP", "HOME"})
 
 
+class PathIndependenceTests(unittest.TestCase):
+    """The kernel must not carry the runner's work path: run 39471145301 differed from run 39406043639 only by the random work folder."""
+    WORK = "/runner-temp/winter-kernel-work"
+
+    def test_the_build_passes_file_debug_and_macro_prefix_maps_for_the_work_folder_to_c_and_assembly(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        for key in ("KCFLAGS", "KAFLAGS"):
+            self.assertEqual(env[key].split(), [f"-ffile-prefix-map={self.WORK}=.", f"-fdebug-prefix-map={self.WORK}=.", f"-fmacro-prefix-map={self.WORK}=."])
+
+    def test_the_identity_values_are_fixed_and_the_pinned_ones_are_unchanged(self):
+        env = nb.build_environment("/w/llvm/bin", self.WORK)
+        self.assertEqual((env["KBUILD_BUILD_USER"], env["KBUILD_BUILD_HOST"]), ("cowork-fixture", "isolated"))
+        self.assertEqual(env["KBUILD_BUILD_TIMESTAMP"], nb.CI["kbuildBuildTimestamp"])
+        self.assertEqual(env["SOURCE_DATE_EPOCH"], nb.CI["sourceDateEpoch"])
+        for key, value in PINS["environment"].items():
+            if key != "PATH":
+                self.assertEqual(env[key], value)
+
+    def test_the_build_function_hands_its_own_work_folder_to_the_environment(self):
+        import inspect
+        self.assertIn("build_environment(str(llvm_bin), work)", inspect.getsource(nb.build))
+
+    def test_the_workflow_builds_at_one_fixed_work_path(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work="$RUNNER_TEMP/winter-kernel-work"', text)
+
+    def test_the_two_kernel_builds_use_different_work_paths_and_must_still_agree_byte_for_byte(self):
+        text = (HERE.parents[2] / ".github/workflows/cowork-guest-image-build.yml").read_text()
+        self.assertIn('kernel_work_b="$RUNNER_TEMP/winter-kernel-work-b"', text)
+        self.assertIn('test "$kernel_work" != "$kernel_work_b"', text)
+        self.assertIn('--work "$kernel_work" --out "$IMAGE_WORK/kernel-1"', text)
+        self.assertIn('--work "$kernel_work_b" --out "$IMAGE_WORK/kernel-2"', text)
+        import image_build_report as ibr
+        self.assertIn("the two kernel builds differ", ibr.problems({"kernel": {"reproducible": False, "pinnedBefore": "0" * 64, "ImageSha256": "0" * 64}, "image": {"reproducible": True, "imageExitStatus": [0, 0], "pinsHold": {}}}))
+
+
 class CiBuildPinTests(unittest.TestCase):
     def test_the_open_environment_values_are_pinned_and_agree_with_each_other(self):
         ci = nb.CI
@@ -89,9 +128,9 @@ class CiBuildPinTests(unittest.TestCase):
         self.assertGreaterEqual(ci["jobs"], 1)
         self.assertEqual(ci["installedKernel"]["buildOutput"], "arch/arm64/boot/Image")
 
-    def test_the_recipe_stays_unbuilt_and_unverified_until_a_reviewed_run_fills_it(self):
-        self.assertEqual(PINS["status"], "pinned-unbuilt")
-        self.assertEqual(nb.CI["status"], "unrun")
+    def test_the_recipe_is_built_and_reproduced_once_and_still_unbooted(self):
+        self.assertEqual(PINS["status"], "built-reproduced-unbooted")
+        self.assertEqual(nb.CI["status"], "run-once-reproduced")
         self.assertFalse(PINS["bootVerified"])
 
     def test_the_host_packages_are_build_tools_only(self):
@@ -115,6 +154,13 @@ class FakeGpgTests(unittest.TestCase):
 
     def test_a_valid_signature_by_the_pinned_signer_with_exit_zero_passes(self):
         self.verify("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00 " + "B" * 40, 0, {"B" * 40})
+
+    def test_the_signing_key_matches_field_0_and_the_primary_only_field_9_never_another_field(self):
+        self.verify("[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00 " + "B" * 40, 0, {"A" * 40})
+        for line in ("[GNUPG:] VALIDSIG " + "A" * 40 + " " + "C" * 40 + " 1 0 4 0 22 8 00 " + "B" * 40,  # pinned value in a middle field
+                     "[GNUPG:] VALIDSIG " + "A" * 40 + " 2026-10-18 1 0 4 0 22 8 00"):  # no primary field at all, so the last field is not one
+            with self.assertRaises(ValueError):
+                self.verify(line, 0, {"C" * 40} if "C" in line else {"00"})
 
     def test_a_nonzero_exit_is_a_refusal_even_if_the_status_line_looks_valid(self):
         with self.assertRaises(ValueError) as caught:
@@ -216,16 +262,16 @@ class InputTests(unittest.TestCase):
                 nb.PINS[key].clear()
                 nb.PINS[key].update(value)
 
-    def test_signatures_are_verified_over_the_decompressed_tar_by_the_pinned_signers(self):
+    def test_both_signatures_are_verified_over_the_decompressed_tar_never_the_xz_by_the_pinned_signers(self):
         seen = []
         original = nb.gpg_verify
         nb.gpg_verify = lambda signature, data, key, fingerprints, gpg="gpg": seen.append((Path(signature).name, Path(data).name, Path(key).name, set(fingerprints)))
         try:
-            nb.verify_signatures("/d", Path("/w/linux-6.18.35.tar"))
+            nb.verify_signatures("/d", Path("/w/linux-6.18.35.tar"), Path("/w/llvm-20.1.8-aarch64.tar"))
         finally:
             nb.gpg_verify = original
         self.assertEqual(seen[0], ("linux-6.18.35.tar.sign", "linux-6.18.35.tar", "gregkh.key", {PINS["kernel"]["signerFingerprint"]}))
-        self.assertEqual(seen[1], ("llvm-20.1.8-aarch64.tar.sign", "llvm-20.1.8-aarch64.tar.xz", "nathan.key", {PINS["toolchain"]["signerFingerprint"], PINS["toolchain"]["primaryFingerprint"]}))
+        self.assertEqual(seen[1], ("llvm-20.1.8-aarch64.tar.sign", "llvm-20.1.8-aarch64.tar", "nathan.key", {PINS["toolchain"]["signerFingerprint"], PINS["toolchain"]["primaryFingerprint"]}))
 
 
 class DigestTests(unittest.TestCase):
@@ -282,6 +328,12 @@ class SignatureTests(unittest.TestCase):
     def test_another_signer_is_refused_even_though_the_signature_is_valid(self):
         with self.assertRaises(ValueError):
             nb.gpg_verify(self.signature, self.data, self.key, {"0" * 40})
+
+    def test_a_signature_over_the_tar_does_not_verify_over_its_xz_compression(self):
+        xz = Path(self.folder) / "data.xz"
+        xz.write_bytes(subprocess.run(["xz", "-c", str(self.data)], check=True, capture_output=True).stdout)
+        with self.assertRaises(ValueError):
+            nb.gpg_verify(self.signature, xz, self.key, {self.fingerprint})
 
     def test_changed_data_is_refused(self):
         other = Path(self.folder) / "other"

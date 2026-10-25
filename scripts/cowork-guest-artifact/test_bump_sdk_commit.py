@@ -8,6 +8,8 @@ import bump_sdk_commit as bump
 
 PINS_TEXT = bump.PINS.read_text()
 WORKFLOW_TEXT = bump.WORKFLOW.read_text()
+CLI_TEXT = bump.CLI.read_text()
+README_TEXT = bump.README.read_text()
 NEW = "a" * 40
 SUP = "b" * 64
 
@@ -55,6 +57,42 @@ class BumpTests(unittest.TestCase):
         again_pins, again_workflow = bump.bump(pins_text, workflow_text, "d" * 40, "e" * 64)
         self.assertEqual(json.loads(again_pins)["sdkCommit"], "d" * 40)
         self.assertEqual(re.findall(r"AGENT_SDK_HEAD: '([0-9a-f]{40})'", again_workflow), ["d" * 40])
+
+
+class NothingSdkDerivedIsLeftStale(unittest.TestCase):
+    LAUNCHER, OWNER = "1" * 64, "2" * 64
+
+    def full(self, pins_text=PINS_TEXT, workflow=WORKFLOW_TEXT, cli=CLI_TEXT, readme=README_TEXT, commit=NEW):
+        return bump.bump(pins_text, workflow, commit, SUP, self.LAUNCHER, self.OWNER, cli, readme)
+
+    def test_the_repository_has_no_stale_sdk_derived_pin(self):
+        self.assertEqual(bump.sdk_derived_problems(PINS_TEXT, WORKFLOW_TEXT, CLI_TEXT, README_TEXT), [])
+
+    def test_a_full_bump_moves_every_sdk_derived_pin_and_leaves_none_stale(self):
+        pins_text, workflow, cli, readme = self.full()
+        self.assertEqual(bump.sdk_derived_problems(pins_text, workflow, cli, readme), [])
+        pins, old = json.loads(pins_text), json.loads(PINS_TEXT)
+        self.assertEqual((pins["runtimeArtifacts"]["launcher"]["sourceSha256"], pins["runtimeArtifacts"]["ownerLibrary"]["sourceSha256"]), (self.LAUNCHER, self.OWNER))
+        self.assertEqual(json.loads(cli)["sdkCommit"], NEW)
+        self.assertEqual(json.loads(cli)["supervisorSha256"], SUP)
+        self.assertIn(f"SDK main at `{NEW[:8]}`", readme)
+        self.assertEqual(pins["packageLockSha256"], old["packageLockSha256"])             # the package lock comes from the Debian snapshot pins, not the SDK
+        self.assertEqual(pins["expectedArtifact"], old["expectedArtifact"])
+
+    def test_each_stale_leftover_is_detected(self):
+        pins_text, workflow, cli, readme = self.full()
+        stale = json.loads(PINS_TEXT)["sdkCommit"]
+        for label, args in (("cli", (pins_text, workflow, CLI_TEXT, readme)), ("readme", (pins_text, workflow, cli, README_TEXT)),
+                            ("workflow", (pins_text, WORKFLOW_TEXT, cli, readme)), ("pins", (PINS_TEXT, workflow, cli, readme))):
+            with self.subTest(label):
+                self.assertNotEqual(bump.sdk_derived_problems(*args), [])
+        self.assertNotIn(stale, pins_text)
+
+    def test_a_bump_without_the_cli_fixture_for_the_pinned_commit_is_refused(self):
+        with self.assertRaises(ValueError):
+            self.full(cli=CLI_TEXT.replace(json.loads(PINS_TEXT)["sdkCommit"], "9" * 40))
+        with self.assertRaises(ValueError):
+            self.full(readme="no commit named here")
 
 
 if __name__ == "__main__":

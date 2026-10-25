@@ -8,12 +8,12 @@ name: cowork-guest-image-build
 # The first steps refuse unless REVIEWED_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
 on:
   push:
-    branches: [cowork/guest-image-build]
+    branches: [cowork/guest-image-build-6]
 permissions:
   contents: read
 env:
   REVIEWED_HEAD: '0000000000000000000000000000000000000000'
-  AGENT_SDK_HEAD: '7e71929d0231be2d77645bfa47ee2b550f3add22'
+  AGENT_SDK_HEAD: 'ec91fe06719d76e99bcdbdae8a6daaf690dfeb50'
   BUILDER_HEAD: '180d3effd7ddbb9406aeea0912f76c78ef20cf75'
   BUN_ARCHIVE_URL: 'https://github.com/oven-sh/bun/releases/download/bun-v1.3.14/bun-linux-aarch64.zip'
   BUN_ARCHIVE_SHA256: 'a27ffb63a8310375836e0d6f668ae17fa8d8d18b88c37c821c65331973a19a3b'
@@ -35,7 +35,7 @@ env:
   LLVM_KEY_SHA256: 'dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8'
 jobs:
   build:
-    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build' && github.event.created == true && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build-6' && github.event.created == true && github.run_attempt == '1'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 210
     steps:
@@ -117,15 +117,17 @@ jobs:
         run: |
           set -euo pipefail
           pnpm install --frozen-lockfile --ignore-scripts
-      - name: Build the pinned kernel twice at the same paths
+      - name: Build the pinned kernel twice, under two different work paths that must give identical bytes
         shell: bash
         run: |
           set -euo pipefail
-          kernel_work="$IMAGE_WORK/kernel-work"
+          kernel_work="$RUNNER_TEMP/winter-kernel-work"
+          kernel_work_b="$RUNNER_TEMP/winter-kernel-work-b"
+          test "$kernel_work" != "$kernel_work_b"
           python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-1"
           rm -rf "$kernel_work"
-          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work" --out "$IMAGE_WORK/kernel-2"
-          rm -rf "$kernel_work"
+          python3 -I -S -B scripts/cowork-guest-artifact/kernel/native_build.py --downloads "$IMAGE_WORK/kernel-downloads" --work "$kernel_work_b" --out "$IMAGE_WORK/kernel-2"
+          rm -rf "$kernel_work_b"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: guest-kernel-${{ github.run_id }}

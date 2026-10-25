@@ -23,7 +23,7 @@ test("happy path: the set goes out once after mounted, bound to the plan, and ru
   expect(sets.length).toBe(1);
   expect(sets[0]).toMatchObject({ profile: "host-query-guided-v1", incarnationId: running.incarnationId });
   expect(sets[0]!.conversations.length).toBe(1);
-  expect(contexts).toEqual([{ workspaceId: h.workspaceId, incarnationId: running.incarnationId, leaseEpoch: running.leaseEpoch, guestBootId: "66666666-6666-4666-8666-666666666666" }]);
+  expect(contexts).toEqual([{ workspaceId: h.workspaceId, incarnationId: running.incarnationId, leaseEpoch: running.leaseEpoch, guestBootId: running.guestBootId }]);
   const order = h.events.filter(event => ["host:ready-sent", "host:conversations-sent", "host:runtime-ready"].includes(event));
   expect(order).toEqual(["host:ready-sent", "host:conversations-sent", "host:runtime-ready"]);
   expect(h.records.get(h.workspaceId).power).toBe("running");
@@ -83,7 +83,7 @@ test("a duplicate runtime_ready with a wrong sequence number is ignored but reco
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(false);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 9, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
   expect(h.host.duplicateReadySeqAnomaly(h.workspaceId)).toBe(true);
@@ -97,7 +97,7 @@ test("a duplicate runtime_ready that arrives after the start is counted in the u
   const running = await h.host.start(h.workspaceId);
   const set = h.launcher.last.conversationSets[0]!;
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(5);
-  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1 } } });
+  h.launcher.last.push({ t: "mux_up", frame: { class: "bootstrap", seq: 5, message: { t: "runtime_ready", operationId: set.operationId, nonce: set.nonce, conversations: 1, continuations: [] } } });
   await Bun.sleep(10);
   expect(h.host.nextBootstrapUpSequence(h.workspaceId)).toBe(6);
   expect(h.records.get(h.workspaceId).power).toBe("running");

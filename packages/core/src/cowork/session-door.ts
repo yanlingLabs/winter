@@ -27,7 +27,8 @@ import { CoworkError } from "./types";
  *   3. the session store row and its seq-1 `session_created`, created or found (`SessionStore.ensureCoworkSession`);
  *   4. the binding, created or found (`CoworkRepository.bindConversation`); then the reservation is marked bound.
  * A crash between any two steps leaves a state the next attempt of the same request resumes from, so a retry never mints a
- * second conversation. A DEFINITE bind refusal (nothing bound) withdraws the store row and then the reservation, so the
+ * second conversation. A standalone workspace's reservation that its request ABANDONS (no retry within
+ * `COWORK_STALE_RESERVATION_MS`, nothing bound) is withdrawn by the next authorized create, so the workspace is never held. A DEFINITE bind refusal (nothing bound) withdraws the store row and then the reservation, so the
  * request starts over cleanly. A race on one request resolves to one conversation: the body runs synchronously (no await,
  * so two creates in this process do not interleave), and even interleaved each step finds what the other wrote.
  */
@@ -92,7 +93,14 @@ export interface CoworkSessionDoorDeps extends CoworkSessionDriverDeps {
   principal(connection: CoworkConnection): CoworkPrincipal | undefined;
   /** The schedule service's view. Absent: the schedule caller is refused like any other unknown caller. */
   readonly schedules?: CoworkScheduleDispatchView;
+  /** How long a standalone workspace's pending reservation is left for its own request to resume before another
+   *  create may withdraw it (`COWORK_STALE_RESERVATION_MS` by default). Tests only pass a different value. */
+  readonly staleReservationMs?: number;
 }
+
+/** A pending reservation older than this is ABANDONED: a non-`CoworkError` throw in bind, or a crash after the store row,
+ *  whose request was never retried. Within it, only that same request resumes (any other answers `conversation_limit`). */
+export const COWORK_STALE_RESERVATION_MS = 10 * 60_000;
 
 const canonical = (value: unknown): string => JSON.stringify(value, (_key, item) => item && typeof item === "object" && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item);
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -124,6 +132,13 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
     return principal.id;
   };
 
+  /** Nothing bound: the store row first, THEN the reservation. The reverse order, interrupted, would leave a store row no
+   *  reservation admits, and every later create of a standalone workspace would then meet `taken` (`authority_denied`). */
+  const withdraw = (sessionId: string): void => {
+    store.withdrawCoworkSession(sessionId, id => records.conversationWorkspace(id) !== undefined);
+    records.withdrawReservation(sessionId);
+  };
+
   const create = (input: CoworkSessionCreateInput, caller: CoworkConnection): { sessionId: string } => {
     const route = deps.route;
     if (route === undefined || deps.native === undefined || deps.offer === undefined || deps.approvals === undefined) throw new CoworkError("provider_unavailable");
@@ -134,6 +149,12 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
       ? { kind: "outputs" } : { kind: "source", sourceId: input.location.sourceId, relativeCwd: relativeCoworkPath(input.location.relativeCwd ?? ".") };
     if (location.kind === "source" && !ID.test(location.sourceId)) throw new CoworkError("invalid_request");
     const requestDigest = createHash("sha256").update(canonical({ scope: input.scope, workspaceId: input.workspaceId, location })).digest("hex");
+
+    // 1b. A standalone workspace holds ONE conversation: a reservation its own request abandoned (pending past the window,
+    //     nothing bound) would hold it for good. Another authorized create withdraws it first, the store row THEN the
+    //     reservation, exactly as a definite refusal does (a crash between leaves a pending reservation, swept again).
+    const abandoned = records.abandonedReservation(input.workspaceId, { principalId, requestId: input.requestId }, Date.now() - (deps.staleReservationMs ?? COWORK_STALE_RESERVATION_MS));
+    if (abandoned !== undefined) withdraw(abandoned);
 
     // 2. Reserve (or find this request's reservation).
     const reservation = records.reserveConversation({ principalId, workspaceId: input.workspaceId, requestId: input.requestId, scope: input.scope, requestDigest }, sessionId => store.hasSession(sessionId));
@@ -168,7 +189,7 @@ export function createCoworkSessionDoor(deps: CoworkSessionDoorDeps): CoworkSess
       if (!bound) {
         // Definite: nothing bound. Withdraw the store row, THEN the reservation (a crash between leaves a pending
         // reservation, which the next attempt resumes).
-        if (error instanceof CoworkError) { store.withdrawCoworkSession(sessionId, () => records.conversationWorkspace(sessionId) !== undefined); records.withdrawReservation(sessionId); }
+        if (error instanceof CoworkError) withdraw(sessionId);
         throw error;
       }
     }

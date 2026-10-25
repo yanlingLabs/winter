@@ -398,6 +398,16 @@ jobs:
       - name: verify:runtime-state
         run: bun run verify:runtime-state
 
+      # N2 S7B: the Cowork native pair's packaging gate. Builds the real launcher (swift build, scratch path), embeds it with a stand-in worker into a
+      # scratch bundle (ad hoc), accepts it and proves seven refusals. Never runs either binary, never signs with a real identity.
+      - name: verify:cowork-native
+        run: bun run verify:cowork-native
+
+      # N2 S7B: the Cowork channel's receiver thread must start in the COMPILED daemon (a third compile:core entrypoint). Compiles winter-core and runs a temp copy's
+      # probe on a socketpair; touches no home, Keychain, daemon or launcher.
+      - name: verify:fd-receiver
+        run: bun run verify:fd-receiver
+
       # WS-23 (fix round 1, minor 6): the vendored ant, pinned and checksum-verified by fetch-ant
       # itself, so verify:runtimes exercises ant's bundle rung and its record's SHA against the pin
       # rather than skipping them.
@@ -457,7 +467,7 @@ jobs:
           python3 -I -B -c "
           import json
           d = json.load(open('$RUNNER_TEMP/prepare.json'))
-          assert d['fullSourceDiffSha256'] == '3826aa68ee08b23ed046f8ec5a8df7f6271969747364dd63b0bd12f27013ec01', d
+          assert d['fullSourceDiffSha256'] == '7ec7dd847bc09373d02ffe23894ca9f6ddebf2c992f8dbd2f251127823be5f24', d
           print('composed hash ok', d['fullSourceDiffSha256'])"
 
       - name: Guard tests (including the composition test)

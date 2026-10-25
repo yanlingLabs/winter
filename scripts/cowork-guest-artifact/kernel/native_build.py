@@ -94,12 +94,20 @@ def rewrite_command(command, source, output, llvm_bin, jobs):
     return out
 
 
-def build_environment(llvm_bin):
+def path_independence_flags(work):
+    """Compiler flags that map the whole work folder (source, output and compiler live under it) to `.` in file names, debug information and macros, so the kernel does not carry the runner's path. The work folder is also a fixed path in the workflow (belt and braces)."""
+    work = str(work)
+    return " ".join(f"{flag}={work}=." for flag in ("-ffile-prefix-map", "-fdebug-prefix-map", "-fmacro-prefix-map"))
+
+
+def build_environment(llvm_bin, work=None):
     env = dict(PINS["environment"])
     env["PATH"] = f"{llvm_bin}:/usr/bin:/bin"
     env["SOURCE_DATE_EPOCH"] = CI["sourceDateEpoch"]
     env["KBUILD_BUILD_TIMESTAMP"] = CI["kbuildBuildTimestamp"]
     env["HOME"] = env.get("HOME", "/nonexistent")
+    if work is not None:
+        env["KCFLAGS"] = env["KAFLAGS"] = path_independence_flags(work)
     return env
 
 
@@ -115,7 +123,8 @@ def gpg_verify(signature, data, public_key, fingerprints, gpg="gpg"):
     for line in result.stdout.splitlines():
         if line.startswith("[GNUPG:] VALIDSIG "):
             fields = line.split()[2:]
-            if fields and (fields[0] in fingerprints or fields[-1] in fingerprints):
+            # VALIDSIG <signing-key fpr> <date> <ts> <expire> <ver> <res> <pk-algo> <hash-algo> <class> <primary fpr>: the signing key is field 0, the primary field 9.
+            if len(fields) > 9 and (fields[0] in fingerprints or fields[9] in fingerprints):
                 return
     raise ValueError("signature is valid but not by the pinned signer")
 
@@ -139,11 +148,11 @@ def check_inputs(downloads):
     check_pinned_file(HERE / PINS["fragment"]["file"], PINS["fragment"]["sha256"])
 
 
-def verify_signatures(downloads, kernel_tar):
-    """The kernel signature is over the DECOMPRESSED tar; the compiler's is over the archive as downloaded."""
+def verify_signatures(downloads, kernel_tar, toolchain_tar):
+    """Both signatures are over the DECOMPRESSED tar (kernel.org signs the .tar, not the .tar.xz; run 39323466135 showed the xz stream does not verify)."""
     downloads = Path(downloads)
     gpg_verify(downloads / ARCHIVES["kernel"][1], kernel_tar, downloads / ARCHIVES["kernel"][2], {PINS["kernel"]["signerFingerprint"]})
-    gpg_verify(downloads / ARCHIVES["toolchain"][1], downloads / ARCHIVES["toolchain"][0], downloads / ARCHIVES["toolchain"][2],
+    gpg_verify(downloads / ARCHIVES["toolchain"][1], toolchain_tar, downloads / ARCHIVES["toolchain"][2],
                {PINS["toolchain"]["signerFingerprint"], PINS["toolchain"]["primaryFingerprint"]})
 
 
@@ -163,22 +172,24 @@ def build(downloads, work, out):
     check_inputs(downloads)
     work.mkdir(parents=True)
     out.mkdir(parents=True)
-    tar = work / "linux-6.18.35.tar"
-    with open(tar, "wb") as handle:
-        subprocess.run(["xz", "-dc", str(downloads / ARCHIVES["kernel"][0])], check=True, stdout=handle)
-    verify_signatures(downloads, tar)
+    tar, llvm_tar = work / "linux-6.18.35.tar", work / "llvm-20.1.8-aarch64.tar"
+    for target, key in ((tar, "kernel"), (llvm_tar, "toolchain")):
+        with open(target, "wb") as handle:
+            subprocess.run(["xz", "-dc", str(downloads / ARCHIVES[key][0])], check=True, stdout=handle)
+    verify_signatures(downloads, tar, llvm_tar)
     source_root, llvm_root, output = work / "src", work / "llvm", work / "output"
     for folder in (source_root, llvm_root, output):
         folder.mkdir()
     subprocess.run(["tar", "-xf", str(tar), "-C", str(source_root)], check=True)
     tar.unlink()
-    subprocess.run(["tar", "-xJf", str(downloads / ARCHIVES["toolchain"][0]), "-C", str(llvm_root)], check=True)
+    subprocess.run(["tar", "-xf", str(llvm_tar), "-C", str(llvm_root)], check=True)
+    llvm_tar.unlink()
     source = source_root / "linux-6.18.35"
     llvm_bin = llvm_root / "llvm-20.1.8-aarch64" / "bin"
     if not source.is_dir() or not (llvm_bin / "clang").is_file():
         raise ValueError("unexpected archive layout")
     (output / ".config").write_text(merge_config((HERE / PINS["baseConfig"]["file"]).read_text(), (HERE / PINS["fragment"]["file"]).read_text()))
-    env = build_environment(str(llvm_bin))
+    env = build_environment(str(llvm_bin), work)
     commands = [rewrite_command(command, source, output, llvm_bin, CI["jobs"]) for command in PINS["commands"]]
     with open(out / "build.log", "w") as log:
         resolve_and_build(commands, source, output, env, log)

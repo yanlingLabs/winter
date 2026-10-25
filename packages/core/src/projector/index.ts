@@ -535,6 +535,21 @@ class ProjectorImpl implements Projector {
       ]);
     }
 
+    // #92 4.5: `system/host_input_committed {inputId, outcome}` -- a peer's message (held, acknowledged, then committed by the
+    // host) joined this Cowork conversation. The rendered text is the runtime's own transcript entry; this is the
+    // user-visible record that it arrived and how, as a `continuity_warning` (no protocol change). Keyed by the input id,
+    // so a replay and a re-sent commit (`already`) append it once.
+    if (kindOf(msg) === "system/host_input_committed") {
+      const m = msg as Record<string, unknown>;
+      const inputId = typeof m.inputId === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/.test(m.inputId) ? m.inputId : "";
+      const how = m.outcome === "folded" ? "into the turn that was running" : m.outcome === "queued" ? "behind the turn that was running" : m.outcome === "started" ? "as a new turn" : "";
+      if (inputId.length === 0 || how.length === 0) { this.logSkipped(msg); return EMPTY_BATCH(); }
+      const threadId = threadIdOf(m as { parent_tool_use_id?: string | null });
+      return claim(`hi:${inputId}`, () => [
+        { type: "continuity_warning", sessionId: this.deps.sessionId, threadId, warning: "peer_message_committed", text: `A message from another session in this project was added to the conversation ${how}.` },
+      ]);
+    }
+
     // 2026-10-07: a COMPACTION is something Winter did to the conversation, so the user sees it as a
     // `continuity_warning` -- the variant's own contract ("what Winter did to it"; an open `warning`
     // kind a client renders by its `text`, no table), so every client shows it with no protocol change.

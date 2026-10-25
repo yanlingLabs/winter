@@ -379,11 +379,18 @@ def build_guest(zig,out,pins):
     receipt=json.loads((out/'receipt.json').read_text());pinned=pins['guest']
     for name,entry in pinned['programs'].items():
         built=receipt['programs'][name]
-        if built['binarySha256']!=entry['binarySha256']:raise ValueError('guest program '+name+' is not the pinned build')
+        if 'binarySha256' not in entry:raise ValueError('guest program '+name+' has no binarySha256 key in pins.json (null means unpinned; a missing key is an error)')
+        # An explicit null is an UNPINNED binary (guest_binary_problems reports the built digest and the build ends at exit 3); a pin that is set must be exactly the built one, as ever.
+        if entry['binarySha256'] is not None and built['binarySha256']!=entry['binarySha256']:raise ValueError('guest program '+name+' is not the pinned build')
         if built['sourceSha256']!=entry['sourceSha256']:raise ValueError('guest program '+name+' source drifted from the pin')
     for name,entry in pinned['scripts'].items():
         if receipt['scripts'][name]['sha256']!=entry['sha256']:raise ValueError('guest script '+name+' is not the pinned one')
     return {name:(out/name).read_bytes() for name in pinned['programs']},{name:(GUEST/path).read_bytes() for name,path in pinned['scriptPaths'].items()},receipt
+
+def guest_binary_problems(receipt,pins):
+    """UNPINNED entries for the guest programs whose pins.json binarySha256 is an explicit null, each with the digest this build produced (build_guest has already refused every
+    non-null pin that differs and every missing key). Empty when all are pinned."""
+    return ['guest program '+name+' binarySha256 is not pinned (built '+receipt['programs'][name]['binarySha256']+')' for name,entry in pins['guest']['programs'].items() if entry['binarySha256'] is None]
 
 def source_snapshot(sdk,commit,destination):
     actual=subprocess.check_output(['git','-C',str(sdk),'rev-parse',commit],text=True).strip()
@@ -417,7 +424,10 @@ def main():
     if subprocess.check_output([str(zig),'version'],text=True).strip()!=pins['zig']['version']: raise ValueError('Zig version')
     if sha(args.bun_base.read_bytes())!=pins['bun']['executableSha256']: raise ValueError('Bun base')
     tree=Tree();lock_bytes=(out.parent/'packages.lock.json').read_bytes()
-    if sha(lock_bytes)!=pins['packageLockSha256']:raise ValueError('unpinned package lock')
+    lock_sha=sha(lock_bytes)
+    # A package lock that is not the pinned one does not stop the build: the build finishes, publishes the lock and its digest, and exits 3 UNPINNED below, so ONE run reports every stale pin.
+    # Every package is still checked against its own SHA-256 from the lock, and an unpinned result is never accepted (verify.py needs --allow-unpinned, the workflow's assert step stays red).
+    lock_problems=[] if lock_sha==pins['packageLockSha256'] else ['packageLockSha256 is '+lock_sha+', not the pinned '+str(pins['packageLockSha256'])]
     lock=json.loads(lock_bytes)
     hardlinks=sum(add_deb(tree,entry,out.parent/'downloads'/(entry['SHA256']+'.deb')) for entry in lock['packages'])
     # The reviewed supervisor treats its environment root as protected. Using '/' would reject
@@ -426,6 +436,7 @@ def main():
     package_tree=tree;tree=Tree();base='opt/winter/environment/base'
     for name,node in sorted(package_tree.nodes.items()):
         for origin in node['origins']:tree.add(base+'/'+name,node['kind'],node['data'],node['mode']==0o555 and node['kind']=='file',origin)
+    # (the top-level `etc` becomes a symlink to opt/winter/environment/base/etc: a literal etc/... cpio member would be written THROUGH that symlink, which is why verify.py refuses an etc/gitconfig entry)
     for name in ['bin','lib','lib64','sbin','usr','etc']:
         if base+'/'+name in tree.nodes:tree.add(name,'symlink',(base+'/'+name).encode(),origin='derived:immutable-environment-root-alias')
     env=os.environ.copy();env['BUN_MAX_THREADS']='2'
@@ -466,12 +477,20 @@ def main():
     if not certificates: raise ValueError('CA provenance missing')
     tree.add(base+'/etc/ssl/certs/ca-certificates.crt','file',b''.join(certificates),origin='derived:verified-mozilla-package-certificates')
     if base+'/bin/sh' not in tree.nodes:tree.add(base+'/bin/sh','symlink',b'dash',origin='derived:explicit-dash-shell')
+    # The environment's fixed system gitconfig (agent-sdk SH6b mounts it read-only at /etc/gitconfig for the process worker) and the empty directory its init.templateDir names:
+    # safe defaults only (verify.check_gitconfig_text), the pinned bytes of a file kept beside this script, never derived from anything at build time.
+    gitconfig=(HERE/'environment'/'gitconfig').read_bytes()
+    verify.check_gitconfig_text(gitconfig)
+    if sha(gitconfig)!=pins['environment']['gitconfigSha256']:raise ValueError('environment/gitconfig does not match the pinned environment.gitconfigSha256')
+    tree.add(verify.ENVIRONMENT_GITCONFIG_PATH.lstrip('/'),'file',gitconfig,False,'pinned:scripts/cowork-guest-artifact/environment/gitconfig')
+    tree.add(verify.GIT_TEMPLATE_DIRECTORY.lstrip('/'),'directory',origin='derived:empty-git-template-directory')
     for path in ['opt/winter','workspace','proc','dev','sys','run','tmp']:tree.add(path,'directory')
-    check_startup(tree,pins['guest']['programs']['init']['binarySha256'])
+    check_startup(tree,pins['guest']['programs']['init']['binarySha256'] or sha(programs['init']))   # (a null pin: the init of the tree is still exactly the one just built, and it is the only startup program)
     records=verify_elfs(tree)
     refuse_blkid(tree)
     refuse_provider_bridge(tree)
     verify.check_runtime_artifacts(tree_files(tree),tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data'])
+    verify.check_environment_gitconfig(tree_files(tree),pins['environment']['gitconfigSha256'])
     required=REQUIRED_PROGRAMS
     for path in required:
         target,node=tree.resolve(path)
@@ -481,15 +500,17 @@ def main():
     tree.materialize(out/'root');tree.cpio(out/'immutable-root.cpio')
     manifest=tree.manifest();(out/'root.manifest.json').write_text(json.dumps(manifest,sort_keys=True,indent=2)+'\n');(out/'elf-dependencies.json').write_text(json.dumps(records,sort_keys=True,indent=2)+'\n')
     receipt={'formatVersion':1,'sdkSourceCommit':pins['sdkCommit'],'builderCommit':pins['builderCommit'],'builderSha256':sha((builder/'scripts/build-runtime.ts').read_bytes()),'sourceHelpers':helper_receipts,'sharedCompartmentHeaderSha256':sha((helper_dir/'linux-compartment.h').read_bytes()),'supervisorSourceSha256':sha(supervisor.read_bytes()),'runtimeSha256':sha(runtime.read_bytes()),'rootManifestSha256':sha((out/'root.manifest.json').read_bytes()),'cpioSha256':sha((out/'immutable-root.cpio').read_bytes()),'cpioBytes':(out/'immutable-root.cpio').stat().st_size,'inputHardlinksMaterializedAsIndependentFiles':hardlinks,'elfCount':len(records),'toolEnvironmentRoot':'/'+base,'isolatedPythonInvocation':['/usr/bin/python3','-I','-S','-B','/opt/winter/libexec/linux-supervisor.py'],'packageLockSha256':sha((out.parent/'packages.lock.json').read_bytes()),'guestExecutionVerified':False,'initPresent':True,'initSha256':sha(programs['init']),'relaySha256':sha(programs['winter-guest-relay']),'guest':{'programs':guest_receipt['programs'],'scripts':guest_receipt['scripts'],'zig':guest_receipt['zig']},'toolDevices':tool_devices,'supervisorBaseSha256':sha(supervisor_base_config(helper_digests)+b'\n'),'hostQuery':{'entry':HOST_QUERY_ENTRY,'executablePath':verify.RUNTIME_ARTIFACT_PATHS['executable'],'artifacts':{key:{'path':verify.RUNTIME_ARTIFACT_PATHS[key],'sha256':digest} for key,digest in runtime_digests.items()},'runtimeArtifactsSha256':sha(tree.nodes[verify.RUNTIME_ARTIFACTS_PATH]['data']),'secondPassIdentical':True,'providerBridge':False,'guidedProfile':False},'vmAdmitted':False}
-    problems=check_expected(receipt,pins['expectedArtifact'])
-    if pins['expectedArtifact'] is not None and problems:raise ValueError('; '.join(problems))
+    problems=check_expected(receipt,pins['expectedArtifact'])+lock_problems+guest_binary_problems(guest_receipt,pins)
+    receipt['packageLockSha256']=lock_sha
+    receipt['environment']={'gitconfigPath':'/etc/gitconfig','gitconfigSha256':sha(gitconfig)}
+    (out/'packages.lock.json').write_bytes(lock_bytes)
     receipt['reproducibilityPinned']=not problems
     (out/'receipt.json').write_text(json.dumps(receipt,sort_keys=True,indent=2)+'\n')
     from metrics import finish
     finish(out)
     print((out/'receipt.json').read_text(),flush=True)
     if problems:
-        # The re-pin changed the SDK source, so the old digests no longer apply. Every output is written; the build still ends
-        # non-zero until a reviewer copies the receipt values into pins.json, so an unpinned artifact is never mistaken for a pinned one.
+        # A pin is stale (a re-pin changed the SDK source, or the package lock or a digest differs). Every output is written, stale or reproducibility-mismatched digests included; the build still ends
+        # non-zero (3) until a reviewer copies the receipt values into pins.json, so an unpinned artifact is never mistaken for a pinned one.
         print('UNPINNED: '+'; '.join(problems),file=sys.stderr);raise SystemExit(3)
 if __name__=='__main__':main()

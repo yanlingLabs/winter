@@ -127,7 +127,10 @@ int wmx_is_nonce(const char *text); /* exactly 32 chars of [a-f0-9] */
  * An empty data section is valid only with the end flag. Direction decides which streams may travel. */
 #define WMX_RUNTIME_PREFIX_BYTES 4u
 #define WMX_RUNTIME_CONVERSATIONS 16u
-enum wmx_stream { WMX_STREAM_IN = 1, WMX_STREAM_OUT = 2, WMX_STREAM_ERR = 3 };
+/* FILE_IN (4, host to guest) and FILE_OUT (5, guest to host) are the guest file channel (contract revision 3, section 6.2): conversation 0 only, and recognised
+ * only when the program is built with WG_FILE_CHANNEL_V1, i.e. for an image that declares the runtime capability `file-channel-v1`. Without it stream 4 and above are
+ * BAD_FIELD, as in a revision-2 guest (which "refuses stream 4 and ends its stream"). */
+enum wmx_stream { WMX_STREAM_IN = 1, WMX_STREAM_OUT = 2, WMX_STREAM_ERR = 3, WMX_STREAM_FILE_IN = 4, WMX_STREAM_FILE_OUT = 5 };
 struct wmx_runtime_prefix {
     unsigned conversation;
     enum wmx_stream stream;

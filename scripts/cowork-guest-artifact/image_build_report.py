@@ -37,14 +37,17 @@ def image_summary(folder):
     folder = Path(folder)
     receipt = read_json(folder / "receipt.json")
     return {"cpioSha256": sha256_file(folder / "immutable-root.cpio"), "cpioBytes": (folder / "immutable-root.cpio").stat().st_size,
-            "rootManifestSha256": sha256_file(folder / "root.manifest.json"), "runtimeSha256": receipt["runtimeSha256"], "initSha256": receipt["initSha256"],
+            "rootManifestSha256": sha256_file(folder / "root.manifest.json"), "runtimeSha256": receipt["runtimeSha256"], "initSha256": receipt["initSha256"], "relaySha256": receipt["relaySha256"], "packageLockSha256": receipt.get("packageLockSha256"),
+            # the guest binaries are pinned only when pins.json holds a digest and it is the one this build produced (a null pin, or a stale one, is false): the post-build pin step reads both digests here
+            "initPinned": PINS["guest"]["programs"]["init"]["binarySha256"] == receipt["initSha256"], "relayPinned": PINS["guest"]["programs"]["winter-guest-relay"]["binarySha256"] == receipt["relaySha256"],
             "reproducibilityPinned": receipt.get("reproducibilityPinned")}
 
 
 def report(kernel_1, kernel_2, image_1, image_2, status_1, status_2):
     k1, k2, i1, i2 = kernel_summary(kernel_1), kernel_summary(kernel_2), image_summary(image_1), image_summary(image_2)
     expected = PINS["expectedArtifact"]
-    pins_hold = {"cpioSha256": i1["cpioSha256"] == expected["cpioSha256"], "rootManifestSha256": i1["rootManifestSha256"] == expected["rootManifestSha256"], "runtimeSha256": i1["runtimeSha256"] == expected["runtimeSha256"]}
+    pins_hold = {"cpioSha256": i1["cpioSha256"] == expected["cpioSha256"], "rootManifestSha256": i1["rootManifestSha256"] == expected["rootManifestSha256"], "runtimeSha256": i1["runtimeSha256"] == expected["runtimeSha256"],
+                 "packageLockSha256": i1["packageLockSha256"] == PINS["packageLockSha256"]}
     return {
         "formatVersion": 1,
         "kernel": {**k1, "reproducible": k1 == k2, "pinnedBefore": KERNEL_PINS["expectedOutputs"]["Image"], "bootVerified": False},
@@ -59,16 +62,24 @@ def problems(digests):
     out = []
     if not digests["kernel"]["reproducible"]:
         out.append("the two kernel builds differ")
+    pinned_kernel = digests["kernel"]["pinnedBefore"]
+    if pinned_kernel is None:
+        out.append("the kernel Image is not pinned yet (kernel/pins.json expectedOutputs.Image)")
+    elif pinned_kernel != digests["kernel"]["ImageSha256"]:
+        out.append("the built kernel is not the pinned kernel (kernel/pins.json expectedOutputs.Image)")
     if not digests["image"]["reproducible"]:
         out.append("the two image builds differ")
     if digests["image"]["imageExitStatus"] != [0, 0]:
         out.append(f"image.py exited {digests['image']['imageExitStatus']} (3 means a built digest differs from pins.json)")
+    for name, key, pinned in (("init", "initSha256", "initPinned"), ("winter-guest-relay", "relaySha256", "relayPinned")):
+        if digests["image"].get(pinned) is False:
+            out.append(f"pins.json guest.programs.{name}.binarySha256 is null or does not hold (digests.json image.{key} is what this build produced)")
     out += [f"pins.json {name} does not hold" for name, held in digests["image"]["pinsHold"].items() if not held]
     return out
 
 
 PUBLISH = [("kernel", "Image", "kernel"), ("kernel", "resolved.config", "resolved.config"), ("kernel", "kernel-receipt.json", "kernel-receipt.json"),
-           ("image", "immutable-root.cpio", "initramfs.cpio"), ("image", "receipt.json", "receipt.json"), ("image", "root.manifest.json", "root.manifest.json"),
+           ("image", "immutable-root.cpio", "initramfs.cpio"), ("image", "receipt.json", "receipt.json"), ("image", "root.manifest.json", "root.manifest.json"), ("image", "packages.lock.json", "packages.lock.json"),
            ("image", "elf-dependencies.json", "elf-dependencies.json"), ("image", "size-breakdown.json", "size-breakdown.json"), ("image", "cpio-verification.json", "cpio-verification.json")]
 
 

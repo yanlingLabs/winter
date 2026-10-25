@@ -36,8 +36,9 @@ FORBIDDEN_PATH = re.compile(rb'(/Users/|/private/|/var/folders/|/Volumes/|/home/
 # The fixture-only block trace and reclaim rows. Present in the oracle archive, absent from production.
 TRACE_ROWS = [b'block_request_capture', b'block_owned_io_begin', b'block_owned_io_end', b'block_owned_completion_hold', b'block_used_ack', b'block_ring_pin', b'block_freeze_pin', b'block_trace_overflow',
               b'reclaim_failure', b'reclaim_parked', b'reclaim_disposition', b'reclaim_resumed', b'reclaim_unmap', b'reclaim_replace', b'reclaim_map', b'reclaim_exclusion', b'reclaim_used_ack']
-PRODUCTION_EXPORTS = ['_krun_cowork_create_runtime_port_v1', '_krun_cowork_enable_profile_v1', '_krun_cowork_get_flush_counters_v1', '_krun_cowork_get_pin_counters_v1',
-                      '_krun_cowork_set_exit_hook_v1', '_krun_cowork_set_workspace_disks_v1', '_krun_cowork_validate_profile_v1']
+PRODUCTION_EXPORTS = ['_krun_cowork_add_share_v1', '_krun_cowork_create_runtime_port_v1', '_krun_cowork_enable_profile_v1', '_krun_cowork_get_flush_counters_v1',
+                      '_krun_cowork_get_pin_counters_v1', '_krun_cowork_next_share_event_v1', '_krun_cowork_revoke_share_v1', '_krun_cowork_set_exit_hook_v1',
+                      '_krun_cowork_set_workspace_disks_v1', '_krun_cowork_validate_profile_v1']
 FIXTURE_EXPORTS = ['_krun_create_cowork_bootstrap_stream', '_krun_create_cowork_runtime_stream', '_krun_enable_cowork_block_fixture_reclaim', '_krun_enable_cowork_fixture_reclaim', '_krun_enable_cowork_runtime_port_fixture_trace', '_krun_set_cowork_bootstrap_stream', '_krun_set_cowork_workspace_disks']
 
 

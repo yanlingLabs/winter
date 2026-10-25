@@ -12,6 +12,7 @@ import { CoworkNativePower } from "../../../src/cowork/native/power";
 import { CoworkNativeRecovery, type CoworkNativeDurableReceiptPort, type CoworkNativeOwnerRecoverPort } from "../../../src/cowork/native/recovery";
 import { coworkNativeLedgerStopProbe, CoworkNativeStopRegistry, type CoworkNativeHostBoot, type CoworkNativeLaunchEntry, type CoworkNativeLaunchJournalPort, type CoworkNativeRecoverGuards, type CoworkNativeRecoverSubject } from "../../../src/cowork/native/stop-proof";
 import { openRuntimeStateDb, type RuntimeStateDb } from "../../../src/runtime-state/db";
+import { CoworkGuestRecords } from "../../../src/cowork/host-env/guest-records";
 import { guidedSet } from "./conversation-fixtures";
 import { FakeLauncher, type FakeBehavior } from "./fake-launcher";
 
@@ -31,10 +32,13 @@ export interface HarnessOptions {
   readonly conversations?: CoworkNativeHostDeps["conversations"];
   /** Runs at every host checkpoint, before a crash is raised: lets a test change the world between two steps of a start. */
   readonly onCheckpoint?: (phase: string, harness: Harness) => void;
+  /** The host's outputs preparer and share-directory opener (absent by default). The guest records are the real SQL over the harness database unless `false`. */
+  readonly outputs?: CoworkNativeHostDeps["outputs"]; readonly shareDirectories?: CoworkNativeHostDeps["shareDirectories"]; readonly guestRecords?: false;
 }
 export interface Harness {
   readonly root: string; readonly home: string; readonly workspaceId: string; readonly homeId: string;
   db: RuntimeStateDb; records: CoworkRepository; volumes: CoworkVolumes; ledger: CoworkAdmissionLedger; authority: CoworkNativeAuthority; registry: CoworkNativeStopRegistry;
+  guestRecords: CoworkGuestRecords | null;
   power: CoworkNativePower; recovery: CoworkNativeRecovery; host: CoworkNativeHost; launcher: FakeLauncher; deps: CoworkNativeHostDeps;
   hostBoot: CoworkNativeHostBoot & { current: string; ended: boolean };
   receipts: Map<string, string>; ownerRecoverAttestation: { value: unknown };
@@ -142,13 +146,15 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     const ownerRecover: CoworkNativeOwnerRecoverPort = { confirm: () => ownerRecoverAttestation.value as never };
     const recoveryGuards: CoworkNativeRecoverGuards = { processAbsent: subject => { guards.seen.push(subject); return guards.processAbsent; }, imagesUnlocked: () => guards.imagesUnlocked };
     const checkpoint = (phase: string) => { events.push(`host:${phase}`); options.onCheckpoint?.(phase, harness); if (crashAt === phase) throw new CoworkNativeSimulatedCrash(phase); };
-    harness.recovery = new CoworkNativeRecovery({ receiptKey: () => RECEIPT_KEY, records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint });
+    const guestRecordsNow = new CoworkGuestRecords(db);
+    harness.guestRecords = options.guestRecords === false ? null : guestRecordsNow;
+    harness.recovery = new CoworkNativeRecovery({ receiptKey: () => RECEIPT_KEY, records: harness.records, volumes: harness.volumes, admission: harness.ledger, power: harness.power, registry: harness.registry, hostBoot, receipts: durable, ownerRecover, guards: recoveryGuards, journal: journalPort, now: () => clock.now, checkpoint, ...(options.guestRecords === false ? {} : { guestRecords: guestRecordsNow }) });
     harness.launcher = new FakeLauncher({ behavior: boot.behavior ?? {}, homeId, hostBootId: () => hostBoot.current, receipts, events });
     harness.daemon = daemon;
     const deps: CoworkNativeHostDeps = {
       records: harness.records, volumes: harness.volumes, admission: harness.ledger, authority: harness.authority, power: harness.power, recovery: harness.recovery, registry: harness.registry, hostBoot,
       launcher: harness.launcher, images: { runtimeImageDigest: () => IMAGE_DIGEST }, receiptKey: () => RECEIPT_KEY, daemon: () => daemon, journal: journalPort, timers, timeouts: { begunMs: 400, volumesMs: 400, guestHelloMs: 400, receiptMs: 400, mountedMs: 400, runtimeReadyMs: 400, stopGraceMs: 150, exitAllowanceMs: 0, drainBudgetMs: 150, ...boot.timeouts },
-      conversations: "conversations" in options ? options.conversations : guidedSet, unsafeTestTimeouts: true, now: () => clock.now, checkpoint, mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
+      conversations: "conversations" in options ? options.conversations : guidedSet, unsafeTestTimeouts: true, now: () => clock.now, checkpoint, ...(options.guestRecords === false ? {} : { guestRecords: guestRecordsNow }), ...(options.outputs ? { outputs: options.outputs } : {}), ...(options.shareDirectories ? { shareDirectories: options.shareDirectories } : {}), mint: { suffix: () => sequence.toString(16).padStart(8, "0") },
     };
     harness.deps = deps;
     harness.host = new CoworkNativeHost(deps);

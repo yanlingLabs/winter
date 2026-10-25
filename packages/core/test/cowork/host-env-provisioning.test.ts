@@ -6,7 +6,9 @@ import { COWORK_CONFINED_POSTURE_CAPABILITY, coworkAllocateAuthority, coworkGues
 import { CoworkRepository } from "../../src/cowork/repository";
 import { openRuntimeStateDb } from "../../src/runtime-state/db";
 import { RAW_VOLUME_MIN_BYTES } from "../../src/cowork/volumes";
-import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { CoworkGuestRecords } from "../../src/cowork/host-env/guest-records";
+import type { CoworkProvisioningPort } from "../../src/cowork/session-ports";
 import { tmpdir } from "node:os";
 import type { CoworkVolumeBackup } from "../../src/cowork/volume-backup";
 
@@ -77,5 +79,31 @@ describe("the provisioning port", () => {
     const wrong = createCoworkProvisioningPort({ db: f.db, home: f.home, backup, environmentActive: () => true, image: () => ({ ...IMAGE, runtimeImageDigest: "e".repeat(64) }), pin: (id, digests) => f.pins.pin(id, digests, {}), capacities: { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES } });
     f.pins.pin(f.workspaceId, { baseImageDigest: IMAGE.baseImageDigest, runtimeImageDigest: IMAGE.runtimeImageDigest }, {});
     expect((await wrong.provision(f.workspaceId, "op-2")).status).toBe("failed");
+  });
+  test("it is the session door's port, and provision makes the shared directories and keeps the data volume's uuid once", async () => {
+    const f = fixture();
+    const records = new CoworkGuestRecords(f.db);
+    const port: CoworkProvisioningPort = createCoworkProvisioningPort({ db: f.db, home: f.home, backup, environmentActive: () => true, image: () => IMAGE, pin: (id, digests) => f.pins.pin(id, digests, {}), guestRecords: records, capacities: { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES } });
+    expect(await port.provision(f.workspaceId, "op-1")).toEqual({ status: "applied" });
+    const shared = join(f.home, "cowork", "workspaces", f.workspaceId, "shared");
+    for (const name of ["guidance", "memory", "outputs"]) { const info = lstatSync(join(shared, name)); expect(info.isDirectory() && !info.isSymbolicLink()).toBe(true); expect(info.mode & 0o777).toBe(0o700); }
+    const data = f.db.db.query<{ filesystem_uuid: string }, [string]>("SELECT filesystem_uuid FROM cowork_volumes WHERE workspace_id=? AND purpose='data'").get(f.workspaceId)!;
+    expect(records.storeVolumeUuid(f.workspaceId)).toBe(data.filesystem_uuid);
+    expect(await port.provision(f.workspaceId, "op-1")).toEqual({ status: "applied" }); // idempotent
+  });
+  test("a recorded uuid that is not the data volume's, or a shared directory that is a symlink, fails the provisioning with a code and pins nothing", async () => {
+    const f = fixture();
+    const records = new CoworkGuestRecords(f.db);
+    f.db.db.run("UPDATE cowork_workspaces SET store_volume_uuid=? WHERE workspace_id=?", ["11111111-1111-4111-8111-111111111111", f.workspaceId]);
+    const pinned: string[] = [];
+    const port = createCoworkProvisioningPort({ db: f.db, home: f.home, backup, environmentActive: () => true, image: () => IMAGE, pin: id => { pinned.push(id); }, guestRecords: records, capacities: { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES } });
+    expect(await port.provision(f.workspaceId, "op")).toEqual({ status: "failed", reason: "store_volume_mismatch" });
+    expect(pinned).toEqual([]);
+    const g = fixture();
+    const second = createCoworkProvisioningPort({ db: g.db, home: g.home, backup, environmentActive: () => true, image: () => IMAGE, pin: id => { pinned.push(id); }, capacities: { data: RAW_VOLUME_MIN_BYTES, environment: RAW_VOLUME_MIN_BYTES } });
+    expect((await second.provision(g.workspaceId, "first")).status).toBe("applied");
+    const outputs = join(g.home, "cowork", "workspaces", g.workspaceId, "shared", "outputs");
+    rmSync(outputs, { recursive: true }); symlinkSync(g.home, outputs);
+    expect(await second.provision(g.workspaceId, "again")).toEqual({ status: "failed", reason: "not_directory" });
   });
 });

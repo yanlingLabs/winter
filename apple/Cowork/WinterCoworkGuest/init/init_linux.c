@@ -16,6 +16,10 @@
 #include "../common/ctl.h"
 #include "../common/wmx.h"
 #include "boot.h"
+#ifdef WG_FILE_CHANNEL_V1
+#include "dataroots.h"
+#include "shares.h"
+#endif
 #include "discover.h"
 #include "ext4sb.h"
 #include "mounts.h"
@@ -56,8 +60,12 @@ _Static_assert(WG_MS_RDONLY == MS_RDONLY && WG_MS_NOSUID == MS_NOSUID && WG_MS_N
 #endif
 #define BASE_CONFIG_PATH "/opt/winter/etc/supervisor-base.json"
 #define RUNTIME_ARTIFACTS_PATH "/opt/winter/etc/supervisor-runtime-artifacts.json"
+#ifndef WORKSPACE_CONVERSATIONS
 #define WORKSPACE_CONVERSATIONS "/workspace/.winter/conversations"
+#endif
+#ifndef RUN_CONVERSATIONS
 #define RUN_CONVERSATIONS "/run/winter/conversations"
+#endif
 #ifndef TRUSTED_DIR
 #define TRUSTED_DIR "/run/winter/trusted"
 #endif
@@ -88,6 +96,9 @@ static struct {
     int r2p_r, p2r_w;                 /* relay -> init, init -> relay */
     int h2p_r, p2h_w;                 /* helper -> init, init -> helper */
     int rt_in_r, rt_out_w, rt_err_w;  /* the supervisor's ends of the runtime pipes */
+#ifdef WG_FILE_CHANNEL_V1
+    int file_in_r, file_out_w;        /* the supervisor's ends of the file channel's two FIFOs (anonymous pipes) */
+#endif
     int sup_stdin_w, sup_out_r;
     struct wg_disk data, environment;
     struct wg_port port;
@@ -202,13 +213,42 @@ static int make_pipe(int pair[2]) {
     return 0;
 }
 
-static pid_t spawn_relay(int port_fd, int r2p[2], int p2r[2], int rt_in[2], int rt_out[2], int rt_err[2]) {
+#ifdef WG_FILE_CHANNEL_V1
+/* The file channel's two FIFOs are anonymous pipes: non-blocking, root-owned, single-link (exactly what the supervisor's file service demands of its descriptors).
+ * FILE_IN carries the host's request lines (the relay writes, the supervisor reads), FILE_OUT the response lines (the supervisor writes, the relay reads). */
+static int fifo_end_ok(int fd) {
+    struct stat st;
+    int flags = fcntl(fd, F_GETFL);
+    /* "root-owned": owned by the process that made it, which in PID 1 is root (the native tests run as themselves). */
+    return fstat(fd, &st) == 0 && S_ISFIFO(st.st_mode) && st.st_uid == geteuid() && st.st_nlink == 1 && flags >= 0 && (flags & O_NONBLOCK) != 0;
+}
+static int make_file_pipe(int pair[2]) {
+    return pipe2(pair, O_CLOEXEC | O_NONBLOCK);   /* non-blocking on both file descriptions; owned by this process and single-link by what a pipe is: fifo_end_ok() checks it again at the start */
+}
+/* After the fork PID 1 keeps neither supervisor end: a copy left here would keep the FIFOs open after the supervisor and the relay are gone (no EOF, no EPIPE). */
+static void release_file_ends(void) {
+    close_fd(&G.file_in_r);
+    close_fd(&G.file_out_w);
+}
+#endif
+
+static pid_t spawn_relay(int port_fd, int r2p[2], int p2r[2], int rt_in[2], int rt_out[2], int rt_err[2]
+#ifdef WG_FILE_CHANNEL_V1
+                         , int file_in[2], int file_out[2]
+#endif
+                         ) {
     pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
+#ifdef WG_FILE_CHANNEL_V1
+        int sources[8] = { port_fd, p2r[0], r2p[1], rt_in[1], rt_out[0], rt_err[0], file_in[1], file_out[0] };
+        char *argv[] = { RELAY_PATH, "--port", "3", "--ctl-in", "4", "--ctl-out", "5", "--rt-in", "6", "--rt-out", "7", "--rt-err", "8", "--file-in", "9", "--file-out", "10", NULL };
+        exec_child(sources, 8, -1, -1, argv);
+#else
         int sources[6] = { port_fd, p2r[0], r2p[1], rt_in[1], rt_out[0], rt_err[0] };
         char *argv[] = { RELAY_PATH, "--port", "3", "--ctl-in", "4", "--ctl-out", "5", "--rt-in", "6", "--rt-out", "7", "--rt-err", "8", NULL };
         exec_child(sources, 6, -1, -1, argv);
+#endif
     }
     return pid;
 }
@@ -221,7 +261,11 @@ static pid_t spawn_helper(int h2p[2], int p2h[2]) {
     if (pid < 0) return -1;
     if (pid == 0) {
         int sources[2] = { p2h[0], h2p[1] };
+#ifdef WG_FILE_CHANNEL_V1
+        char *argv[] = { PYTHON_PATH, "-I", "-S", "-B", HELPER_PATH, "--channel-fds", "3,4", "--data", data, "--environment", environment, "--file-channel-v1", NULL };
+#else
         char *argv[] = { PYTHON_PATH, "-I", "-S", "-B", HELPER_PATH, "--channel-fds", "3,4", "--data", data, "--environment", environment, NULL };
+#endif
         exec_child(sources, 2, -1, -1, argv);
     }
     return pid;
@@ -386,14 +430,80 @@ static int make_private_dir(const char *parent_path, const char *name, uid_t uid
     close(fd);
     return rc;
 }
+#ifdef WG_FILE_CHANNEL_V1
+/* The supervisor's file service reads only a root that is root:workspaceGid 02770 on the data volume, so PID 1 makes every data-volume root that way, for a workspace that has
+ * a file channel (a browse uid). */
+static const struct wg_dataroots_ops *dataroots_ops = &wg_dataroots_production;   /* the native tests, which run as an ordinary user, point it at their own owner */
+static int prepare_data_roots(const struct wg_conversation_set *set) {
+    if (set->browse_uid == 0) return wg_make_plan_views(WG_WORKSPACE_PATH, set, dataroots_ops);   /* no browse uid: no data roots, but a plan view is PID 1's to make */
+    return wg_make_data_roots(WG_WORKSPACE_PATH, set, dataroots_ops);
+}
+#endif
 static int op_prepare_conversation_dirs(void *ctx, const struct wg_conversation_set *set) {
     (void)ctx;
     for (unsigned i = 0; i < set->count; i++) {
         if (make_private_dir(WORKSPACE_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
         if (make_private_dir(RUN_CONVERSATIONS, set->session_id[i], (uid_t)set->runtime_uid[i]) != 0) return -1;
     }
+#ifdef WG_FILE_CHANNEL_V1
+    if (prepare_data_roots(set) != 0) return -1;
+#endif
     return 0;
 }
+#ifdef WG_FILE_CHANNEL_V1
+static int op_read_data_device(void *ctx, uint64_t *device) {
+    (void)ctx;
+    struct stat st;
+    if (stat(WG_WORKSPACE_PATH, &st) != 0 || !S_ISDIR(st.st_mode)) return -1;
+    *device = (uint64_t)st.st_dev;
+    return 0;
+}
+#endif
+#ifdef WG_FILE_CHANNEL_V1
+/* Host-backed shares (shares.c). The three paths and the owner below may be overridden only by the native test build (tests/linux_init_tool.c); PID 1 uses the real
+ * ones, and root (0) owns every directory on the way to a mount point. An ordinary test process passes its own uid, so its run reaches the real mount(2). */
+#ifndef SHARES_ROOT
+#define SHARES_ROOT ""
+#endif
+#ifndef SHARES_SYS_ROOT
+#define SHARES_SYS_ROOT "/sys"
+#endif
+#ifndef MOUNTINFO_PATH
+#define MOUNTINFO_PATH "/proc/self/mountinfo"
+#endif
+#ifndef SHARES_OWNER
+#define SHARES_OWNER 0
+#endif
+static long sop_read_mountinfo(void *ctx, char *out, size_t capacity) {
+    (void)ctx;
+    int fd = open(MOUNTINFO_PATH, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return -1;
+    size_t have = 0;
+    for (;;) {
+        if (have == capacity) { close(fd); return -1; }   /* it does not fit: never judge a cut table */
+        ssize_t n = read(fd, out + have, capacity - have);
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0) { close(fd); return -1; }
+        if (n == 0) break;
+        have += (size_t)n;
+    }
+    close(fd);
+    return (long)have;
+}
+/* A share's unmount (the step's rollback and the drain) never follows a symbolic link in the last component: it takes off the mount at that path or nothing. */
+static int sop_umount(void *ctx, const char *target) { (void)ctx; return umount2(target, UMOUNT_NOFOLLOW); }
+static int op_mount_shares(void *ctx, const struct wg_share_set *set, unsigned *mounted) {
+    (void)ctx;
+    const struct wg_share_ops ops = { NULL, SHARES_ROOT, SHARES_SYS_ROOT, mop_mount, sop_umount, sop_read_mountinfo, (uid_t)SHARES_OWNER };
+    return wg_mount_shares(&ops, set, mounted);
+}
+static int op_umount_share(void *ctx, const char *guest_path) {
+    (void)ctx;
+    char where[WG_SHARE_PATH_MAX + 4096];
+    if (snprintf(where, sizeof where, "%s%s", SHARES_ROOT, guest_path) >= (int)sizeof where) return -1;
+    return sop_umount(NULL, where);
+}
+#endif
 static int op_read_base_config(void *ctx, char *out, size_t capacity, size_t *length) {
     (void)ctx;
     long n = wg_read_small_file(BASE_CONFIG_PATH, out, capacity, 0);
@@ -431,8 +541,13 @@ static void release_runtime_ends(void) {
     close_fd(&G.rt_err_w);
 }
 
-static int op_start_supervisor(void *ctx, const char *config, size_t length, int with_ports) {
+static int op_start_supervisor(void *ctx, const char *config, size_t length, int flags) {
     (void)ctx;
+#ifdef WG_FILE_CHANNEL_V1
+    int with_ports = (flags & WG_START_PORTS) != 0, with_files = (flags & WG_START_FILE_CHANNEL) != 0;
+#else
+    int with_ports = flags;
+#endif
     int config_fd = wg_write_trusted_config(TRUSTED_DIR, TRUSTED_NAME, config, length);
     if (config_fd < 0) return -1;
     int stdin_pipe[2], stdout_pipe[2];
@@ -441,19 +556,41 @@ static int op_start_supervisor(void *ctx, const char *config, size_t length, int
     /* The supervisor's ends of the runtime pipes are non-blocking file descriptions, root-owned, single-link: exactly what
      * RuntimeDuplexPorts demands of its input/stdout/stderr descriptors. */
     if (with_ports && runtime_ends_nonblocking() != 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
+#ifdef WG_FILE_CHANNEL_V1
+    if (with_files && (!fifo_end_ok(G.file_in_r) || !fifo_end_ok(G.file_out_w))) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
+#endif
     pid_t pid = fork();
     if (pid < 0) { close(config_fd); close(stdin_pipe[0]); close(stdin_pipe[1]); close(stdout_pipe[0]); close(stdout_pipe[1]); return -1; }
     if (pid == 0) {
         setsid();
+#ifdef WG_FILE_CHANNEL_V1
+        /* Descriptors, in order: 3 the config, then 4,5,6 the runtime ports (a host-query conversation), then the file channel's IN and OUT (7,8 or 4,5): always the
+         * LAST two arguments, so the supervisor can tell a file service from none by the tail alone. */
+        int sources[6], count = 0;
+        sources[count++] = config_fd;
+        if (with_ports) { sources[count++] = G.rt_in_r; sources[count++] = G.rt_out_w; sources[count++] = G.rt_err_w; }
+        if (with_files) { sources[count++] = G.file_in_r; sources[count++] = G.file_out_w; }
+        char *argv[12];
+        int n = 0;
+        argv[n++] = PYTHON_PATH; argv[n++] = "-I"; argv[n++] = "-S"; argv[n++] = "-B"; argv[n++] = SUPERVISOR_PATH; argv[n++] = "--trusted-config-fd"; argv[n++] = "3";
+        if (with_ports) { argv[n++] = "--runtime-ports-fds"; argv[n++] = "4,5,6"; }
+        if (with_files) { argv[n++] = "--file-channel-fds"; argv[n++] = with_ports ? "7,8" : "4,5"; }
+        argv[n] = NULL;
+        exec_child(sources, (size_t)count, stdin_pipe[0], stdout_pipe[1], argv);
+#else
         int sources[4] = { config_fd, G.rt_in_r, G.rt_out_w, G.rt_err_w };
         char *with[] = { PYTHON_PATH, "-I", "-S", "-B", SUPERVISOR_PATH, "--trusted-config-fd", "3", "--runtime-ports-fds", "4,5,6", NULL };
         char *without[] = { PYTHON_PATH, "-I", "-S", "-B", SUPERVISOR_PATH, "--trusted-config-fd", "3", NULL };
         exec_child(sources, with_ports ? 4 : 1, stdin_pipe[0], stdout_pipe[1], with_ports ? with : without);
+#endif
     }
     close(config_fd);
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
     release_runtime_ends();
+#ifdef WG_FILE_CHANNEL_V1
+    release_file_ends();
+#endif
     G.supervisor = pid;
     supervisor_deadline = clock_ms() + SUPERVISOR_READY_DEADLINE_MS;
     G.sup_stdin_w = stdin_pipe[1];
@@ -598,6 +735,17 @@ static int mount_pseudo(const char *source, const char *target, const char *type
     return -1;
 }
 
+#ifdef WG_FILE_CHANNEL_V1
+#define PROTECTED_HARDLINKS_PATH "/proc/sys/fs/protected_hardlinks"
+static int set_protected_hardlinks(const char *path) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd < 0) return -1;
+    ssize_t written = write(fd, "1\n", 2);   /* a sysctl write that the kernel refuses fails here; there is nothing to read back that the return value does not say */
+    close(fd);
+    return written == 2 ? 0 : -1;
+}
+#endif
+
 static void discover_or_die(void) {
     struct wg_discover_env env = { "/sys", "/dev", NULL, NULL };
     long long deadline = clock_ms() + DISCOVERY_WAIT_MS;
@@ -616,6 +764,9 @@ static void discover_or_die(void) {
 int main(void) {
     if (getpid() != 1) return 2;
     G.r2p_r = G.p2r_w = G.h2p_r = G.p2h_w = G.rt_in_r = G.rt_out_w = G.rt_err_w = G.sup_stdin_w = G.sup_out_r = -1;
+#ifdef WG_FILE_CHANNEL_V1
+    G.file_in_r = G.file_out_w = -1;
+#endif
     umask(077);
     signal(SIGPIPE, SIG_IGN);
     prctl(PR_SET_DUMPABLE, 0, 0, 0, 0);
@@ -636,6 +787,10 @@ int main(void) {
     if (mount_pseudo("tmpfs", "/run", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=0755,size=32m") != 0) die_early("mount-run");
     if (mount_pseudo("tmpfs", "/tmp", "tmpfs", MS_NOSUID | MS_NODEV | MS_NOEXEC, "mode=1777,size=64m") != 0) die_early("mount-tmp");
     log_code("init-start");
+#ifdef WG_FILE_CHANNEL_V1
+    /* The file service refuses a hard link to a file the browse identity could not itself open; the kernel enforces the same for every identity once this is 1. */
+    if (set_protected_hardlinks(PROTECTED_HARDLINKS_PATH) != 0) die_early("protected-hardlinks");
+#endif
 
     int run_root = open("/run", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     if (run_root < 0 || wg_skeleton_apply(run_root, WG_RUN_SKELETON, WG_RUN_SKELETON_COUNT, NULL) != 0) die_early("run-skeleton");
@@ -657,6 +812,10 @@ int main(void) {
 
     int r2p[2], p2r[2], h2p[2], p2h[2], rt_in[2], rt_out[2], rt_err[2];
     if (make_pipe(r2p) || make_pipe(p2r) || make_pipe(h2p) || make_pipe(p2h) || make_pipe(rt_in) || make_pipe(rt_out) || make_pipe(rt_err)) die_early("pipes");
+#ifdef WG_FILE_CHANNEL_V1
+    int file_in[2], file_out[2];
+    if (make_file_pipe(file_in) != 0 || make_file_pipe(file_out) != 0) die_early("file-channel-fifos");
+#endif
 
     memset(&mount_ops, 0, sizeof mount_ops);
     mount_ops.mount = mop_mount; mount_ops.umount = mop_umount; mount_ops.syncfs_path = mop_syncfs;
@@ -666,13 +825,26 @@ int main(void) {
     boot_ops.wait_flushed = op_wait_flushed; boot_ops.replay = op_replay; boot_ops.umount_replay = op_umount_replay;
     boot_ops.mount_volumes = op_mount_volumes; boot_ops.umount = op_umount; boot_ops.verify_unmounted = op_verify_unmounted;
     boot_ops.prepare_conversation_dirs = op_prepare_conversation_dirs; boot_ops.read_runtime_artifacts = op_read_runtime_artifacts; boot_ops.read_base_config = op_read_base_config; boot_ops.read_boot_id = op_read_boot_id;
-    boot_ops.start_supervisor = op_start_supervisor; boot_ops.stop_helper = op_stop_helper; boot_ops.stop_supervisor = op_stop_supervisor;
+    boot_ops.start_supervisor = op_start_supervisor;
+#ifdef WG_FILE_CHANNEL_V1
+    boot_ops.read_data_device = op_read_data_device;
+    boot_ops.mount_shares = op_mount_shares; boot_ops.umount_share = op_umount_share;
+#endif
+    boot_ops.stop_helper = op_stop_helper; boot_ops.stop_supervisor = op_stop_supervisor;
     boot_ops.kill_all = op_kill_all; boot_ops.sync_all = op_sync_all; boot_ops.flush_devices = op_flush_devices; boot_ops.power_off = op_power_off;
     wg_boot_init(&boot, &boot_ops);
     ctl_reader_init(&relay_reader, relay_payload, sizeof relay_payload, "PDFf");
+#ifdef WG_FILE_CHANNEL_V1
+    ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQMECS");
+#else
     ctl_reader_init(&helper_reader, helper_payload, sizeof helper_payload, "BQMEC");
+#endif
 
+#ifdef WG_FILE_CHANNEL_V1
+    G.relay = spawn_relay(port_fd, r2p, p2r, rt_in, rt_out, rt_err, file_in, file_out);
+#else
     G.relay = spawn_relay(port_fd, r2p, p2r, rt_in, rt_out, rt_err);
+#endif
     if (G.relay < 0) die_early("relay-spawn");
     close(port_fd);                    /* from here on exactly one process holds the port: the relay */
     G.helper = spawn_helper(h2p, p2h);
@@ -686,6 +858,10 @@ int main(void) {
     G.rt_in_r = rt_in[0]; close(rt_in[1]);
     G.rt_out_w = rt_out[1]; close(rt_out[0]);
     G.rt_err_w = rt_err[1]; close(rt_err[0]);
+#ifdef WG_FILE_CHANNEL_V1
+    G.file_in_r = file_in[0]; close(file_in[1]);        /* the relay holds the write end of FILE_IN, the supervisor will hold the read end */
+    G.file_out_w = file_out[1]; close(file_out[0]);     /* the relay holds the read end of FILE_OUT */
+#endif
     fcntl(G.r2p_r, F_SETFL, fcntl(G.r2p_r, F_GETFL) | O_NONBLOCK);
     fcntl(G.h2p_r, F_SETFL, fcntl(G.h2p_r, F_GETFL) | O_NONBLOCK);
     fcntl(G.p2r_w, F_SETFL, fcntl(G.p2r_w, F_GETFL) | O_NONBLOCK);

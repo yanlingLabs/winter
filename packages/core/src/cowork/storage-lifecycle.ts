@@ -9,7 +9,9 @@ export type LifecycleFailure =
   | "invalid_request" | "authority_denied" | "not_found" | "volume_busy" | "recovery_required"
   | "image_unpinned" | "image_digest_mismatch" | "update_pending" | "no_update_pending" | "incompatible_image"
   | "export_not_ready" | "export_in_progress" | "generation_stale" | "generation_unknown"
-  | "manifest_invalid" | "unknown_format" | "foreign_home" | "workspace_unknown";
+  | "manifest_invalid" | "unknown_format" | "foreign_home" | "workspace_unknown"
+  // Export writer and restore flow (export-bundle.ts, export-writer.ts, restore-bundle.ts).
+  | "bundle_invalid" | "bundle_unsafe" | "bundle_exists" | "destination_invalid" | "restore_unconfirmed" | "restore_conflict" | "backup_exclusion_unavailable" | "integration_unavailable";
 
 export class CoworkLifecycleError extends Error {
   constructor(readonly code: LifecycleFailure) { super(code); this.name = "CoworkLifecycleError"; }

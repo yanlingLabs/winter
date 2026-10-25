@@ -10,8 +10,10 @@
  *              may deliver the conversation set ('C') once; PID 1 then makes the conversation directories, writes the trusted
  *              config and starts the supervisor. Until the supervisor's ready line arrives the set is "starting"; if it never
  *              does, or the supervisor dies first, the helper is told `supervisor_failed` and the guest stays up for the drain.
+ *              In an image with `file-channel-v1`, the helper may first deliver the host's share set ('S') once: PID 1 mounts every share (inventory, mounts,
+ *              mountinfo check, guidance alias) and answers 's'. A set that follows a failed share step is a helper fault (fail-stop).
  *   RUNNING    supervisor ready: the helper is told (it answers `runtime_ready`) and the relay is told that runtime frames are now admitted.
- *   DRAINING   drain: ack, stop helper, stop supervisor, kill the rest, sync, unmount, flush the devices, `halting` ONLY if every unmount worked and the flush succeeded, sync, power off.
+ *   DRAINING   drain: ack, stop helper, stop supervisor, kill the rest, sync, unmount (the virtio-fs shares before the ext4 volumes), flush the devices, `halting` ONLY if every unmount worked and the flush succeeded, sync, power off.
  *
  * Fail-stop (relay or supervisor gone, protocol garbage, a helper message out of order) is the drain without the ack and
  * without `halting`. While the relay lives PID 1 first has it send one control-up `fault` (unmount_failed, supervisor_lost,
@@ -36,6 +38,17 @@
 #define WG_SESSION_ID_MAX 128u
 #define WG_UNIX_ID_MIN 1000u   /* the contract's unixId range: 65534 is `nobody` and 65535 the invalid id */
 #define WG_UNIX_ID_MAX 65533u
+#ifdef WG_FILE_CHANNEL_V1
+/* Image with the runtime capability `file-channel-v1` only. The helper (started with --file-channel-v1) sends the payload below with the profile byte's bit 7 set:
+ *   u8 profile | 0x80, u8 count, per conversation {u32 runtimeUid, u8 id length, id}, then
+ *   u32 LE browseUid (0 = the workspace has none; otherwise 1000 to 65533, never a runtime or tool uid or a workspace gid of the set),
+ *   per conversation {u32 LE toolUid (1000 to 65533, distinct from every runtime and tool uid of the set: the owner of the conversation's plan view),
+ *   u32 LE workspaceGid (1000 to 65533, never a runtime or tool uid of the set), u8 root count (1 to 16), per root {u8 length (11 to 255), the root's `source` path}},
+ *   then the items JSON. A payload without bit 7 is the plain one and means "no file channel". */
+#define WG_PAYLOAD_EXTENDED 0x80u
+#define WG_ROOTS_MAX 16u
+#define WG_ROOT_SOURCE_MAX 255u
+#endif
 struct wg_conversation_set {
     unsigned profile;
     unsigned count;
@@ -43,9 +56,51 @@ struct wg_conversation_set {
     char session_id[WG_CONVERSATIONS_MAX][WG_SESSION_ID_MAX + 1];
     const char *json;
     size_t json_length;
+#ifdef WG_FILE_CHANNEL_V1
+    uint32_t browse_uid;                                              /* 0 = no file channel for this set */
+    uint32_t tool_uid[WG_CONVERSATIONS_MAX];
+    uint32_t workspace_gid[WG_CONVERSATIONS_MAX];
+    unsigned root_count[WG_CONVERSATIONS_MAX];
+    char root_source[WG_CONVERSATIONS_MAX][WG_ROOTS_MAX][WG_ROOT_SOURCE_MAX + 1];
+#endif
 };
 /* 0 when the payload is well formed. The JSON text itself is only shape-checked later, by the config builder. */
 int wg_parse_conversation_payload(const uint8_t *payload, size_t length, struct wg_conversation_set *out);
+
+#ifdef WG_FILE_CHANNEL_V1
+/* Host-backed shares (contract revision 3, design 2026-10-18 section 2.5). After `mounted` and before the conversation set the host may send one `shares`
+ * message; the helper validates it, binds it to the plan's operation and nonce, and hands PID 1 the set ('S'):
+ *   u8 count (1 to 12), then per share {u8 kind (WG_SHARE_*), u8 flags (bit 0 read-only; nothing else), u8 tag length (1 to 32), the tag ([a-z0-9-]),
+ *   u8 guest path length, the guest path}, and nothing after the last share.
+ * PID 1 re-checks every rule it acts on (the contract's checkShareSet): at most 9 folders and one of each Winter kind, distinct tags and paths, the fixed mount
+ * point and mode of each Winter kind, and a folder at /workspace/folders/<name> with a name of [A-Za-z0-9][A-Za-z0-9_.-]{0,127}. */
+#define WG_SHARES_MAX 12u
+#define WG_FOLDER_SHARES_MAX 9u
+#define WG_SHARE_TAG_MAX 32u
+#define WG_SHARE_PATH_MAX 160u
+#define WG_SHARE_FOLDER_NAME_MAX 128u
+#define WG_SHARE_FOLDERS_PREFIX "/workspace/folders/"
+#define WG_SHARE_GUIDANCE_PATH "/run/winter/shared-instructions"
+#define WG_SHARE_MEMORY_PATH "/workspace/.winter/memory"
+#define WG_SHARE_OUTPUTS_PATH "/workspace/outputs"
+enum wg_share_kind { WG_SHARE_FOLDER = 0, WG_SHARE_GUIDANCE = 1, WG_SHARE_MEMORY = 2, WG_SHARE_OUTPUTS = 3 };
+struct wg_share {
+    unsigned kind;
+    int read_only;
+    char tag[WG_SHARE_TAG_MAX + 1];
+    char guest_path[WG_SHARE_PATH_MAX + 1];
+};
+struct wg_share_set {
+    unsigned count;
+    struct wg_share item[WG_SHARES_MAX];
+};
+/* 0 when the payload is well formed and the set obeys every rule above. */
+int wg_parse_share_payload(const uint8_t *payload, size_t length, struct wg_share_set *out);
+/* The answer to 'S' (and what the effect returns): the helper turns 1 and 2 into the bootstrap faults `share_inventory` and `share_mount_failed`. */
+#define WG_SHARES_MOUNTED 0
+#define WG_SHARES_INVENTORY 1
+#define WG_SHARES_MOUNT_FAILED 2
+#endif
 
 struct wg_boot_ops {
     void *ctx;
@@ -73,8 +128,18 @@ struct wg_boot_ops {
     int (*read_runtime_artifacts)(void *ctx, unsigned profile, char *out, size_t capacity, size_t *length);
     int (*read_base_config)(void *ctx, char *out, size_t capacity, size_t *length);
     int (*read_boot_id)(void *ctx, char out[37]);
-    /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation) */
+    /* with_ports: pass --runtime-ports-fds 4,5,6 (one host-query conversation). With WG_FILE_CHANNEL_V1 the value is a set of bits: WG_START_PORTS, and
+     * WG_START_FILE_CHANNEL for `--file-channel-fds IN,OUT` as the last two arguments (the config then names `fileChannel`). */
     int (*start_supervisor)(void *ctx, const char *config, size_t length, int with_ports);
+#ifdef WG_FILE_CHANNEL_V1
+    /* st_dev of the mounted data volume (/workspace): the supervisor's `fileChannel.dataDevice`. 0 = read, non-zero = refused */
+    int (*read_data_device)(void *ctx, uint64_t *device);
+    /* The whole share step (shares.c wg_mount_shares): the virtio-fs inventory, the mount points, the mounts, the mountinfo check and the guidance alias.
+     * Returns WG_SHARES_*. *mounted receives bit (1 << i) for every share i that is still mounted when it returns (after a failure: only those whose
+     * rollback unmount did not succeed), so the drain can get them out before it may say `halting`. */
+    int (*mount_shares)(void *ctx, const struct wg_share_set *set, unsigned *mounted);
+    int (*umount_share)(void *ctx, const char *guest_path);
+#endif
     /* teardown */
     void (*stop_helper)(void *ctx, long long deadline_ms);
     void (*stop_supervisor)(void *ctx, long long deadline_ms);
@@ -85,6 +150,11 @@ struct wg_boot_ops {
     void (*power_off)(void *ctx);
 };
 
+#define WG_START_PORTS 1
+#ifdef WG_FILE_CHANNEL_V1
+#define WG_START_FILE_CHANNEL 2
+enum wg_shares_state { WG_SHARES_STATE_NONE = 0, WG_SHARES_STATE_MOUNTED, WG_SHARES_STATE_FAILED };
+#endif
 enum wg_conv_state { WG_CONV_NONE = 0, WG_CONV_STARTING, WG_CONV_RUNNING, WG_CONV_FAILED };
 enum wg_phase { WG_PHASE_BOOTSTRAP = 0, WG_PHASE_MOUNTED, WG_PHASE_RUNNING, WG_PHASE_DRAINING, WG_PHASE_DEAD };
 
@@ -101,6 +171,12 @@ struct wg_boot {
     int supervisor_started, supervisor_alive;
     int conv_state;                    /* WG_CONV_* */
     unsigned conv_count, conv_profile;
+#ifdef WG_FILE_CHANNEL_V1
+    int conv_file_channel;             /* the supervisor was started with a file service */
+    int shares_state;                  /* WG_SHARES_STATE_*: one share step per incarnation, and a set never follows a failed one */
+    struct wg_share_set shares;        /* the set that was mounted (its guest paths are what the drain unmounts) */
+    unsigned shares_mounted;           /* bit (1 << i): share i is mounted; the data volume is unmounted only once this is 0 */
+#endif
     int fault_sent, relay_gone;
     int draining;
     char nonce[33];

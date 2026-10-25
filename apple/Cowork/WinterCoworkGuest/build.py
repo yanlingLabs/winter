@@ -28,6 +28,14 @@ PROGRAMS = {
     ],
     "winter-guest-relay": ["relay/relay.c", "common/ctl.c", "common/wmx.c"],
 }
+# The same two programs for an image that declares the runtime capability `file-channel-v1` (guest side of the file channel, FC3). Built only with `--profile file-channel`,
+# under their own names, with -DWG_FILE_CHANNEL_V1; the production profile compiles none of it, so the production binaries and the pins.json entries above are unchanged by it.
+FILE_CHANNEL_FLAG = "-DWG_FILE_CHANNEL_V1"
+FILE_CHANNEL_PROGRAMS = {
+    "init-file-channel": PROGRAMS["init"] + ["init/dataroots.c", "init/shares.c"],
+    "winter-guest-relay-file-channel": PROGRAMS["winter-guest-relay"] + ["common/fileflow.c"],
+}
+FILE_CHANNEL_HEADERS = ["common/fileflow.h", "init/dataroots.h", "init/shares.h"]
 HEADERS = [
     "common/ctl.h", "common/ring.h", "common/wmx.h", "init/boot.h", "init/discover.h", "init/ext4sb.h", "init/mounts.h",
     "init/skeleton.h", "init/trusted_config.h",
@@ -49,17 +57,23 @@ def source_digest(names):
     return digest.hexdigest()
 
 
-def compile_program(zig, name, out_dir, cache):
+def compile_program(zig, name, out_dir, cache, programs=None, extra=()):
     env = {"PATH": "/usr/bin:/bin", "ZIG_GLOBAL_CACHE_DIR": str(cache / "global"), "ZIG_LOCAL_CACHE_DIR": str(cache / "local"), "HOME": str(cache)}
-    sources = [str(HERE / source) for source in PROGRAMS[name]]
-    command = [str(zig), "cc", *COMMON_FLAGS, f"-ffile-prefix-map={HERE}=/winter-guest", *sources, "-o", str(out_dir / name)]
+    sources = [str(HERE / source) for source in (programs or PROGRAMS)[name]]
+    command = [str(zig), "cc", *COMMON_FLAGS, *extra, f"-ffile-prefix-map={HERE}=/winter-guest", *sources, "-o", str(out_dir / name)]
     result = subprocess.run(command, capture_output=True, text=True, env=env, timeout=600)
     if result.returncode != 0:
         raise SystemExit(f"{name}: compile failed\n{result.stderr[-4000:]}")
     return out_dir / name
 
 
-def build(zig, out):
+def build(zig, out, profile="production"):
+    if profile not in ("production", "file-channel"):
+        raise SystemExit("profile must be production or file-channel")
+    file_channel = profile == "file-channel"
+    programs = FILE_CHANNEL_PROGRAMS if file_channel else PROGRAMS
+    headers = HEADERS + FILE_CHANNEL_HEADERS if file_channel else HEADERS
+    extra = [FILE_CHANNEL_FLAG] if file_channel else []
     zig = Path(zig).resolve()
     version = subprocess.run([str(zig), "version"], capture_output=True, text=True, check=True).stdout.strip()
     if version != ZIG_VERSION:
@@ -67,13 +81,13 @@ def build(zig, out):
     out = Path(out).resolve()
     out.mkdir(parents=True)
     results = {}
-    for name in PROGRAMS:
+    for name in programs:
         first = out / "pass1"
         second = out / "pass2"
         first.mkdir(exist_ok=True)
         second.mkdir(exist_ok=True)
-        compile_program(zig, name, first, out / "cache1")
-        compile_program(zig, name, second, out / "cache2")
+        compile_program(zig, name, first, out / "cache1", programs, extra)
+        compile_program(zig, name, second, out / "cache2", programs, extra)
         a, b = sha256(first / name), sha256(second / name)
         if a != b:
             raise SystemExit(f"{name}: two builds differ ({a} vs {b}); the digest could not be pinned")
@@ -82,9 +96,9 @@ def build(zig, out):
             raise SystemExit(f"{name}: a builder path leaked into the binary")
         (out / name).write_bytes(data)
         os.chmod(out / name, 0o555)
-        results[name] = {"binarySha256": a, "bytes": len(data), "sourceSha256": source_digest(PROGRAMS[name] + HEADERS)}
+        results[name] = {"binarySha256": a, "bytes": len(data), "sourceSha256": source_digest(programs[name] + headers)}
     receipt = {
-        "formatVersion": 1, "target": TARGET, "zig": version, "flags": COMMON_FLAGS, "programs": results,
+        "formatVersion": 1, "profile": profile, "target": TARGET, "zig": version, "flags": COMMON_FLAGS + extra, "programs": results,
         "scripts": {name: {"sha256": sha256(HERE / path)} for name, path in SCRIPTS.items()},
         "executed": False,
     }
@@ -111,8 +125,11 @@ def main():
     parser.add_argument("--zig", required=True, type=Path)
     parser.add_argument("--out", required=True, type=Path)
     parser.add_argument("--update-pins", type=Path, help="write the resulting digests into this pins.json (the guest section)")
+    parser.add_argument("--profile", choices=["production", "file-channel"], default="production", help="file-channel builds the two programs of an image that declares file-channel-v1, under their own names")
     args = parser.parse_args()
-    receipt = build(args.zig, args.out)
+    if args.profile != "production" and args.update_pins:
+        raise SystemExit("--update-pins is for the production profile only: no pins.json entry is ever written from another profile")
+    receipt = build(args.zig, args.out, args.profile)
     if args.update_pins:
         update_pins(receipt, args.update_pins)
     print(json.dumps(receipt, indent=2, sort_keys=True))

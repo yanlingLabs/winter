@@ -40,6 +40,16 @@ def deadline(seconds):
         signal.signal(signal.SIGALRM, previous)
 
 
+# The contract vectors are revision 3 (`v` 2); this module's tests of them run the helper in the vocabulary an image with `file-channel-v1` speaks. The revision-2 helper (the
+# production guest, which refuses those messages with `version`) is held by FileChannelRevisionTests at the end of the module.
+def setUpModule():
+    gb.set_revision_three(True)
+
+
+def tearDownModule():
+    gb.set_revision_three(False)
+
+
 def load_vectors():
     raw = (VECTORS / "mux-frames.json").read_bytes()
     pins = json.loads((VECTORS / "PINS.json").read_text())
@@ -145,7 +155,7 @@ class VectorTests(unittest.TestCase):
         for name in ("mux-frames.json", "bootstrap-order.json", "runtime-flow.json"):
             pin = VECTOR_PINS["files"][name]
             self.assertEqual(hashlib.sha256((VECTORS / name).read_bytes()).hexdigest(), pin["sha256"], name)
-            self.assertEqual(pin["sourceBranch"], "cowork/n2-host-adapter")
+            self.assertEqual(pin["sourceBranch"], "cowork/output-integration")
             self.assertRegex(pin["sourceCommit"], r"^[0-9a-f]{40}$")
             self.assertEqual(pin["sourcePath"], "packages/core/test/cowork/native/vectors/" + name)
             commits.add(pin["sourceCommit"])
@@ -161,7 +171,13 @@ class VectorTests(unittest.TestCase):
                                       ("bootstrap-up-fault-supervisor-failed", "up", "fault"), ("bootstrap-up-fault-second-conversations", "up", "fault"),
                                       ("bootstrap-up-fault-bad-plan", "up", "fault"), ("bootstrap-up-fault-probe-failed", "up", "fault"),
                                       ("bootstrap-up-fault-format-failed", "up", "fault"), ("bootstrap-up-fault-replay-failed", "up", "fault"),
-                                      ("bootstrap-up-fault-mount-failed", "up", "fault"), ("bootstrap-up-fault-internal", "up", "fault")):
+                                      ("bootstrap-up-fault-mount-failed", "up", "fault"), ("bootstrap-up-fault-internal", "up", "fault"),
+                                      ("bootstrap-down-shares", "down", "shares"), ("bootstrap-up-shares-mounted", "up", "shares_mounted"),
+                                      ("bootstrap-down-conversations-browse-uid", "down", "conversations"), ("bootstrap-down-conversations-resume", "down", "conversations"),
+                                      ("bootstrap-down-conversations-either", "down", "conversations"), ("bootstrap-down-conversations-timeout-a-day", "down", "conversations"),
+                                      ("bootstrap-up-runtime-ready-resumed", "up", "runtime_ready"), ("bootstrap-up-fault-share-inventory", "up", "fault"),
+                                      ("bootstrap-up-fault-share-mount-failed", "up", "fault"), ("bootstrap-up-fault-resume-store-missing", "up", "fault"),
+                                      ("bootstrap-up-fault-fresh-store-not-empty", "up", "fault")):
             with self.subTest(name):
                 payload = payload_of(POSITIVE[name])
                 message = gb.parse_bootstrap_message(payload, direction)
@@ -186,7 +202,7 @@ class VectorTests(unittest.TestCase):
 
     def test_every_bootstrap_positive_vector_is_covered(self):
         names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1]
-        self.assertEqual(len(names), 18)
+        self.assertEqual(len(names), 29)
         for name in names:
             with self.subTest(name):
                 direction = next(v["direction"] for v in VECTOR_DATA["positive"] if v["name"] == name)
@@ -245,7 +261,7 @@ class VectorTests(unittest.TestCase):
         protocol = REPO / "packages/core/src/cowork/native/protocol.ts"
         if protocol.exists():
             faults = re.search(r"COWORK_NATIVE_BOOTSTRAP_FAULTS = Object\.freeze\(\[([^\]]*)\]", protocol.read_text()).group(1)
-            self.assertEqual(tuple(re.findall(r'"([^"]+)"', faults)), gb.FAULT_CODES)
+            self.assertEqual(tuple(re.findall(r'"([^"]+)"', faults)), gb.FAULT_CODES_V3)
 
 
 class MessageParserTests(unittest.TestCase):
@@ -266,12 +282,12 @@ class MessageParserTests(unittest.TestCase):
 
     def test_duplicate_keys_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
-        self.refused(text.replace('"v":1,', '"v":1,"v":1,').encode(), "malformed")
+        self.refused(text.replace('"v":2,', '"v":2,"v":2,').encode(), "malformed")
 
     def test_float_and_exponent_spellings_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
-        self.refused(text.replace('"v":1', '"v":1.0').encode(), "malformed")
-        self.refused(text.replace('"v":1', '"v":1e0').encode(), "malformed")
+        self.refused(text.replace('"v":2', '"v":2.0').encode(), "malformed")
+        self.refused(text.replace('"v":2', '"v":2e0').encode(), "malformed")
 
     def test_whitespace_and_alternate_escapes_are_malformed(self):
         text = payload_of(POSITIVE["bootstrap-down-ready"]).decode()
@@ -280,27 +296,28 @@ class MessageParserTests(unittest.TestCase):
 
     def test_reordered_keys_are_malformed_even_though_the_key_set_is_right(self):
         ready = self.ready()
-        reordered = {"v": 1, "t": "ready", "nonce": ready["nonce"], "operationId": ready["operationId"]}
+        reordered = {"v": 2, "t": "ready", "nonce": ready["nonce"], "operationId": ready["operationId"]}
         self.refused(gb.canonical_text(reordered).encode(), "malformed")
 
     def test_non_ascii_is_refused(self):
-        self.refused('{"v":1,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}'.encode() if False else
-                     ('{"v":1,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}').encode(), "malformed")
+        self.refused(('{"v":2,"t":"ready","operationId":"é","nonce":"' + "0" * 32 + '"}').encode(), "malformed")
 
     def test_nesting_beyond_eight_levels_is_malformed(self):
-        deep = '{"v":1,"t":"ready","operationId":"a","nonce":"' + "0" * 32 + '","x":' + "[" * 9 + "]" * 9 + "}"
+        deep = '{"v":2,"t":"ready","operationId":"a","nonce":"' + "0" * 32 + '","x":' + "[" * 9 + "]" * 9 + "}"
         self.refused(deep.encode(), "malformed")
 
     def test_dangerous_keys_are_malformed(self):
-        self.refused(b'{"v":1,"t":"ready","__proto__":1}', "malformed")
+        self.refused(b'{"v":2,"t":"ready","__proto__":1}', "malformed")
 
     def test_unknown_type_extra_key_and_bad_nonce(self):
-        self.refused(b'{"v":1,"t":"explode"}', "unknown_type")
+        self.refused(b'{"v":2,"t":"explode"}', "unknown_type")
         ready = self.ready()
         self.refused(gb.canonical_text({**ready, "extra": 1}).encode(), "bad_field")
         self.refused(gb.canonical_text({**ready, "nonce": "0F" * 16}).encode(), "bad_field")
         self.refused(gb.canonical_text({**ready, "nonce": "0" * 31}).encode(), "bad_field")
-        self.refused(gb.canonical_text({**ready, "v": 2}).encode(), "bad_field")
+        self.refused(gb.canonical_text({**ready, "v": 1}).encode(), "version")     # a peer one revision behind is told `version`, judged before the schema
+        self.refused(gb.canonical_text({**ready, "v": 3}).encode(), "version")
+        self.refused(gb.canonical_text({**ready, "v": "2"}).encode(), "version")
 
     def test_direction_decides_which_types_exist(self):
         self.refused(payload_of(POSITIVE["bootstrap-up-mounted"]), "unknown_type", "down")
@@ -1613,15 +1630,33 @@ class ConversationSetTests(unittest.TestCase):
             self.assertEqual(list(item), ["logicalSessionId", "authority", "runtimeUid", "toolUid", "workspaceGid", "policy", "roots"])
 
     def test_the_message_to_pid_1_has_the_documented_layout(self):
-        payload = gb.conversations_payload(self.parsed())
-        self.assertEqual(payload[:2], bytes([2, 1]))
+        message = self.parsed()
+        payload = gb.conversations_payload(message)
+        self.assertEqual(payload[:2], bytes([2 | 0x80, 1]))                  # profile 2, bit 7: the file channel's extension follows the conversation records
         self.assertEqual(payload[2:6], (20000).to_bytes(4, "little"))
         self.assertEqual((payload[6], payload[7:16]), (9, b"conv-0001"))
-        items = json.loads(payload[16:])
+        at = 16
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), message["browseUid"] or 0)
+        at += 4
+        item = message["conversations"][0]
+        self.assertEqual(int.from_bytes(payload[at:at + 4], "little"), item["toolUid"])            # the owner of the conversation's plan view
+        self.assertEqual(int.from_bytes(payload[at + 4:at + 8], "little"), item["workspaceGid"])
+        self.assertEqual(payload[at + 8], len(item["roots"]))
+        at += 9
+        for root in item["roots"]:
+            source = root["source"].encode()
+            self.assertEqual((payload[at], payload[at + 1:at + 1 + len(source)]), (len(source), source))
+            at += 1 + len(source)
+        items = json.loads(payload[at:])
         self.assertEqual(items[0]["logicalSessionId"], "conv-0001")
         payload = gb.conversations_payload(self.parsed("bootstrap-down-conversations-tools-only"))
-        self.assertEqual(payload[:2], bytes([0, 2]))
-        self.assertTrue(payload.isascii())
+        self.assertEqual(payload[:2], bytes([0x80, 2]))
+        self.assertTrue(payload[payload.index(b'[{"'):].isascii())             # the items array stays printable ASCII
+        gb.set_revision_three(False)                                          # the revision-2 helper sends the plain payload, byte for byte as before
+        try:
+            self.assertEqual(gb.conversations_payload({**message, "profile": "host-query-v1"})[:2], bytes([1, 1]))
+        finally:
+            gb.set_revision_three(True)
 
     def test_the_items_are_printable_ascii_and_within_the_config_budget(self):
         for name in ("bootstrap-down-conversations-guided", "bootstrap-down-conversations-tools-only"):
@@ -1662,7 +1697,7 @@ class ConversationSetTests(unittest.TestCase):
         self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", True))
         self.refused(lambda m: item(m)["runtime"]["guided"].__setitem__("generation", 0))
         self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 0))
-        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600001))
+        self.refused(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 86_400_001))
         self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 1))
         self.accepted(lambda m: item(m)["runtime"].__setitem__("timeoutMs", 600000))
         for key in ("runtimeUid", "toolUid", "workspaceGid"):
@@ -1695,12 +1730,23 @@ class ConversationSetTests(unittest.TestCase):
                             ("a control character", "/workspace/folders/\u0001x"), ("over 1024 bytes", "/workspace/folders/" + "a" * 1100), ("outside the workspace", "/etc/x"), ("relative", "workspace/folders/x")):
             with self.subTest(label):
                 self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
-        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 1000))
+        long_path = "/workspace/folders/" + "/".join(["a" * 60] * 3) + "/" + "b" * (255 - len("/workspace/folders/") - 183)         # 255 bytes in components of at most 64 (PID 1's limit)
+        self.assertEqual(len(long_path), 255)
+        self.accepted(lambda m: item(m)["roots"][0].__setitem__("source", long_path))
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/folders/" + "a" * 65))              # one component over 64: PID 1 refuses it
+
+    def test_a_root_source_pid_1_would_refuse_is_refused_here_and_answered_bad_conversations(self):
+        item = lambda m: m["conversations"][0]
+        too_long = "/workspace/repos/" + "a" * (256 - len("/workspace/repos/"))
+        for label, path in (("256 bytes", too_long), ("a space", "/workspace/repos/a b"), ("a colon", "/workspace/repos/a:b"), ("no component", "/workspace/")):
+            with self.subTest(label):
+                self.refused(lambda m, p=path: item(m)["roots"][0].__setitem__("source", p))
 
     def test_the_supervisors_view_rules(self):
         tools = "bootstrap-down-conversations-tools-only"
         item = lambda m: m["conversations"][0]
         def set_roots(m, *roots):
+            item(m)["policy"] = "ask"                                 # a writable root is refused under plan (contract 12.3a); these cases are about the views
             item(m)["roots"] = [{"id": "root-%d" % i, "guestPath": g, "source": g, "readOnly": False} for i, g in enumerate(roots)]
         sid = "conv-0001"
         for label, roots in (("memory", ["/workspace/.winter/memory"]), ("scratch of this session", ["/workspace/.winter/scratch/" + sid]), ("outputs of this session", ["/workspace/outputs/" + sid]),
@@ -1723,6 +1769,46 @@ class ConversationSetTests(unittest.TestCase):
         self.accepted(lambda m: set_roots(m, *["/workspace/folders/r%d" % i for i in range(16)]), vector=tools)
         self.refused(lambda m: item(m).__setitem__("roots", []), vector=tools)
         self.refused(lambda m: item(m)["roots"][0].__setitem__("readOnly", 1), vector=tools)
+
+    def test_the_plan_view_is_admitted_only_as_this_conversations_one_writable_root_under_plan(self):
+        item = lambda m: m["conversations"][0]
+        sid = item(conversations_vector())["logicalSessionId"]
+        def plan(m, path=None, read_only=False, policy="plan", others_read_only=True, twice=False):
+            path = path or "/workspace/plan/%s/7" % sid
+            item(m)["policy"] = policy
+            for root in item(m)["roots"]:
+                root["readOnly"] = others_read_only
+            item(m)["roots"].append({"id": "plan-scratch", "guestPath": path, "source": path, "readOnly": read_only})
+            if twice:
+                other = "/workspace/plan/%s/8" % sid
+                item(m)["roots"].append({"id": "plan-scratch-2", "guestPath": other, "source": other, "readOnly": False})
+        self.accepted(plan)
+        for epoch in ("0", "123456789"):
+            with self.subTest("accepts epoch " + epoch):
+                self.accepted(lambda m, e=epoch: plan(m, "/workspace/plan/%s/%s" % (sid, e)))
+        for label, path in (("a leading zero", "/workspace/plan/%s/07" % sid), ("ten digits", "/workspace/plan/%s/1234567890" % sid), ("a sign", "/workspace/plan/%s/+7" % sid),
+                            ("not a number", "/workspace/plan/%s/x" % sid), ("another conversation", "/workspace/plan/other-id/7"), ("nothing deeper", "/workspace/plan/%s/7/x" % sid),
+                            ("no epoch", "/workspace/plan/%s" % sid), ("the plan folder", "/workspace/plan")):
+            with self.subTest("refuses " + label):
+                self.refused(lambda m, p=path: plan(m, p))
+        self.refused(lambda m: plan(m, read_only=True))                         # the plan view is writable by definition
+        for policy in ("ask", "auto", "accept-edits", "dont-ask", "bypass"):
+            with self.subTest("refuses under " + policy):
+                self.refused(lambda m, p=policy: plan(m, policy=p))
+        self.refused(lambda m: plan(m, others_read_only=False))                 # under plan it is the ONLY writable root
+        self.refused(lambda m: plan(m, twice=True))                             # at most once
+        # PID 1 makes the directory from `source`, the supervisor admits the root by `guestPath`: for anything under /workspace/plan on either side they are one path.
+        def apart(m, guest, source):
+            plan(m)
+            item(m)["roots"][-1].update(guestPath=guest, source=source)
+        view = "/workspace/plan/%s/7" % sid
+        self.refused(lambda m: apart(m, view, "/workspace/plan/%s/8" % sid))         # the supervisor admits epoch 7, PID 1 makes epoch 8
+        self.refused(lambda m: apart(m, view, "/workspace/repos/elsewhere"))        # a plan view whose directory is somewhere else
+        self.refused(lambda m: apart(m, "/workspace/repos/elsewhere", view))        # an ordinary root whose directory PID 1 would treat as a plan view
+        def ordinary_with_plan_source(m):
+            item(m)["roots"][0]["source"] = "/workspace/plan/%s/9" % sid
+        self.refused(ordinary_with_plan_source)
+        self.refused(lambda m: item(m)["roots"][0].__setitem__("source", "/workspace/plan"))
 
     def test_a_host_query_conversation_has_a_narrower_view_and_plan_is_read_only(self):
         item = lambda m: m["conversations"][0]
@@ -1883,7 +1969,10 @@ class ConversationSessionTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E", "C", "runtime_ready"])
         self.assertEqual(channel.sent[5][1], gb.conversations_payload(gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-guided"]), "down")))
-        self.assertEqual(channel.sent[-1][1], payload_of(POSITIVE["bootstrap-up-runtime-ready"]))
+        # the vector's `continuations` is [] (its set is tools-only); a host-query conversation is run fresh by this guest and says so
+        expected = json.loads(payload_of(POSITIVE["bootstrap-up-runtime-ready"]))
+        expected["continuations"] = ["fresh"]
+        self.assertEqual(channel.sent[-1][1], gb.canonical_text(expected).encode())
 
     def test_a_tools_only_set_reports_how_many_conversations_the_supervisor_serves(self):
         status, channel = self.run_session([down("bootstrap-down-conversations-tools-only"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 2]))])
@@ -1906,6 +1995,13 @@ class ConversationSessionTests(unittest.TestCase):
         self.assertEqual([k for k in self.kinds(channel) if k == "C"], ["C"])
         status, channel = self.run_session([down("bootstrap-down-conversations-guided"), down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
         self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:second_conversations"])   # one that arrived while PID 1 was busy
+
+    def test_a_root_source_pid_1_would_refuse_is_answered_bad_conversations_without_bothering_pid_1(self):
+        body = conversations_vector()
+        body["conversations"][0]["roots"][0]["source"] = "/workspace/repos/" + "a" * 240
+        status, channel = self.run_session([(gb.TAG_DOWN, conversations_body(body))])
+        self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:bad_conversations"))
+        self.assertNotIn("C", self.kinds(channel))
 
     def test_an_unbound_or_invalid_set_is_refused_without_bothering_pid_1(self):
         wrong_nonce = conversations_vector()
@@ -1943,6 +2039,147 @@ class ConversationSessionTests(unittest.TestCase):
 
 
 
+class LateChannel(FakeChannel):
+    """The host's next message is not there yet when the helper looks for one; it arrives later (while PID 1 mounts, or after the answer)."""
+    def has_pending(self):
+        return False
+
+
+class ShareSessionTests(unittest.TestCase):
+    """The helper's half of the share step (revision 3, design 2026-10-18 section 2.5): it judges and binds the host's `shares`, hands PID 1 the set, and turns
+    PID 1's one-byte answer into `shares_mounted` or a share fault. A set that follows a share step that did not end in `shares_mounted` never reaches PID 1."""
+    BOOT = "66666666-6666-4666-8666-666666666666"
+    OK = (gb.TAG_SHARES_RESULT, bytes([gb.SHARES_MOUNTED]))
+
+    def run_session(self, after_mounted, channel_class=FakeChannel):
+        incoming = [down("bootstrap-down-plan"), down("bootstrap-down-ready"), (gb.TAG_MOUNT_RESULT, b"\x01"), *after_mounted]
+
+        class D:
+            def close(self):
+                pass
+
+        channel = channel_class(incoming)
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        return session.run(), channel
+
+    def kinds(self, channel):
+        out = []
+        for tag, body in channel.sent:
+            if tag != gb.TAG_UP:
+                out.append(chr(tag))
+                continue
+            message = gb.parse_bootstrap_message(body, "up")
+            out.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
+        return out
+
+    @staticmethod
+    def shares_message():
+        return gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-shares"]), "down")
+
+    @staticmethod
+    def body(message):
+        return (gb.TAG_DOWN, gb.canonical_text(message).encode())
+
+    def test_a_bound_share_set_goes_to_pid_1_and_a_yes_is_answered_with_shares_mounted_then_the_set_may_start(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))])
+        self.assertEqual(status, 0)
+        self.assertEqual(self.kinds(channel), ["hello", "receipt", "M", "mounted", "E", "S", "shares_mounted", "C", "runtime_ready"])
+        self.assertEqual(channel.sent[5][1], gb.shares_payload(self.shares_message()))
+        self.assertEqual(channel.sent[6][1], payload_of(POSITIVE["bootstrap-up-shares-mounted"]))   # byte for byte the contract's vector
+
+    def test_the_payload_to_pid_1_is_kind_flags_tag_and_path_per_share(self):
+        message = self.shares_message()
+        payload = gb.shares_payload(message)
+        at, items = 1, []
+        self.assertEqual(payload[0], len(message["shares"]))
+        for _ in range(payload[0]):
+            kind, flags, tag_length = payload[at], payload[at + 1], payload[at + 2]
+            tag = payload[at + 3:at + 3 + tag_length].decode()
+            at += 3 + tag_length
+            path = payload[at + 1:at + 1 + payload[at]].decode()
+            at += 1 + payload[at]
+            items.append({"tag": tag, "guestPath": path, "readOnly": flags == 1, "kind": ["folder", "guidance", "memory", "outputs"][kind]})
+        self.assertEqual(at, len(payload))
+        self.assertEqual(items, message["shares"])
+        self.assertEqual({item["kind"] for item in items}, {"folder", "guidance", "memory", "outputs"})
+
+    def test_pid_1s_two_refusals_become_the_two_share_faults_and_no_set_reaches_pid_1_after_either(self):
+        for result, code, vector in ((gb.SHARES_INVENTORY, "share_inventory", "bootstrap-up-fault-share-inventory"), (gb.SHARES_MOUNT_FAILED, "share_mount_failed", "bootstrap-up-fault-share-mount-failed"),
+                                     (7, "share_mount_failed", "bootstrap-up-fault-share-mount-failed")):
+            with self.subTest(code=code, result=result):
+                status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_SHARES_RESULT, bytes([result])), down("bootstrap-down-conversations-guided")])
+                self.assertEqual(status, 0)
+                self.assertEqual(self.kinds(channel)[-3:], ["S", "fault:" + code, "fault:bad_conversations"])
+                self.assertEqual(channel.sent[-2][1], payload_of(POSITIVE[vector]))
+                self.assertNotIn("C", self.kinds(channel))
+                self.assertNotIn("shares_mounted", self.kinds(channel))
+
+    def test_a_share_set_that_names_another_operation_or_nonce_mounts_nothing(self):
+        for key, value in (("nonce", "ab" * 16), ("operationId", "filesystem_77777777-7777-4777-8777-777777777777")):
+            with self.subTest(key):
+                message = self.shares_message()
+                message[key] = value
+                status, channel = self.run_session([self.body(message)])
+                self.assertEqual((status, self.kinds(channel)[-1]), (0, "fault:share_mount_failed"))
+                self.assertNotIn("S", self.kinds(channel))
+                status, channel = self.run_session([self.body(message), down("bootstrap-down-conversations-guided")], LateChannel)
+                self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+                self.assertNotIn("S", self.kinds(channel))
+                self.assertNotIn("C", self.kinds(channel))
+                # the fault is said under the exchange's own ids, never the ones the stray message named
+                fault = gb.parse_bootstrap_message(channel.sent[-2][1], "up")
+                plan = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-plan"]), "down")
+                self.assertEqual((fault["operationId"], fault["nonce"]), (plan["operationId"], plan["nonce"]))
+
+    def test_the_host_speaking_before_it_could_have_seen_shares_mounted_mounts_nothing(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_host_message_that_arrives_while_pid_1_mounts_turns_the_answer_into_a_fault(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_DOWN, payload_of(POSITIVE["bootstrap-down-conversations-guided"])), self.OK], LateChannel)
+        self.assertEqual(self.kinds(channel)[-3:], ["S", "fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("shares_mounted", self.kinds(channel))
+        self.assertNotIn("C", self.kinds(channel))
+
+    def test_a_second_share_set_or_one_after_the_conversation_set_mounts_nothing(self):
+        status, channel = self.run_session([down("bootstrap-down-shares"), self.OK, down("bootstrap-down-shares"), down("bootstrap-down-conversations-guided")], LateChannel)
+        self.assertEqual(self.kinds(channel)[-3:], ["shares_mounted", "fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertEqual(self.kinds(channel).count("S"), 1)
+        status, channel = self.run_session([down("bootstrap-down-conversations-guided"), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1])), down("bootstrap-down-shares")], LateChannel)
+        self.assertEqual(self.kinds(channel)[-2:], ["runtime_ready", "fault:share_mount_failed"])
+        self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_broken_share_set_is_answered_and_blocks_the_set(self):
+        broken = payload_of(POSITIVE["bootstrap-down-shares"]).replace(b'"kind":"memory"', b'"kind":"memories"')
+        status, channel = self.run_session([(gb.TAG_DOWN, broken), down("bootstrap-down-conversations-guided")])
+        self.assertEqual(self.kinds(channel)[-2:], ["fault:share_mount_failed", "fault:bad_conversations"])
+        self.assertNotIn("S", self.kinds(channel))
+        for name in ("shares-empty-list", "shares-thirteen", "shares-ten-folders", "shares-duplicate-tag", "shares-duplicate-guest-path", "shares-guidance-writable",
+                     "shares-memory-read-only", "shares-outputs-wrong-mount", "shares-folder-nested-mount", "shares-folder-outside-folders", "shares-two-memory"):
+            with self.subTest(name):
+                status, channel = self.run_session([(gb.TAG_DOWN, bytes.fromhex(NEGATIVE[name]["hex"])[16:])])
+                self.assertEqual(self.kinds(channel)[-1], "fault:share_mount_failed")
+                self.assertNotIn("S", self.kinds(channel))
+
+    def test_a_broken_channel_while_pid_1_mounts_ends_the_helper(self):
+        status, channel = self.run_session([down("bootstrap-down-shares")])
+        self.assertEqual(status, 2)
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_MOUNT_RESULT, b"\x01")])
+        self.assertEqual(status, 2)
+        status, channel = self.run_session([down("bootstrap-down-shares"), (gb.TAG_SHARES_RESULT, b"\x00\x00")])
+        self.assertEqual(status, 2)
+
+    def test_the_revision_two_helper_does_not_know_shares(self):
+        gb.set_revision_three(False)
+        self.addCleanup(gb.set_revision_three, True)
+        message = json.loads(payload_of(POSITIVE["bootstrap-down-shares"]))
+        message["v"] = 1
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(gb.canonical_text(message).encode(), "down")
+        self.assertEqual(caught.exception.code, "unknown_type")
+
+
 def time_now():
     import time
     return time.monotonic()
@@ -1952,7 +2189,7 @@ def time_now():
 
 ORDER_VECTORS = json.loads((VECTORS / "bootstrap-order.json").read_text())
 ORDER_STEPS = {"hello": ("up", None), "plan": ("down", "hello"), "receipt": ("up", "plan"), "ready": ("down", "receipt"), "mounted": ("up", "ready"),
-               "conversations": ("down", "mounted"), "runtime_ready": ("up", "conversations")}
+               "shares": ("down", "mounted"), "shares_mounted": ("up", "shares"), "conversations": ("down", "mounted"), "runtime_ready": ("up", "conversations")}
 
 
 def bootstrap_order(events):
@@ -1969,6 +2206,11 @@ def bootstrap_order(events):
         if kind in seen:
             return {"ok": False, "index": index, "reason": {"conversations": "second_conversations", "runtime_ready": "duplicate_runtime_ready"}.get(kind, "out_of_order")}
         if step[1] is not None and step[1] not in seen:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        # Shares (revision 3) are optional, but when they are sent they come before the set, and the set waits for `shares_mounted`.
+        if kind == "shares" and "conversations" in seen:
+            return {"ok": False, "index": index, "reason": "out_of_order"}
+        if kind == "conversations" and "shares" in seen and "shares_mounted" not in seen:
             return {"ok": False, "index": index, "reason": "out_of_order"}
         seen.add(kind)
     return {"ok": True}
@@ -2001,27 +2243,43 @@ class RecordingChannel(FakeChannel):
 
 
 class BootstrapOrderVectorTests(unittest.TestCase):
-    """bootstrap-order.json: 16 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
-    cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason."""
+    """bootstrap-order.json: 25 transcripts. The guest is one end of each: it sends the `up` messages and judges the `down` ones. A transcript the guest
+    cannot be put into (it always speaks first, so `plan-before-hello` cannot happen) is named below with the reason. The nine transcripts that carry host-backed
+    `shares` (contract revision 3, SH6) are completed like the others: PID 1's answer to the helper's 'S' comes just before the `up` message it leads to."""
     BOOT = "66666666-6666-4666-8666-666666666666"
+    SHARE_CASES = ("full-sequence-with-shares", "shares-without-conversations", "conversations-before-shares-mounted", "shares-after-conversations", "shares-before-mounted",
+                   "shares-mounted-without-shares", "shares-twice", "shares-mounted-travelling-down", "fault-answering-shares")
+
+    @staticmethod
+    def with_shares(case):
+        return any(e["t"] in ("shares", "shares_mounted") for e in case["events"])
+
     BODIES = {"plan": lambda: payload_of(POSITIVE["bootstrap-down-plan"]), "ready": lambda: payload_of(POSITIVE["bootstrap-down-ready"]),
+              "shares": lambda: payload_of(POSITIVE["bootstrap-down-shares"]),
               "conversations": lambda: payload_of(POSITIVE["bootstrap-down-conversations-guided"]),
               "mounted": lambda: payload_of(POSITIVE["bootstrap-up-mounted"]),
-              "reboot": lambda: gb.canonical_text({"v": 1, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
+              "shares_mounted": lambda: payload_of(POSITIVE["bootstrap-up-shares-mounted"]),
+              "reboot": lambda: gb.canonical_text({"v": 2, "t": "reboot", "operationId": "filesystem_x", "nonce": "0f" * 16}).encode()}
 
     def inputs_for(self, events):
         """The channel the transcript's `down` events make: PID 1's mount and supervisor answers come after the message that asks for them."""
         incoming = []
         pending_answer = None
+        last_down = None
         for index, (direction, kind) in enumerate(events):
             if direction == "up":
                 if kind == "mounted":   # PID 1 answers the guest's mount request just before the guest says `mounted`
                     incoming.append((gb.TAG_MOUNT_RESULT, b"\x01"))
+                if kind == "shares_mounted":   # and its share step just before `shares_mounted`
+                    incoming.append((gb.TAG_SHARES_RESULT, bytes([gb.SHARES_MOUNTED])))
+                if kind == "fault" and last_down == "shares" and pending_answer is None:   # a share step that failed (the inventory did not match)
+                    incoming.append((gb.TAG_SHARES_RESULT, bytes([gb.SHARES_INVENTORY])))
                 if pending_answer is not None and kind in ("runtime_ready", "fault"):
                     incoming.append(pending_answer(kind))
                     pending_answer = None
                 continue
             incoming.append((gb.TAG_DOWN, self.BODIES[kind]()))
+            last_down = kind
             if kind == "conversations" and pending_answer is None:
                 pending_answer = lambda up: (gb.TAG_CONVERSATIONS_RESULT, bytes([2, 0]) if up == "fault" else bytes([0, 1]))
         if pending_answer is not None:
@@ -2039,7 +2297,7 @@ class BootstrapOrderVectorTests(unittest.TestCase):
         return channel
 
     def test_the_port_of_the_oracle_gives_every_recorded_result(self):
-        self.assertEqual(len(ORDER_VECTORS["cases"]), 16)
+        self.assertEqual(len(ORDER_VECTORS["cases"]), 25)
         for case in ORDER_VECTORS["cases"]:
             with self.subTest(case["name"]):
                 self.assertEqual(bootstrap_order([(e["dir"], e["t"]) for e in case["events"]]), case["result"])
@@ -2075,7 +2333,8 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                     self.assertEqual(merged[result["index"]], violating)
                 self.assertLessEqual(merged.count(("up", "runtime_ready")), 1)
                 self.assertLessEqual(sum(1 for tag, _ in channel.sent if tag == gb.TAG_CONVERSATIONS), 1)
-        self.assertEqual(len(names), 15)
+        self.assertEqual(len(names), 24)
+        self.assertEqual(sorted(c["name"] for c in ORDER_VECTORS["cases"] if self.with_shares(c)), sorted(self.SHARE_CASES))
 
     def test_the_guest_says_runtime_ready_only_for_a_set_that_came_after_mounted(self):
         for case in ORDER_VECTORS["cases"]:
@@ -2088,6 +2347,21 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                     at = merged.index(("up", "runtime_ready"))
                     self.assertIn(("down", "conversations"), merged[:at])
                     self.assertIn(("up", "mounted"), merged[:merged.index(("down", "conversations"))])
+                    # a set that came after a share set starts only once that share set was mounted and the host was told so
+                    if ("down", "shares") in merged[:merged.index(("down", "conversations"))]:
+                        self.assertIn(("up", "shares_mounted"), merged[:merged.index(("down", "conversations"))])
+
+    def test_the_share_set_reaches_pid_1_only_in_order_and_shares_mounted_only_after_pid_1_said_yes(self):
+        reached = {}
+        for case in ORDER_VECTORS["cases"]:
+            if case["name"] == "plan-before-hello":
+                continue
+            channel = self.run_guest([(e["dir"], e["t"]) for e in case["events"]])
+            reached[case["name"]] = sum(1 for tag, _ in channel.sent if tag == gb.TAG_SHARES)
+            ups = [gb.parse_bootstrap_message(body, "up")["t"] for tag, body in channel.sent if tag == gb.TAG_UP]
+            self.assertLessEqual(ups.count("shares_mounted"), reached[case["name"]], case["name"])
+        self.assertEqual({name for name, count in reached.items() if count}, {"full-sequence-with-shares", "shares-without-conversations", "fault-answering-shares"})
+        self.assertEqual(max(reached.values()), 1)
 
     def test_exact_outputs_for_the_violations_by_the_host(self):
         expect = {
@@ -2098,6 +2372,16 @@ class BootstrapOrderVectorTests(unittest.TestCase):
             "second-set-before-the-answer": ["hello", "receipt", "mounted", "runtime_ready", "fault:second_conversations"],
             "unknown-message": ["hello", "fault:bad_plan"],
             "mounted-travelling-down": ["hello", "receipt", "fault:bad_plan"],
+            # the nine transcripts with host-backed shares (SH6)
+            "full-sequence-with-shares": ["hello", "receipt", "mounted", "shares_mounted", "runtime_ready"],
+            "shares-without-conversations": ["hello", "receipt", "mounted", "shares_mounted"],
+            "conversations-before-shares-mounted": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "shares-after-conversations": ["hello", "receipt", "mounted", "runtime_ready", "fault:share_mount_failed"],
+            "shares-before-mounted": ["hello", "receipt", "fault:bad_plan"],
+            "shares-mounted-without-shares": ["hello", "receipt", "mounted"],
+            "shares-twice": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "shares-mounted-travelling-down": ["hello", "receipt", "mounted", "fault:share_mount_failed"],
+            "fault-answering-shares": ["hello", "receipt", "mounted", "fault:share_inventory"],
         }
         for name, ups in expect.items():
             with self.subTest(name):
@@ -2109,6 +2393,135 @@ class BootstrapOrderVectorTests(unittest.TestCase):
                         message = gb.parse_bootstrap_message(body, "up")
                         got.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
                 self.assertEqual(got, ups)
+
+
+class FileChannelRevisionTests(unittest.TestCase):
+    """Revision 3 of the bootstrap vocabulary is spoken only with `--file-channel-v1` (an image that declares `file-channel-v1`). The production helper is revision 2, byte for byte
+    what it was: the module-level setUp switches this module to revision 3, so these tests switch back where they need to, and restore."""
+    BOOT = "66666666-6666-4666-8666-666666666666"
+
+    def revision_two(self):
+        gb.set_revision_three(False)
+        self.addCleanup(gb.set_revision_three, True)
+
+    def downgraded(self, name):
+        """The revision-2 spelling of a revision-3 conversations vector: `v` 1, no browseUid, no cold-resume fields, the 600 s ceiling."""
+        message = json.loads(payload_of(POSITIVE[name]))
+        message["v"] = 1
+        message.pop("browseUid", None)
+        for item in message["conversations"]:
+            if item["runtime"] is not None:
+                item["runtime"].pop("continuation", None)
+                item["runtime"].pop("endedGuestBoots", None)
+                item["runtime"]["timeoutMs"] = min(item["runtime"]["timeoutMs"], 600_000)
+        return message
+
+    def test_the_revision_two_helper_is_the_old_helper(self):
+        self.revision_two()
+        self.assertEqual(gb.BOOTSTRAP_VERSION, 1)
+        ready = json.loads(payload_of(POSITIVE["bootstrap-down-ready"]))
+        ready["v"] = 1
+        self.assertEqual(gb.parse_bootstrap_message(gb.canonical_text(ready).encode(), "down")["v"], 1)
+        conversations = self.downgraded("bootstrap-down-conversations-guided")
+        self.assertEqual(gb.parse_bootstrap_message(gb.canonical_text(conversations).encode(), "down")["t"], "conversations")
+        payload = gb.conversations_payload(gb.parse_bootstrap_message(gb.canonical_text(conversations).encode(), "down"))
+        self.assertEqual(payload[:2], bytes([2, 1]))                                   # the plain payload: no bit 7, no extension
+        self.assertTrue(payload.isascii())
+        self.assertEqual(gb.FAULT_CODES, gb.FAULT_CODES_V3[:len(gb.FAULT_CODES)])
+        base = {"operationId": "filesystem_55555555-5555-4555-8555-555555555555", "nonce": "0f" * 16}
+        for code in gb.FAULT_CODES_V3[len(gb.FAULT_CODES):]:
+            with self.assertRaises(ValueError):
+                gb.encode_bootstrap_message({"t": "fault", "code": code, **base})   # the four new codes do not exist in revision 2
+
+    def test_the_revision_two_helper_refuses_every_revision_three_message_it_is_sent(self):
+        self.revision_two()
+        names = [v["name"] for v in VECTOR_DATA["positive"] if bytes.fromhex(v["hex"])[5] == 1 and v["direction"] == "down" and v["name"] != "bootstrap-down-plan"]
+        self.assertGreaterEqual(len(names), 7)
+        for name in names:
+            with self.subTest(name):
+                with self.assertRaises(gb.ProtocolError):
+                    gb.parse_bootstrap_message(payload_of(POSITIVE[name]), "down")
+
+    def test_the_revision_three_helper_refuses_every_revision_two_message_with_version(self):
+        ready = json.loads(payload_of(POSITIVE["bootstrap-down-ready"]))
+        ready["v"] = 1
+        with self.assertRaises(gb.ProtocolError) as caught:
+            gb.parse_bootstrap_message(gb.canonical_text(ready).encode(), "down")
+        self.assertEqual(caught.exception.code, "version")
+
+    def test_configure_selects_the_vocabulary_from_the_command_line(self):
+        base = ["--channel-fds", "3,4", "--data", "/dev/vda:254:0", "--environment", "/dev/vdb:254:16"]
+        self.addCleanup(gb.set_revision_three, True)
+        gb.configure(base)
+        self.assertEqual((gb.REVISION_THREE, gb.BOOTSTRAP_VERSION), (False, 1))
+        gb.configure(base + ["--file-channel-v1"])
+        self.assertEqual((gb.REVISION_THREE, gb.BOOTSTRAP_VERSION), (True, 2))
+        gb.configure(base)
+        self.assertEqual(gb.REVISION_THREE, False)
+
+    def test_the_flag_switches_the_revision_and_only_the_flag(self):
+        base = ["--channel-fds", "3,4", "--data", "/dev/vda:254:0", "--environment", "/dev/vdb:254:16"]
+        flags = {}
+        gb.parse_arguments(base, flags)
+        self.assertEqual(flags, {"file_channel_v1": False})
+        flags = {}
+        self.assertEqual(gb.parse_arguments(base + ["--file-channel-v1"], flags)[:2], (3, 4))
+        self.assertEqual(flags, {"file_channel_v1": True})
+        flags = {}
+        gb.parse_arguments(["--file-channel-v1"] + base, flags)
+        self.assertEqual(flags, {"file_channel_v1": True})
+        for bad in (base + ["--file-channel-v1", "--file-channel-v1"], base + ["--file-channel-v1=1"], base + ["--file-channel-v2"]):
+            with self.assertRaises(gb.Refused):
+                gb.parse_arguments(bad, {})
+        self.assertEqual(gb.main(["--channel-fds", "3"]), 64)
+        gb.set_revision_three(True)
+
+    def run_session(self, name):
+        incoming = [down("bootstrap-down-plan"), down("bootstrap-down-ready"), (gb.TAG_MOUNT_RESULT, b"\x01"), down(name), (gb.TAG_CONVERSATIONS_RESULT, bytes([0, 1]))]
+
+        class D:
+            def close(self):
+                pass
+
+        channel = FakeChannel(incoming)
+        session = gb.Session(channel, FakeEngine(), lambda plan: [D(), D()], self.BOOT, verify=lambda disks, plan: [UUID_A, UUID_B])
+        session.run()
+        return channel
+
+    def faults(self, channel):
+        out = []
+        for tag, body in channel.sent:
+            if tag == gb.TAG_UP:
+                message = gb.parse_bootstrap_message(body, "up")
+                out.append(message["t"] + (":" + message["code"] if message["t"] == "fault" else ""))
+        return out
+
+    def test_a_resume_has_no_store_to_find_and_never_reaches_pid_1(self):
+        channel = self.run_session("bootstrap-down-conversations-resume")
+        self.assertEqual(self.faults(channel)[-1], "fault:resume_store_missing")
+        self.assertNotIn(gb.TAG_CONVERSATIONS, [tag for tag, _ in channel.sent])
+
+    def test_either_is_run_fresh_and_the_host_is_told_so(self):
+        channel = self.run_session("bootstrap-down-conversations-either")
+        self.assertEqual(self.faults(channel)[-1], "runtime_ready")
+        ready = json.loads(next(body for tag, body in reversed(channel.sent) if tag == gb.TAG_UP))
+        self.assertEqual(ready["continuations"], ["fresh"])
+
+    def test_the_roots_sent_to_pid_1_are_their_sources_not_their_views(self):
+        message = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-browse-uid"]), "down")
+        root = dict(message["conversations"][0]["roots"][0], guestPath="/workspace/folders/a-view", source="/workspace/repos/a-source")
+        message["conversations"][0]["roots"] = [root]
+        payload = gb.conversations_payload(message)
+        self.assertIn(b"\x19/workspace/repos/a-source", payload)               # length byte 25, then the source
+        self.assertNotIn(b"a-view", payload.split(b"[{")[0])
+
+    def test_a_browse_uid_reaches_pid_1_in_the_payload(self):
+        channel = self.run_session("bootstrap-down-conversations-browse-uid")
+        payload = next(body for tag, body in channel.sent if tag == gb.TAG_CONVERSATIONS)
+        message = gb.parse_bootstrap_message(payload_of(POSITIVE["bootstrap-down-conversations-browse-uid"]), "down")
+        self.assertNotEqual(message["browseUid"], None)
+        ids = sum(5 + len(item["logicalSessionId"]) for item in message["conversations"])
+        self.assertEqual(int.from_bytes(payload[2 + ids:6 + ids], "little"), message["browseUid"])
 
 
 if __name__ == "__main__":

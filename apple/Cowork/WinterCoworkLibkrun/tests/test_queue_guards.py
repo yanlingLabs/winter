@@ -200,8 +200,8 @@ class Pins(unittest.TestCase):
     def test_the_queue_is_contiguous_and_every_hash_matches_its_file(self):
         entries = self.queue['basePatches'] + self.queue['newPatches']
         numbers = [int(Path(p['patchFile']).name[:4]) for p in entries]
-        self.assertEqual(numbers, list(range(4, 24)))
-        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.queue['newPatches']], list(range(14, 24)))
+        self.assertEqual(numbers, list(range(4, 27)))
+        self.assertEqual([int(Path(p['patchFile']).name[:4]) for p in self.queue['newPatches']], list(range(14, 27)))
         for entry in entries:
             path = ROOT / entry['patchFile']
             self.assertEqual(hashlib.sha256(path.read_bytes()).hexdigest(), entry['patchSha256'], entry['patchFile'])
@@ -220,7 +220,9 @@ class Pins(unittest.TestCase):
             for name in entry['allowedFiles']:
                 self.assertFalse(name.startswith(('src/vmm/src/device_manager/', 'src/arch/')), name)
                 if name in only_exit_path:
-                    self.assertIn(number, (22, 23), name)
+                    # 0026 (the share devices) sizes the reclaim budget and builds a share's fs device in the
+                    # builder; it adds no attach call (the device-forbidden scan below).
+                    self.assertIn(number, (22, 23, 26) if name == 'src/vmm/src/builder.rs' else (22, 23), name)
             text = (ROOT / entry['patchFile']).read_text()
             self.assertEqual(prep.scope_findings(entry['patchFile'], text, entry['allowedFiles'], self.queue['forbiddenAddedText'], self.queue['deviceForbiddenAddedText'], self.queue['deviceForbiddenExemptFiles']), [])
 
@@ -234,7 +236,8 @@ class Pins(unittest.TestCase):
         text = (ROOT / 'patches/0015-proposed-cowork-production-profile.patch').read_text()
         for name, key in [('KRUN_COWORK_PRODUCTION_VCPUS', 'vcpus'), ('KRUN_COWORK_PRODUCTION_MIN_MEMORY_MIB', 'minMemoryMiB'), ('KRUN_COWORK_PRODUCTION_MAX_MEMORY_MIB', 'maxMemoryMiB')]:
             self.assertEqual(int(re.search(rf'^\+#define {name} (\d+)$', text, re.M).group(1)), self.queue['limits'][key])
-        self.assertEqual(self.queue['deviceInventory'], {'virtioIds': [2, 2, 3, 4, 5], 'maxDevices': 3, 'maxPins': 48, 'maxPinnedBytes': 8388608, 'shutdownGpio': False})
+        self.assertEqual(self.queue['deviceInventory'], {'virtioIds': [2, 2, 3, 4, 5], 'maxDevices': 3, 'maxPins': 48, 'maxPinnedBytes': 8388608, 'shutdownGpio': False,
+                                                         'maxShares': 12, 'shareVirtioId': 26, 'maxDevicesPerShare': 1, 'pinsPerShare': 4, 'pinnedBytesPerShare': 1114136})
         for flag in ['productionReady', 'vmStarted', 'workerBuilt', 'fullResourceGatePassed']:
             self.assertIs(self.queue[flag], False)
         self.assertEqual(self.queue['features'], {'production': 'blk,cowork-production-only', 'oracle': 'blk,cowork-fixture-oracle'})
@@ -252,10 +255,10 @@ class Exports(unittest.TestCase):
             self.assertRegex(value, SHA.pattern)
         self.assertEqual(len(set(values)), 3)
 
-    def test_62_upstream_and_7_canonical_v1_exports_and_no_fixture_symbol(self):
+    def test_62_upstream_and_10_canonical_v1_exports_and_no_fixture_symbol(self):
         e = self.expected['exports']
-        self.assertEqual((len(e['upstream']), len(e['cowork']), e['totalCount']), (62, 7, 69))
-        self.assertEqual((e['upstreamCount'], e['coworkCount']), (62, 7))
+        self.assertEqual((len(e['upstream']), len(e['cowork']), e['totalCount']), (62, 10, 72))
+        self.assertEqual((e['upstreamCount'], e['coworkCount']), (62, 10))
         for names in (e['upstream'], e['cowork']):
             self.assertEqual(names, sorted(set(names)))
             self.assertTrue(all(n.startswith('krun_') for n in names))
@@ -265,7 +268,7 @@ class Exports(unittest.TestCase):
         self.assertFalse(set(e['cowork'] + e['upstream']) & {n[1:] for n in lib.FIXTURE_EXPORTS})
 
     def test_each_production_export_is_declared_by_the_queue_header(self):
-        header = added_text(15, 17, 19, 21, 22)
+        header = added_text(15, 17, 19, 21, 22, 26)
         declared = set(re.findall(r'\b(krun_cowork_\w+_v1)\(', header))
         self.assertEqual(declared, set(self.expected['exports']['cowork']))
 
@@ -317,8 +320,205 @@ class Readme(unittest.TestCase):
         self.assertIn('no signal handler is installed', self.text)
 
     def test_the_stated_counts_match(self):
-        self.assertIn('20 patches, 0004-0023', self.text)
-        self.assertIn('69 `krun_*` symbols', self.text)
+        self.assertIn('23 patches, 0004-0026', self.text)
+        self.assertIn('72 `krun_*` symbols', self.text)
+
+
+class ConfinedServer(unittest.TestCase):
+    """Patch 0024: the confined virtio-fs server core. It touches only the fs server, wires no device, export or
+    gate, defines the SDK constants the pinned libc crate lacks with their header lines, and its suite runs."""
+    PATCH = ROOT / 'patches/0024-proposed-confined-virtiofs-server-core.patch'
+    FILES = ['src/devices/src/virtio/fs/macos/confined/mod.rs', 'src/devices/src/virtio/fs/macos/confined/names.rs', 'src/devices/src/virtio/fs/macos/confined/sys.rs',
+             'src/devices/src/virtio/fs/macos/confined/tests.rs', 'src/devices/src/virtio/fs/macos/mod.rs', 'src/devices/src/virtio/fs/server.rs']
+
+    def setUp(self):
+        self.text = self.PATCH.read_text()
+        self.added = added_text(24)
+
+    def test_it_touches_only_the_fs_server(self):
+        self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', self.text, re.M))), self.FILES)
+        queue = json.loads((ROOT / 'patch-queue.json').read_text())
+        entry = next(p for p in queue['newPatches'] if p['patchFile'] == 'patches/' + self.PATCH.name)
+        self.assertEqual(sorted(entry['allowedFiles']), self.FILES)
+        self.assertTrue(set(self.FILES[:4]) <= set(queue['allAddedFiles']))
+
+    def test_it_wires_no_device_export_or_gate(self):
+        by_file = prep.added_lines_by_file(self.text)
+        code = '\n'.join(l for f, lines in by_file.items() if not f.endswith('/tests.rs') for l in lines)
+        for needle in ['#[no_mangle]', 'extern "C"', 'fn krun_', 'krun_cowork_add_share_v1(', ' Fs::new(', 'device::Fs', 'FsServer', 'attach_', 'register_mmio', 'shm_region', 'VirtioShmRegion', 'map_sender', 'umask(']:
+            self.assertNotIn(needle, code, needle)
+
+    def test_the_sdk_constants_carry_their_header_line_and_value(self):
+        cited = re.findall(r'/// `(sys/(?:fcntl|stdio|errno)\.h):(\d+)`: `#define (\w+) (0x[0-9a-fA-F]+|\d+)`[^\n]*\n\+pub const (\w+): c_u?int = (0x[0-9a-fA-F_]+|\d+);', self.text)
+        self.assertEqual(sorted(c[2] for c in cited), sorted(['O_RESOLVE_BENEATH', 'O_UNIQUE', 'AT_SYMLINK_NOFOLLOW_ANY', 'AT_RESOLVE_BENEATH', 'AT_UNIQUE', 'RENAME_NOFOLLOW_ANY', 'RENAME_RESOLVE_BENEATH', 'ENOTCAPABLE']))
+        expected = {'O_RESOLVE_BENEATH': ('sys/fcntl.h', 128, 0x1000), 'O_UNIQUE': ('sys/fcntl.h', 129, 0x2000), 'AT_SYMLINK_NOFOLLOW_ANY': ('sys/fcntl.h', 184, 0x0800),
+                    'AT_RESOLVE_BENEATH': ('sys/fcntl.h', 185, 0x2000), 'AT_UNIQUE': ('sys/fcntl.h', 187, 0x8000), 'RENAME_NOFOLLOW_ANY': ('sys/stdio.h', 39, 0x10),
+                    'RENAME_RESOLVE_BENEATH': ('sys/stdio.h', 40, 0x20), 'ENOTCAPABLE': ('sys/errno.h', 265, 107)}
+        for header, line, macro, cited_value, name, value in cited:
+            self.assertEqual(macro, name)
+            self.assertEqual((header, int(line), int(cited_value, 0)), expected[name], name)
+            self.assertEqual(int(value.replace('_', ''), 0), expected[name][2], name)
+
+    def test_the_limits_are_the_designs(self):
+        for line in ['pub const MAX_HANDLES: usize = 4096;', 'pub const DIR_LRU: usize = 1024;', 'pub const TIMEOUT: Duration = Duration::from_secs(1);',
+                     'pub const MODE_MASK: u32 = 0o777 & !0o022;', 'pub const CONFINED_MAX_PAGES: u16 = 256;', 'pub const NAME_MAX: usize = 255;']:
+            self.assertIn(line, self.added)
+
+    def test_its_suite_is_run(self):
+        import run_cargo_tests
+        self.assertIn(('krun-devices', 'blk', 'fs::macos::confined'), run_cargo_tests.RUNS)
+
+
+class GitRulesAndQuarantine(unittest.TestCase):
+    """Patch 0025: R15 (the git rules, as revised for H1-H5) and R16 (the quarantine tag) inside the confined server. It
+    touches only the confined server, wires no device, export or gate, keeps the one xattr call R7 allows, pins the design's
+    limits and the config allowlist, and its suite runs with the confined filter."""
+    PATCH = ROOT / 'patches/0025-proposed-confined-virtiofs-git-rules-and-quarantine.patch'
+    DIR = 'src/devices/src/virtio/fs/macos/confined/'
+    NEW = ['git.rs', 'git_tests.rs', 'gitconfig.rs', 'notice.rs', 'quarantine.rs']
+    CHANGED = ['mod.rs', 'sys.rs', 'tests.rs']
+
+    def setUp(self):
+        self.text = self.PATCH.read_text()
+        self.by_file = prep.added_lines_by_file(self.text)
+        self.code = {f: '\n'.join(lines) for f, lines in self.by_file.items() if not f.endswith(('/tests.rs', '/git_tests.rs'))}
+
+    def test_it_touches_only_the_confined_server(self):
+        files = sorted(self.DIR + f for f in self.NEW + self.CHANGED)
+        self.assertEqual(sorted(set(re.findall(r'^diff --git a/(\S+) b/', self.text, re.M))), files)
+        queue = json.loads((ROOT / 'patch-queue.json').read_text())
+        entry = next(p for p in queue['newPatches'] if p['patchFile'] == 'patches/' + self.PATCH.name)
+        self.assertEqual(sorted(entry['allowedFiles']), files)
+        self.assertEqual(sorted(re.findall(r'^diff --git a/\S+ b/(\S+)\nnew file mode', self.text, re.M)), sorted(self.DIR + f for f in self.NEW))
+        self.assertTrue({self.DIR + f for f in self.NEW} <= set(queue['allAddedFiles']))
+
+    def test_it_wires_no_device_export_or_gate(self):
+        code = '\n'.join(self.code.values())
+        for needle in ['#[no_mangle]', 'extern "C"', 'fn krun_', 'krun_cowork_', ' Fs::new(', 'device::Fs', 'FsServer', 'attach_', 'register_mmio', 'shm_region', 'VirtioShmRegion', 'map_sender', 'umask(', 'Command::new']:
+            self.assertNotIn(needle, code, needle)
+
+    def test_the_one_xattr_call_is_the_quarantine_tag(self):
+        calls = {f: c.count('libc::fsetxattr(') for f, c in self.code.items() if 'libc::fsetxattr(' in c}
+        self.assertEqual(calls, {self.DIR + 'quarantine.rs': 1})
+        self.assertIn('libc::fsetxattr(fd, QUARANTINE_NAME.as_ptr(),', self.code[self.DIR + 'quarantine.rs'])
+        for needle in ['libc::setxattr(', 'removexattr(', 'getxattr(', 'listxattr(']:
+            self.assertNotIn(needle, '\n'.join(self.code.values()), needle)
+
+    def test_the_limits_and_the_tag_are_the_designs(self):
+        added = '\n'.join(self.code.values())
+        for line in ['pub const POINTER_MAX: usize = 4096;', 'pub const CONFIG_MAX: u64 = 1 << 20;', 'pub const INCLUDE_DEPTH: usize = 10;',
+                     'pub const QUARANTINE_NAME: &CStr = c"com.apple.quarantine";', 'pub const QUARANTINE_FLAGS: &str = "0081";',
+                     'pub const QUARANTINE_AGENT: &str = "Winter Cowork";', 'format!("{QUARANTINE_FLAGS};{seconds:08x};{QUARANTINE_AGENT};")',
+                     'libc::fpathconf(fd, libc::_PC_CASE_SENSITIVE) == 1']:
+            self.assertIn(line, added)
+
+    def test_the_allowlist_named_refusals_and_suffixes_are_pinned(self):
+        source = self.code[self.DIR + 'gitconfig.rs']
+        table = lambda name: re.findall(r'"([^"]+)"', re.search(rf'pub const {name}: \[[^\]]+\]\s*=\s*\[(.*?)\];', source, re.S).group(1))
+        admitted = table('ADMITTED')
+        self.assertEqual(admitted, ['core.repositoryformatversion', 'core.filemode', 'core.bare', 'core.logallrefupdates', 'core.ignorecase', 'core.precomposeunicode',
+                                    'core.symlinks', 'core.sparsecheckout', 'core.sparsecheckoutcone', 'extensions.objectformat', 'extensions.worktreeconfig',
+                                    'remote.*.url', 'remote.*.pushurl', 'remote.*.fetch', 'remote.*.tagopt', 'remote.*.prune', 'branch.*.remote', 'branch.*.merge',
+                                    'branch.*.rebase', 'branch.*.pushremote', 'submodule.*.url', 'submodule.*.active', 'user.name', 'user.email', 'push.default',
+                                    'rebase.autostash', 'fetch.prune', 'init.defaultbranch', 'index.sparse', 'submodule.*.update'])
+        self.assertEqual(table('ADMITTED_SECTIONS'), ['lfs', 'pull'])
+        suffixes = table('REFUSED_SUFFIXES')
+        self.assertEqual(suffixes, ['cmd', 'command', 'program', 'path', 'helper', 'hook', 'editor', 'pager', 'driver', 'textconv', 'proxy'])
+        self.assertFalse([k for k in admitted + ['core.worktree'] if k.rsplit('.', 1)[1].endswith(tuple(suffixes))])
+        refused = table('NAMED_REFUSALS')
+        for key in ['core.worktree', 'core.fsmonitor', 'core.hookspath', 'core.sshcommand', 'core.editor', 'core.pager', 'core.askpass', 'core.gitproxy',
+                    'core.alternaterefscommand', 'diff.external', 'sequence.editor', 'commit.gpgsign', 'tag.gpgsign', 'push.gpgsign', 'web.browser']:
+            self.assertIn(key, refused)
+        self.assertFalse(set(refused) & set(admitted))
+
+    def test_the_notice_kinds_are_the_abi_values(self):
+        source = self.code[self.DIR + 'notice.rs']
+        self.assertEqual(re.findall(r'NoticeKind::\w+ => "(\w+)"', source), ['git_protected', 'envrc', 'vscode_tasks', 'vscode_settings', 'code_workspace', 'idea_project'])
+        self.assertIn('pub const NOTICE_CAPACITY: usize = NoticeKind::ALL.len();', source)
+
+    def test_its_suite_is_run(self):
+        import run_cargo_tests
+        self.assertIn(('krun-devices', 'blk', 'fs::macos::confined'), run_cargo_tests.RUNS)
+        self.assertIn('#[path = "git_tests.rs"]', '\n'.join(self.by_file[self.DIR + 'tests.rs']))
+
+
+class GuardedFsDevice(unittest.TestCase):
+    """Patch 0026: the guarded fs device of the shares, the R14 budget, the share ABI and the gate clause. It
+    leaves the confined server's module alone, builds no shared-memory region, sizes the budget as the design
+    computes it, declares the ABI exactly as the design's block, admits r.fs only from krun_cowork_add_share_v1,
+    and its suites are run."""
+    PATCH = ROOT / 'patches/0026-proposed-guarded-fs-device-shares-abi-gate.patch'
+    ADDED = ['src/devices/src/virtio/fs/cowork.rs', 'src/devices/src/virtio/fs/cowork_tests.rs', 'src/libkrun/src/cowork_production_shares_tests.rs']
+
+    def setUp(self):
+        self.text = self.PATCH.read_text()
+        self.by_file = prep.added_lines_by_file(self.text)
+        self.queue = json.loads((ROOT / 'patch-queue.json').read_text())
+
+    def test_its_scope_and_new_files(self):
+        touched = sorted(set(re.findall(r'^diff --git a/(\S+) b/', self.text, re.M)))
+        entry = next(p for p in self.queue['newPatches'] if p['patchFile'] == 'patches/' + self.PATCH.name)
+        self.assertEqual(touched, sorted(entry['allowedFiles']))
+        self.assertFalse([f for f in touched if '/fs/macos/' in f or f.endswith('/fs/server.rs')], 'the confined server is left to its own patches')
+        self.assertTrue(set(self.ADDED) <= set(self.queue['allAddedFiles']))
+        self.assertTrue(set(self.ADDED) <= set(re.findall(r'^diff --git a/\S+ b/(\S+)\nnew file mode', self.text, re.M)))
+
+    def test_the_bounds_and_the_budget_are_the_designs(self):
+        device = '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork.rs'])
+        for line in ['pub const MAX_SHARES: usize = 12;', 'pub const TAG_MAX: usize = 32;', 'pub const MAX_CHAIN_DESCRIPTORS: usize = CONFINED_MAX_PAGES as usize + 4;',
+                     'pub const MAX_CHAIN_BYTES: u64 = CONFINED_MAX_PAGES as u64 * 4096 + 8192;', 'pub const MAX_HPQ_BYTES: u64 = 4096;', 'pub const PINS_PER_SHARE: usize = 4;',
+                     'pub const PINNED_BYTES_PER_SHARE: u64 = MAX_CHAIN_BYTES + MAX_HPQ_BYTES + 2 * RING_BYTES;']:
+            self.assertIn(line, device)
+        ring = 16 * 1024 + (6 + 2 * 1024) + (6 + 8 * 1024)
+        per_share = 256 * 4096 + 8192 + 4096 + 2 * ring
+        self.assertEqual((ring, per_share), (26636, 1114136))
+        self.assertEqual((48 + 4 * 12, 8 * 1024 * 1024 + per_share * 12, 3 + 12), (96, 21758240, 15))
+        disks = '\n'.join(self.by_file['src/devices/src/workspace_disks.rs'])
+        self.assertIn('MAX_DEVICES + shares,', disks)
+        self.assertIn('MAX_PINS + PINS_PER_SHARE * shares,', disks)
+        self.assertIn('MAX_PINNED_BYTES + PINNED_BYTES_PER_SHARE * shares as u64,', disks)
+        self.assertIn('devices::workspace_disks::budget(shares)', '\n'.join(self.by_file['src/vmm/src/builder.rs']))
+
+    def test_no_shared_memory_region_and_no_attach_call(self):
+        code = '\n'.join(l for f, lines in self.by_file.items() if not f.endswith('_tests.rs') for l in lines)
+        for needle in ['set_shm_region(', 'VirtioShmRegion {', 'create_fs_region(', 'attach_', 'register_mmio', 'add_subscriber(']:
+            self.assertNotIn(needle, code, needle)
+        self.assertIn('self.shm_region = None;', '\n'.join(self.by_file['src/devices/src/virtio/fs/device.rs']))
+
+    def test_the_abi_is_the_designs_block(self):
+        header = '\n'.join(self.by_file['include/libkrun.h'])
+        self.assertIn('int32_t krun_cowork_add_share_v1(uint32_t ctx_id, const char *tag, int32_t root_fd, uint32_t flags, const char *guest_path);', header)
+        self.assertIn('/* flags: bit 0 = read-only, bit 1 = Winter share (R5 O_UNIQUE), bit 2 = folder rules (R15); every other bit zero.', header)
+        self.assertIn('tag: [a-z0-9-]{1,32}, distinct. root_fd: a directory, borrowed. guest_path: the canonical guest mount path (R15 gitfiles only). */', header)
+        for name in ['krun_cowork_add_share_v1', 'krun_cowork_revoke_share_v1', 'krun_cowork_next_share_event_v1']:
+            self.assertIn('_' + name, lib.PRODUCTION_EXPORTS)
+
+    def test_the_gate_admits_r_fs_only_from_add_share(self):
+        lib_rs = self.by_file['src/libkrun/src/lib.rs']
+        removed = [l[1:] for l in self.text.splitlines() if l.startswith('-') and not l.startswith('---')]
+        self.assertTrue(any('!r.fs.is_empty()' in l for l in removed))
+        self.assertTrue(any('!cowork_shares_admitted(cfg)' in l for l in lib_rs))
+        self.assertEqual(sum('cowork_share: Some(' in l for l in lib_rs), 1, 'only krun_cowork_add_share_v1 builds a share entry')
+        self.assertEqual(sum('cowork_share: None,' in l for l in lib_rs), 3, 'krun_set_root, krun_add_virtiofs4 and the block root add none')
+
+    def test_the_servers_notices_are_forwarded(self):
+        device = '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork.rs'])
+        self.assertIn('notices: fs.notices(),', device)
+        self.assertIn('for kind in self.notices.drain() {', device)
+        self.assertIn('self.share.forward_notices();', device)
+        self.assertIn('share.forward_notices();', '\n'.join(self.by_file['src/libkrun/src/lib.rs']))
+
+    def test_a_reply_area_under_the_out_header_is_refused(self):
+        device = '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork.rs'])
+        self.assertIn('pub const OUT_HEADER_BYTES: u64 = std::mem::size_of::<super::fuse::OutHeader>() as u64;', device)
+        self.assertIn('if !reply_area_fits(index, &request, total(&writable)) {', device)
+        self.assertIn('if writable != 0 || index != HPQ_INDEX {', device)
+        self.assertIn('fn guarded_fs_a_reply_area_under_the_out_header_is_refused_before_pinning()', '\n'.join(self.by_file['src/devices/src/virtio/fs/cowork_tests.rs']))
+
+    def test_its_suites_are_run(self):
+        import run_cargo_tests
+        self.assertIn(('krun-devices', 'blk', 'fs::cowork'), run_cargo_tests.RUNS)
+        self.assertIn(('krun-devices', 'blk', 'fs::cowork'), run_cargo_tests.RELEASE_RUNS)
 
 
 class Composition(unittest.TestCase):
@@ -467,6 +667,10 @@ class CiJob(unittest.TestCase):
     def setUp(self):
         text = (ROOT.parents[2] / '.github/workflows/ci.yml').read_text()
         self.job = text[text.index('\n  libkrun-queue:'):]
+
+    def test_the_composed_hash_asserted_is_the_pinned_one(self):
+        expected = json.loads((ROOT / 'expected-hashes.json').read_text())['composedSourceDiffSha256']
+        self.assertEqual(re.findall(r"d\['fullSourceDiffSha256'\] == '([0-9a-f]{64})'", self.job), [expected])
 
     def test_the_scope_step_does_not_follow_renames(self):
         step = self.job[self.job.index('name: Is this change in scope?'):self.job.index('name: Fetch the pinned upstream source')]

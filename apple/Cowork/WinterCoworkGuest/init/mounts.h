@@ -24,7 +24,9 @@
 #define WG_MS_NOEXEC 8ul
 #define WG_MS_NOATIME 1024ul
 
+#ifndef WG_WORKSPACE_PATH
 #define WG_WORKSPACE_PATH "/workspace"
+#endif
 #define WG_REPLAY_ROOT "/run/winter/replay"
 
 #define WG_WORKING_FLAGS (WG_MS_NOSUID | WG_MS_NODEV | WG_MS_NOATIME)

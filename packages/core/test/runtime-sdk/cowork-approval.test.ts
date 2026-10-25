@@ -288,6 +288,11 @@ test("planScratch: the epoch comes from the port, never from the path - it moves
     expect({ kind: (await outcome(g, ...write(0))).kind }).toEqual({ kind: "deny" });
     expect((await outcome(g, "Read", { file_path: planFile("cowork-1", 0) })).kind).toBe("deny");
   }
+  // A port answering -1 is no epoch: even the path spelled with that epoch is outside, for every tool.
+  const negative = build(state("plan"), { ports: { planScratchEpoch: () => -1 } });
+  for (const [tool, input] of [["Write", { file_path: planFile("cowork-1", -1), content: "x" }], ["Read", { file_path: planFile("cowork-1", -1) }]] as const) {
+    expect((await outcome(negative, tool, { ...input })).kind).toBe("deny");
+  }
   // Unsafe session identity: nobody's plan scratch.
   const none = (sessionId: string) => projectCoworkCall({ identity: () => ({ workspaceId: "w", sourceRevision: 1 }), snapshot: () => new CoworkPolicyTransitionMachine(state("plan"), { closeAdmission: async () => {}, drain: async () => "drained", installView: async () => {} }).snapshot(), classifyPath, planViewInstalled: () => true, planScratchEpoch: () => 0 },
     { toolName: "Write", input: { file_path: planFile(sessionId, 0), content: "" }, sessionId }).kind;

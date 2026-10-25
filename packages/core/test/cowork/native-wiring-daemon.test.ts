@@ -44,13 +44,13 @@ test("production default: the wiring exists, builds nothing, and stop is unchang
   const after = reopen(h); expect(after.workspace.power).toBe("stopped"); after.db.close();
 });
 
-test("an injected environment is not asked at boot nor at a stop with no guest", async () => {
+test("an injected environment is asked at boot only to drive the one pending creation (it answers uncertain, nothing concludes), never to build a host, and not at a stop with no guest", async () => {
   const h = createHarness(); const asked = { count: 0 };
   const d = await boot(h, { environment: environment(h, asked), imagePins: pinned as never });
-  expect(asked.count).toBe(0);
+  expect(asked.count).toBe(1); // the seeded creation is still pending: the daemon resumes it once at boot, through an environment that carries no provisioning port
   expect(d.coworkNative!.built).toBe(false);
   await d.stop(); daemon = undefined;
-  expect(asked.count).toBe(0);
+  expect(asked.count).toBe(1);
   expect(h.launcher.spawned).toEqual([]);
 });
 
@@ -116,4 +116,23 @@ test("source pin: the Cowork service receives the native port only when a caller
   // the drain is awaited before the stores close: closeRest (store.close, runtime.close) runs only after it settles
   expect(source).toMatch(/settled\.then\(closeRest\)/);
   expect(source.indexOf("const guestsDrained")).toBeLessThan(source.indexOf("const closeRest"));
+});
+
+// ---------------------------------------------------------------------------------------------------- S7B part 3: the provisioning port in the daemon
+test("production default: no provisioning port exists, and nothing is driven at boot", async () => {
+  const h = createHarness();
+  const d = await boot(h);
+  expect(d.coworkNative!.provisioningPort()).toBeUndefined();
+  expect(d.coworkNative!.built).toBe(false);
+});
+
+test("an injected environment's provisioning port is driven for the pending creation once at boot (the host's resume), and a failed answer concludes it", async () => {
+  const h = createHarness(); const asked = { count: 0 };
+  const calls: string[] = [];
+  const base = environment(h, asked);
+  const withPort = () => ({ ...base(), provisioningPort: { available: () => true, admit: () => {}, provision: async (workspaceId: string, operationId: string) => { calls.push(`${workspaceId}:${operationId}`); return { status: "applied" as const }; } } });
+  await boot(h, { environment: withPort, imagePins: pinned as never });
+  for (let waited = 0; calls.length === 0 && waited < 100; waited += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  expect(calls).toHaveLength(1);
+  expect(calls[0]!.startsWith(`${h.workspaceId}:`)).toBe(true);
 });

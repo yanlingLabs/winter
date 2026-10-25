@@ -17,7 +17,8 @@ test("create parses to a Cowork binding with no invented defaults; list takes th
     [["session", "delete", "w1"], "Unknown workspace session command"],
     [["session", "list"], "Unexpected or missing positional arguments"],
   ] as [string[], string][]) expect(() => parseCoworkSessionArgs(args)).toThrow(message);
-  expect(COWORK_CLI_USAGE).toContain("winter workspace session create <workspaceId> --source ID [--cwd RELATIVE] --request-id ID [--json]");
+  // Hidden until a daemon carries a session door (the D6 flip): unreachable today, so the usage never names it.
+  expect(COWORK_CLI_USAGE).not.toContain("workspace session");
 });
 
 test("create sends session.create {mode: cowork} and prints the id; list shows only that workspace's Cowork rows", async () => {
