@@ -66,14 +66,14 @@
   "builderCommit": "180d3effd7ddbb9406aeea0912f76c78ef20cf75",
   "packageLockSha256": "c6eb4ea58479afc740e3f3b1286afd8e175c91a0876d7cdc8a66df07ca85755e",
   "expectedArtifact": {
-    "runtimeSha256": "e0c6ed04bad3563336b90748e0f23dcf4f31a4601927cdaac97bbc95fbeddec5",
-    "cpioSha256": "511059532d9e0a35504f9fcc90cf6cd1740169231a805162bfb6fe20359a7bd4",
-    "rootManifestSha256": "ac58670175e4c741f29e45e7ba367ac9cd4cc12d0552bffa5335ded9620c6722",
+    "runtimeSha256": "5f8d4102bfdde2f1361fb766b2d892f2c5475afce296cae1bc8da87572c0dcea",
+    "cpioSha256": "5207c9bb9f9ab1e4867b7dff143f19bac0c3bfcf974e6eca63483945a34b83bc",
+    "rootManifestSha256": "f86c1863a2a62881024dc67816a9f5f95228583e4a730fc0127771ac8f623f6a",
     "helperBinarySha256": {
       "file-worker.c": "7526bb029c0d336988fbe0b3d2b3dbcb7aba48e8d41448e80b93531d7d2f2f08",
       "linux-runtime-compartment.c": "40049e5cb751d720a20dc957aaabb66a8ab74710ad5039d8f26448139278534a",
-      "linux-session-owner.c": "baae4781ef94f2eb54aeb78889261a9025f1246f7e8a6ac1df5b7a32c7a68348",
-      "linux-tool-compartment.c": "0159815a88a60f3005a4bcad96d46b6166c7667ea24bb0b94d13d75f2547299b",
+      "linux-session-owner.c": "8fd03dd4e5389f67db136026b092164d69af7fabf9a67eda364df26078559048",
+      "linux-tool-compartment.c": "071378c6f6a6727de5d30f4ef3434e3a71ecf0453b15eda6c20359bf91bba1c7",
       "process-worker.c": "f63d9212c01e60930a956a87806a7240ab8dd98ed9de9d2ac1bfbd6b2dd91a16"
     }
   },
@@ -108,18 +108,18 @@
       "#50, the cold-resume owner patch (linux-session-owner.c changes: the session-owner library pin moves; the supervisor and the tool launcher are unchanged from #52)"
     ],
     "supervisorSha256": "7ecbdc1ef15eed6111ca180b67687f0be2cdf9e63e2573e0835401e633b0fc78",
-    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) were source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests."
+    "note": "previousCommit is the last commit for which an artifact was built and pinned (previousExpectedArtifact). Both later pins (093fb3ea, then 7e71929d, SDK main with #27 to #30) were source-only: nothing was rebuilt, so expectedArtifact stays unpinned. The helper C sources and build-runtime inputs are identical between 093fb3ea and 7e71929d; only linux-supervisor.py (and tests, docs and the SDK package) changed. From the host-query runtime change on, the artifact is pinned again (expectedArtifact): the host-query runtime (launcher, owner library, executable) replaced the unused main-entry runtime, and the whole image rebuilt twice with identical digests. Build 5 (SDK ec91fe06, the plan view, the shares and the environment gitconfig; two identical builds) repinned expectedArtifact, the owner library and the guest init and relay binaries; previousCommit stays 39ba77ec."
   },
   "guest": {
     "target": "aarch64-linux-musl",
     "zig": "0.14.1",
     "programs": {
       "init": {
-        "binarySha256": null,
+        "binarySha256": "dede7fd9ddc9eb954c29cb989b689e059f6f3b223618c4f66a392f13aee6f498",
         "sourceSha256": "8ab71797f549a3c399f1ae496eaad4d86be7bb30616b31fdb7a212f2227bfeae"
       },
       "winter-guest-relay": {
-        "binarySha256": null,
+        "binarySha256": "eed3a8f239060c6ca794229f32293384f27f9583acb9623c73de64e58c1efc45",
         "sourceSha256": "26234a4bb90861f2f067a75547fa6195e42af6e155a55ce685b06a3dfa7cf03a"
       }
     },
@@ -159,12 +159,12 @@
       "sourceSha256": "7630cb1f2e9b76be78fb6fb0f0efb6df74d437b39f9e3db69ac8aacc83162372",
       "target": "aarch64-linux-gnu.2.36",
       "path": "/opt/winter/helpers/linux-session-owner.so",
-      "binarySha256": "baae4781ef94f2eb54aeb78889261a9025f1246f7e8a6ac1df5b7a32c7a68348"
+      "binarySha256": "8fd03dd4e5389f67db136026b092164d69af7fabf9a67eda364df26078559048"
     },
     "executable": {
       "entry": "scripts/guest-host-query/runtime.ts",
       "path": "/opt/winter/runtime/winter-host-query",
-      "sha256": "e0c6ed04bad3563336b90748e0f23dcf4f31a4601927cdaac97bbc95fbeddec5"
+      "sha256": "5f8d4102bfdde2f1361fb766b2d892f2c5475afce296cae1bc8da87572c0dcea"
     }
   },
   "environment": {
