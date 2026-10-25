@@ -8,7 +8,7 @@ name: cowork-guest-image-build
 # The first steps refuse unless REVIEWED_HEAD is an ancestor of the pushed commit and the whole diff is that one line.
 on:
   push:
-    branches: [cowork/guest-image-build-5]
+    branches: [cowork/guest-image-build-6]
 permissions:
   contents: read
 env:
@@ -35,7 +35,7 @@ env:
   LLVM_KEY_SHA256: 'dc0ffd470f01a27a19fad7a243cf85cf79f063d60b3a4c75090b24d9bdc6e2c8'
 jobs:
   build:
-    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build-5' && github.event.created == true && github.run_attempt == '1'
+    if: github.repository == 'yanlingLabs/winter' && github.event_name == 'push' && github.ref == 'refs/heads/cowork/guest-image-build-6' && github.event.created == true && github.run_attempt == '1'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 210
     steps:
