@@ -38,7 +38,7 @@ export const APP_PRIMITIVES = [
   // Wake triggers (2026-10-12): on every target, app and tab alike (`computer-use/wakes/`).
   "wakeWhen",
 ] as const;
-export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
+export const GLOBAL_PRIMITIVES = ["apps.list", "apps.open", "apps.release", "screen.screenshot", "screen.windows", "screen.appAt", "timeLeft"] as const;
 /** App adapters (Phase 2): `app.extras.<name>(…)`, `app.dict.<name>(…)`, `app.help(…)` — `adapters/`. */
 export const EXTRA_PRIMITIVES = ["extra", "dict", "help"] as const;
 /** Phase 2: a browser tab's primitives (`Tab`), and the `browsers` global's. */

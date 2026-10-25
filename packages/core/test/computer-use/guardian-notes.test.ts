@@ -107,7 +107,8 @@ describe("ComputerV2: web pages and hover — said once per session per app (hel
     // Again in the same session: not repeated.
     const r2 = await w.run("const s2 = await apps.open('Safari')");
     expect(count(unfenced(r2), HOVER)).toBe(0);
-    // Another session hears it on its own.
+    // Another session hears it on its own (once this one has let go of Safari: an app one session holds, no other binds).
+    await w.run("await apps.release()");
     const r3 = await w.run("const s3 = await apps.open('Safari')", { sessionId: "s2" });
     expect(count(unfenced(r3), HOVER)).toBe(1);
   });

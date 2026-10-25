@@ -207,6 +207,8 @@ export class FakeTab {
   keptGroup?: string;
   active = false;
   lastAccessed?: number;
+  /** Phase 3 (extension): the browser window it is in. */
+  windowId?: number;
   group?: string;
   muted?: boolean;
   /** The page has a beforeunload handler: a navigation asks first (the navigation waits for the answer). */
@@ -445,6 +447,7 @@ export class FakeCdpTransport implements CdpTransport {
     return [...this.tabs.values()].filter((t) => !t.closed).map((t) => ({
       tabKey: t.tabKey, url: t.page.url, title: t.page.title, active: t.active, agent: t.agent, ...(t.sessionId === undefined ? {} : { sessionId: t.sessionId }),
       ...(t.lastAccessed === undefined ? {} : { lastAccessed: t.lastAccessed }), ...(t.group === undefined ? {} : { group: t.group }),
+      ...(t.windowId === undefined ? {} : { windowId: t.windowId }),
     }));
   }
   async attach(tabKey: string, opts: { sessionId: string; watchOnly?: boolean }): Promise<{ viewport: [number, number]; dpr: number }> {

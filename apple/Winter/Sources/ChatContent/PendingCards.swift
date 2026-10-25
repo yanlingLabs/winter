@@ -127,22 +127,23 @@ struct PendingCardDraft: Equatable {
         otherTexts[index] = ""
     }
 
-    /// Multi-select toggle — same Other-clearing rule as `selectSingle`.
+    /// Multi-select toggle. Free-text questions (2026-10-20): a multiple-choice question's typed text JOINS its
+    /// picks (`questionAnswers`), so a toggle never clears it — only a single-choice pick does.
     mutating func toggleMulti(_ optionIndex: Int, forQuestion index: Int) {
         var current = selections[index] ?? []
         if current.contains(optionIndex) { current.remove(optionIndex) } else { current.insert(optionIndex) }
         selections[index] = current
-        otherTexts[index] = ""
     }
 
     mutating func expandOther(forQuestion index: Int) {
         otherExpanded.insert(index)
     }
 
-    /// Typing Other text clears that question's selection — the reverse mutual exclusion.
-    mutating func setOtherText(_ text: String, forQuestion index: Int) {
+    /// Typing Other text clears a SINGLE-choice question's selection — the reverse mutual exclusion. A
+    /// multiple-choice question keeps its picks: the typed text is sent after them (`questionAnswers`).
+    mutating func setOtherText(_ text: String, forQuestion index: Int, multiSelect: Bool = false) {
         otherTexts[index] = text
-        selections[index] = []
+        if !multiSelect { selections[index] = [] }
     }
 
     mutating func setNote(_ text: String, forQuestion index: Int) {
@@ -158,8 +159,11 @@ struct PendingCardDraft: Equatable {
 /// question's index into `questions`. A question with no answer (empty selection AND empty/no
 /// Other text) is simply omitted from the result — matches the CLI's own
 /// `packages/cli/src/questions.ts` convention: multiSelect selections join their labels with
-/// ", ", in option order; a non-empty Other text always wins over any selection for that
-/// question (the user typed something more specific than the menu offered).
+/// ", ", in option order. A single-choice question's non-empty Other text wins over any selection
+/// (the user typed something more specific than the menu offered). A MULTIPLE-choice question's
+/// typed text joins its picks instead, LAST: "macOS, iOS, watchOS" (free-text questions,
+/// 2026-10-20) — the runtime treats a multiSelect answer as one opaque string, and `resolvedAnswer`
+/// reads this shape back. A free-text question (no options) is answered by its typed text alone.
 func questionAnswers(
     for questions: [SessionEvent.Question],
     selections: [Int: Set<Int>],
@@ -167,16 +171,41 @@ func questionAnswers(
 ) -> [String: String] {
     var answers: [String: String] = [:]
     for (index, question) in questions.enumerated() {
-        if let other = otherTexts[index]?.trimmingCharacters(in: .whitespacesAndNewlines), !other.isEmpty {
+        let other = otherTexts[index]?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let selected = selections[index] ?? []
+        let labels = selected.sorted().compactMap { question.options.indices.contains($0) ? question.options[$0].label : nil }
+        if question.multiSelect {
+            let parts = labels + (other.isEmpty ? [] : [other])
+            if !parts.isEmpty { answers[question.question] = parts.joined(separator: ", ") }
+            continue
+        }
+        if !other.isEmpty {
             answers[question.question] = other
             continue
         }
-        guard let selected = selections[index], !selected.isEmpty else { continue }
-        let labels = selected.sorted().compactMap { question.options.indices.contains($0) ? question.options[$0].label : nil }
         guard !labels.isEmpty else { continue }
         answers[question.question] = labels.joined(separator: ", ")
     }
     return answers
+}
+
+/// The free-text box's hint (2026-10-20): the question's own `placeholder`, else "Something else…" under a menu,
+/// else "Type your answer…" for a question with no options. One rule for every Mac surface (the code window's
+/// card, the Dispatch pill's, the island's).
+func questionFieldPlaceholder(_ question: SessionEvent.Question) -> String {
+    if let hint = question.placeholder?.trimmingCharacters(in: .whitespacesAndNewlines), !hint.isEmpty { return hint }
+    return question.isFreeText ? "Type your answer…" : "Something else…"
+}
+
+/// Whether a question's free-text box takes the keyboard when the question shows: a question with no options has
+/// nothing else to do but type. A menu question leaves the keyboard where it is.
+func questionFieldTakesFocus(_ question: SessionEvent.Question) -> Bool { question.isFreeText }
+
+/// Whether ONE question of a card has an answer — the per-question half of `questionCardComplete`, by the same
+/// definition (`questionAnswers`): a free-text question needs non-blank text; Return/Next/Send wait for it.
+func questionIsAnswered(_ question: SessionEvent.Question, at index: Int, draft: PendingCardDraft) -> Bool {
+    questionAnswers(for: [question], selections: [0: draft.selections[index] ?? []],
+                    otherTexts: [0: draft.otherTexts[index] ?? ""])[question.question] != nil
 }
 
 /// Whether a question card's local state answers EVERY question — the gate for enabling the
@@ -478,6 +507,9 @@ enum ResolvedAnswer: Equatable {
     /// Indices into the question's own `options`, ascending.
     case options([Int])
     case freeText(String)
+    /// A MULTIPLE-choice answer that is some options AND typed text (free-text questions, 2026-10-20):
+    /// `questionAnswers` writes the chosen labels first, then the text.
+    case optionsAndText([Int], String)
     /// No answer was recorded for this question. Reachable on a `.ended` card, and on a resolution
     /// whose `answers` dict simply has no entry for this question's text.
     case none
@@ -492,6 +524,18 @@ func resolvedAnswer(for question: SessionEvent.Question, answer: String?) -> Res
     if parts.count > 1 {
         let matched = parts.compactMap { part in question.options.firstIndex(where: { $0.label == part }) }
         if matched.count == parts.count { return .options(matched.sorted()) }
+        // A multiple-choice question's picks, then its typed text: the labels LEAD (as `questionAnswers`
+        // writes them), and whatever follows the last one is the text, commas and all.
+        if question.multiSelect {
+            var leading: [Int] = []
+            for part in parts {
+                guard let i = question.options.firstIndex(where: { $0.label == part }) else { break }
+                leading.append(i)
+            }
+            if !leading.isEmpty, leading.count < parts.count {
+                return .optionsAndText(leading.sorted(), parts[leading.count...].joined(separator: ", "))
+            }
+        }
     }
     return .freeText(answer)
 }
@@ -974,6 +1018,16 @@ struct ResolvedQuestionBody: View {
             // The "Other…" path — the user typed something the menu did not offer. `pencil` is the
             // same glyph iOS puts on its Other field, so the record says HOW it was answered.
             chosenRow(glyph: "pencil", text: text)
+        case .optionsAndText(let indices, let text):
+            // Some options and typed text (a multiple-choice question): the picks, then the words.
+            VStack(alignment: .leading, spacing: 4) {
+                ForEach(indices, id: \.self) { optionIndex in
+                    if question.options.indices.contains(optionIndex) {
+                        chosenRow(glyph: "checkmark", text: question.options[optionIndex].label)
+                    }
+                }
+                chosenRow(glyph: "pencil", text: text)
+            }
         case .none:
             Text("—")
                 .font(Typography.control())
@@ -1497,15 +1551,19 @@ struct PendingQuestionBody: View {
                     showsHeader: false,   // the pills carry the headers now
                     selected: draft.selections[index] ?? [],
                     otherText: draft.otherTexts[index] ?? "",
-                    isOtherExpanded: draft.otherExpanded.contains(index),
                     isNoteOpen: draft.notesOpen.contains(index),
                     noteText: draft.notes[index] ?? "",
                     isInFlight: isInFlight,
                     onSelectSingle: { optionIndex in draft.selectSingle(optionIndex, forQuestion: index) },
                     onToggleMulti: { optionIndex in draft.toggleMulti(optionIndex, forQuestion: index) },
-                    onExpandOther: { draft.expandOther(forQuestion: index) },
-                    onOtherTextChange: { text in draft.setOtherText(text, forQuestion: index) },
-                    onNoteTextChange: { text in draft.setNote(text, forQuestion: index) }
+                    onOtherTextChange: { text in
+                        draft.setOtherText(text, forQuestion: index, multiSelect: questions[index].multiSelect)
+                    },
+                    onNoteTextChange: { text in draft.setNote(text, forQuestion: index) },
+                    onFieldSubmit: { fieldSubmit(at: index) },
+                    // Only where the card STANDS IN for the composer (it has a Close): a copy drawn in a transcript,
+                    // the island or the full-screen pill never pulls the keyboard out of the composer it sits beside.
+                    autoFocusField: onClose != nil && questionFieldTakesFocus(questions[index])
                 )
                 .id(index)   // each page is its own view, so a field never inherits the last one's text
             }
@@ -1572,7 +1630,9 @@ struct PendingQuestionBody: View {
             } else if let onClose {
                 wideButton(title: "Close", disabled: false, action: onClose)
                     .transition(.blurReplace)
-            } else if !isLast {
+                // A free-text question's send is there from the start, disabled until something is typed.
+                if currentIsFreeText { primaryButton }
+            } else if !isLast || currentIsFreeText {
                 // No Close to offer (the transcript's copy), but a multi-question block still needs
                 // its way forward before anything is picked.
                 primaryButton
@@ -1634,6 +1694,22 @@ struct PendingQuestionBody: View {
         .accessibilityLabel(label)
     }
 
+    /// The visible question has no options: its box is the whole answer.
+    private var currentIsFreeText: Bool {
+        questions.indices.contains(index) && questions[index].isFreeText
+    }
+
+    /// Return in the box: what the wide button does — Next once this question is answered, Submit on the last once
+    /// every question is. Nothing while that button would be disabled.
+    private func fieldSubmit(at index: Int) {
+        guard !isInFlight, questions.indices.contains(index) else { return }
+        if index < questions.count - 1 {
+            if questionIsAnswered(questions[index], at: index, draft: draft) { draft.visibleQuestion = index + 1 }
+        } else if isComplete {
+            submit()
+        }
+    }
+
     private func submit() {
         onQuestion(
             callId,
@@ -1644,26 +1720,32 @@ struct PendingQuestionBody: View {
     }
 }
 
-/// One question's options + Other row + optional note field. Selecting a listed option (single or
-/// multi) clears that question's Other text, and typing into Other clears that question's
-/// selection — the two affordances are mutually exclusive per question so a stale Other string can
-/// never silently outrank (or be outranked by) a fresh selection in `questionAnswers`. No
-/// affordance here submits the card — see `PendingQuestionBody`'s single whole-card Submit button.
+/// One question's options + Other row + optional note field. On a SINGLE-choice question selecting a listed option
+/// clears that question's Other text, and typing into Other clears its selection — mutually exclusive, so a stale
+/// Other string can never silently outrank (or be outranked by) a fresh selection in `questionAnswers`. A
+/// multiple-choice question keeps both: the typed text joins its picks. No option here submits the card — see
+/// `PendingQuestionBody`'s single whole-card Submit button; Return in the box does what that button does.
+///
+/// Free-text questions (2026-10-20): the box is ALWAYS there, under the options or alone when there are none, with
+/// `questionFieldPlaceholder`'s hint; with no options it takes the keyboard when the question shows.
 private struct QuestionBlock: View {
     let index: Int
     let question: SessionEvent.Question
     let showsHeader: Bool
     let selected: Set<Int>
     let otherText: String
-    let isOtherExpanded: Bool
     let isNoteOpen: Bool
     let noteText: String
     let isInFlight: Bool
     let onSelectSingle: (Int) -> Void
     let onToggleMulti: (Int) -> Void
-    let onExpandOther: () -> Void
     let onOtherTextChange: (String) -> Void
     let onNoteTextChange: (String) -> Void
+    let onFieldSubmit: () -> Void
+    /// Take the keyboard into the box when the question shows (a free-text question in the composer's slot).
+    var autoFocusField: Bool = false
+    /// Focus only — never the answer, which lives in the draft (`PendingCardDraft`).
+    @FocusState private var fieldFocused: Bool
 
     /// Thin view-local reads onto the pure, unit-tested helpers above (`PendingCardsTests`) — kept
     /// here only so the `body` below doesn't have to spell out `question`/`selected` at every call
@@ -1811,21 +1893,15 @@ private struct QuestionBlock: View {
             Image(systemName: "pencil")
                 .font(Typography.questionSecondary())
                 .foregroundStyle(.secondary)
-            if isOtherExpanded {
-                TextField("Other…", text: Binding(get: { otherText }, set: onOtherTextChange))
-                    .textFieldStyle(.plain)
-                    .font(Typography.questionOption())
-                    .disabled(isInFlight)
-            } else {
-                Button("Other…", action: onExpandOther)
-                    .buttonStyle(.plain)
-                    .font(Typography.questionOption())
-                    .foregroundStyle(.secondary)
-                    .disabled(isInFlight)
-                Spacer(minLength: 0)
-            }
+            TextField(questionFieldPlaceholder(question), text: Binding(get: { otherText }, set: onOtherTextChange))
+                .textFieldStyle(.plain)
+                .font(Typography.questionOption())
+                .disabled(isInFlight)
+                .focused($fieldFocused)
+                .onSubmit(onFieldSubmit)
         }
         .padding(.vertical, 10)
+        .onAppear { if autoFocusField { fieldFocused = true } }
     }
 
     /// CC AskUserQuestion parity: a per-question free-text note. **Hidden until the note icon in

@@ -67,7 +67,7 @@ describe("assemble() output-style injection", () => {
 // ================================================================================================
 describe("assemble() ultra-delegation injection (provider-correctness T5)", () => {
   test("RED anchor: nothing in the shipped BASE_PROMPT says anything about delegation posture", () => {
-    // The premise of this whole feature. `BASE_PROMPT` tells the model how to ASK (the ask_user
+    // The premise of this whole feature. `BASE_PROMPT` tells the model how to ASK (the AskUserQuestion
     // clause); it says nothing about when to hand work to child agents, and the only guidance that
     // exists anywhere is the `spawn_agent` tool DESCRIPTION, which explains HOW to spawn, never how
     // eagerly. If this ever fails, a standing posture has landed in the base prompt and the tier's

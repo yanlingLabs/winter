@@ -59,7 +59,7 @@ import { runAgentsCommand } from "./agents-cli";
 import { mountAgents } from "./tui/agents-view";
 import { MEMORY_USAGE, formatDeleted, formatFactDetail, parseMemoryArgs, runMemoryRoute } from "./memory-cli";
 import { COWORK_CLI_USAGE, resolveCoworkArgs, runCoworkRoute, formatCoworkResult, coworkErrorMessage, parseCoworkSessionArgs, runCoworkSessionRoute, type CoworkCliRoute, type CoworkSessionCliRoute } from "./cowork-cli";
-import { formatOptionLines, isOtherChoice, parseQuestionAnswer } from "./questions";
+import { answerPrompt, formatOptionLines, freeTextHintLine, isFreeTextQuestion, isOtherChoice, otherMenuLine, parseQuestionAnswer, questionOptions } from "./questions";
 import { parsePlanResponse } from "./plan-response";
 import { ShellCardQueue, approvalPromptLine, approvalResolvedHow } from "./shell-cards";
 import { legacyFilesDoctorLine, sdkHomeDoctorSection } from "./doctor-legacy-files";
@@ -824,27 +824,43 @@ async function runTurnSession(opts: { promptOverride?: string; forceAuto?: boole
             // extra indented "┆"-rail lines right under it — formatOptionLines is pure/TTY-only
             // (questions.ts); every returned line still goes through emit() so the pinned block's
             // erase/reprint bookkeeping (which every emit() call re-derives) stays correct.
-            q.options.forEach((o: { label: string; description?: string; preview?: string }, i: number) => {
-              for (const line of formatOptionLines(i + 1, o)) emit(line);
-            });
-            emit(`  ${q.options.length + 1}) Other (type your answer)\n`);
-            // The prompt text is written via emit() (so the block's erase/reprint bookkeeping
-            // stays accurate) and readLine() itself is given "" — it still does its own raw,
-            // un-tracked stdout write for whatever text it's passed, which would desync
-            // atLineStart if we let it print the real prompt.
-            const promptText = q.multiSelect ? "choose (comma-separated numbers or text): " : "choose (number or text): ";
-            emit(promptText);
-            const input = (await readLine("")) ?? ""; // readLine now returns null on EOF; "" here (empty answer)
-            if (resolvedElsewhere.aborted) return; // answered in another window meanwhile: stop asking, send nothing
-            if (isOtherChoice(input, q.options.length)) {
-              // M1: choosing "Other" BY ITS MENU NUMBER isn't itself an answer — that digit is a
-              // selection, not free text. Re-prompt for the real answer so the model never sees
-              // the literal number as if the user had typed it as their response.
-              emit("your answer: ");
-              answers[q.question] = ((await readLine("")) ?? "").trim();
-              if (resolvedElsewhere.aborted) return;
+            const options = questionOptions(q);
+            if (isFreeTextQuestion(q)) {
+              // A free-text question (no options): no menu — its hint, then the answer. A blank answer
+              // is no answer: asked again (the Mac's disabled send), until EOF.
+              const hint = freeTextHintLine(q);
+              if (hint) emit(hint);
+              let typed = "";
+              while (typed === "") {
+                emit(answerPrompt(q));
+                const line = await readLine("");
+                if (resolvedElsewhere.aborted) return;
+                if (line === null) break;
+                typed = line.trim();
+              }
+              answers[q.question] = typed;
             } else {
-              answers[q.question] = parseQuestionAnswer(input, q.options.map((o: { label: string }) => o.label), q.multiSelect);
+              options.forEach((o: { label: string; description?: string; preview?: string }, i: number) => {
+                for (const line of formatOptionLines(i + 1, o)) emit(line);
+              });
+              emit(otherMenuLine(q));
+              // The prompt text is written via emit() (so the block's erase/reprint bookkeeping
+              // stays accurate) and readLine() itself is given "" — it still does its own raw,
+              // un-tracked stdout write for whatever text it's passed, which would desync
+              // atLineStart if we let it print the real prompt.
+              emit(answerPrompt(q));
+              const input = (await readLine("")) ?? ""; // readLine now returns null on EOF; "" here (empty answer)
+              if (resolvedElsewhere.aborted) return; // answered in another window meanwhile: stop asking, send nothing
+              if (isOtherChoice(input, options.length)) {
+                // M1: choosing "Other" BY ITS MENU NUMBER isn't itself an answer — that digit is a
+                // selection, not free text. Re-prompt for the real answer so the model never sees
+                // the literal number as if the user had typed it as their response.
+                emit("your answer: ");
+                answers[q.question] = ((await readLine("")) ?? "").trim();
+                if (resolvedElsewhere.aborted) return;
+              } else {
+                answers[q.question] = parseQuestionAnswer(input, options.map((o: { label: string }) => o.label), q.multiSelect);
+              }
             }
             // Task 3 (CC parity): a single optional free-text note per question, separate from the
             // answer itself (e.g. "why I picked this"). Blank input means "skip" — nothing is

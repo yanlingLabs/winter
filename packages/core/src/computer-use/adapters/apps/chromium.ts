@@ -4,7 +4,7 @@
 // extra could not be sure to act in the BOUND window rather than one of the user's, and Winter offers none: it never
 // guesses which window to act in. Their dictionary commands (`.dict`) take only references the model writes itself;
 // `execute … javascript` is refused by the helper wherever it is sent.
-import { CHROMIUM_GUIDE } from "../guides/chromium";
+import { CHROMIUM_GUIDE, CHROMIUM_GUIDE_WITHOUT_EXTENSION } from "../guides/chromium";
 import type { AppAdapter } from "../types";
 
 /** The family's bundle ids (each browser's, its beta/dev/canary channels included). */
@@ -18,5 +18,6 @@ export const CHROMIUM_BUNDLE_IDS = [
 export const chromiumAdapter: AppAdapter = {
   bundleIds: CHROMIUM_BUNDLE_IDS,
   guide: { id: "chromium@2", text: CHROMIUM_GUIDE },
+  guideWithoutExtension: { id: "chromium-noext@1", text: CHROMIUM_GUIDE_WITHOUT_EXTENSION },
   extras: [],
 };

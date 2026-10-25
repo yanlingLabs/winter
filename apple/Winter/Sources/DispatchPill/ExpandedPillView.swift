@@ -82,12 +82,17 @@ struct ExpandedPillAccessoryButtons: View {
 }
 
 /// A pinned turn — swiped to, or a reply that just arrived — shown ALONE in the pill (no composer):
-/// its prompt shortened to one line, the start of its reply, and where it sits in the conversation
-/// ("3/7"). Every line is at the composer's own text size; the prompt is told apart by colour, not
-/// size. The pill is sized to the reply's lines (`dispatchPillPreviewHeight`). Typing, a click on
-/// it, Esc, or swiping on past the newest turn returns to the composer.
+/// its prompt shortened to one line, its WHOLE reply, and where it sits in the conversation ("3/7"). Every line is at
+/// the composer's own text size; the prompt is told apart by colour, not size. The pill grows to the reply
+/// (`dispatchPillPreviewHeight`) up to `dispatchPillPreviewCeiling`; past it the reply scrolls inside, never cut. The
+/// reply reports its laid-out height (`onReplyHeight`) so the pill fits it exactly. Typing, a click on it, Esc, or
+/// swiping on past the newest turn returns to the composer.
 struct ExpandedPillTurnPreview: View {
     let preview: DispatchPillTurnPreview
+    /// The reply is taller than the pill may grow (`DispatchPillController.previewReplyScrolls`): only then is it in a
+    /// scroll view.
+    var scrolls = false
+    var onReplyHeight: (CGFloat) -> Void = { _ in }
 
     var body: some View {
         VStack(alignment: .leading, spacing: DispatchPillMetrics.previewLineGap) {
@@ -102,15 +107,36 @@ struct ExpandedPillTurnPreview: View {
                     .font(Typography.caption())
                     .foregroundStyle(Color.white.opacity(0.35))
             }
-            Text(preview.reply)
-                .font(Typography.composerField())
-                .foregroundStyle(Color.white)
-                .lineLimit(DispatchPillMetrics.previewReplyLines)
-                .truncationMode(.tail)
-                .fixedSize(horizontal: false, vertical: true)
+            if scrolls {
+                ScrollView(.vertical) {
+                    // A legacy scroller's room on the trailing side, as the thinking pill leaves it.
+                    reply(width: DispatchPillMetrics.previewTextWidth - Self.scrollerGap)
+                        .padding(.trailing, Self.scrollerGap)
+                }
+                .scrollBounceBehavior(.basedOnSize)
+                .scrollIndicators(.automatic)
+                // Each turn opens at its top: a turn swiped to never inherits the last one's scroll.
+                .id(preview.position)
+            } else {
+                reply(width: DispatchPillMetrics.previewTextWidth)
+            }
         }
         .padding(.horizontal, DispatchPillMetrics.leadingPadding)
         .padding(.vertical, DispatchPillMetrics.previewVerticalInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    /// The trailing gap a scrolling reply leaves for a legacy (always-shown) scroller.
+    static let scrollerGap: CGFloat = 10
+
+    private func reply(width: CGFloat) -> some View {
+        Text(preview.reply)
+            .font(Typography.composerField())
+            .foregroundStyle(Color.white)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: width, alignment: .leading)
+            .onGeometryChange(for: CGFloat.self) { proxy in proxy.size.height } action: { height in
+                onReplyHeight(height)
+            }
     }
 }

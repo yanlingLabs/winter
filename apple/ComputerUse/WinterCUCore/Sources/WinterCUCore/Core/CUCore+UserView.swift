@@ -446,9 +446,16 @@ extension CUCore {
     /// The make-key step may apply: the records can be posted, the app is in the background (the window server's
     /// front, read now), the bound window is on this desktop (a window on another Space keeps the routes it had), and
     /// the app is not Chromium-based unless measured otherwise (`makeKeyChromium`).
-    func makeKeyApplies(_ t: CUTarget) -> Bool {
-        guard t.accessible, skyLight.canFocusWithoutRaise, !t.isChromium || makeKeyChromium, sys.frontmostPid() != t.pid else { return false }
-        return sys.window(id: t.windowID)?.onScreen == true
+    func makeKeyApplies(_ t: CUTarget) -> Bool { makeKeyDecline(t) == nil }
+
+    /// Why the make-key step does not apply (`makeKeyApplies`), in words for the log; nil when it does.
+    func makeKeyDecline(_ t: CUTarget) -> String? {
+        guard t.accessible else { return "the bind is capture-only (no accessibility)" }
+        guard skyLight.canFocusWithoutRaise else { return "the make-key records can't be posted here (the private focus calls are missing)" }
+        guard !t.isChromium || makeKeyChromium else { return "a Chromium-based app keeps the routes it had" }
+        guard sys.frontmostPid() != t.pid else { return "the app is in front (really active)" }
+        guard sys.window(id: t.windowID)?.onScreen == true else { return "the bound window is not on screen on this desktop" }
+        return nil
     }
 
     /// The app's key window as accessibility shows it, read after an activation: its focused element's window. A
@@ -657,7 +664,20 @@ extension CUCore {
     enum ClickPrep: Equatable { case notApplied, prepared, appInFront, activatedItself }
 
     func keyForClick(_ t: CUTarget, privatePath: Bool, clickWindow: UInt32) -> ClickPrep {
-        guard privatePath, clickWindow == t.windowID, makeKeyApplies(t), let enforcer = focusEnforcer(for: t, privatePath: true) else {
+        // Which guard declined is logged (live 2026-10-20: two point clicks into a background Safari went out as plain
+        // pid events, and nothing said why the make-key step had not run).
+        let declined: String? = {
+            guard privatePath else { return "the private event path is off" }
+            guard clickWindow == t.windowID else { return "the click goes to another of its windows (\(clickWindow): a sheet, popover or panel)" }
+            if let why = makeKeyDecline(t) { return why }
+            return nil
+        }()
+        if let declined {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no make-key step for window \(t.windowID, privacy: .public) — \(declined, privacy: .public)")
+            return .notApplied
+        }
+        guard let enforcer = focusEnforcer(for: t, privatePath: true) else {
+            CULog.act.notice("click in \(t.appName, privacy: .public): no make-key step for window \(t.windowID, privacy: .public) — no focus enforcer")
             return .notApplied
         }
         let prepStart = clock.nowSeconds()

@@ -54,6 +54,7 @@ function world(o: { policy?: SessionFacts["policy"] } = {}) {
     mintWinterTab: (_sid, url) => { const tabId = `w${++n}`; strip.push({ tabId, ...(url === undefined ? {} : { url }) }); return tabId; },
     winterTabs: () => ({ tabs: strip.map((t) => ({ ...t, url: winter.tabs.get(t.tabId)?.page.url ?? t.url })) }),
     persistentlyAllowed: (sid, b) => policy.persistentlyAllowed(sid, b), stopScript: (sid, why) => svc.stopScript(sid, why),
+    heldElsewhere: (sid, b, name, title) => svc.heldBrowserWindow(sid, b, name, title),
   });
   svc = new ComputerV2Service({ helper, policy, settings: () => settings, browsers: engine, audit: (l) => audits.push(l), interrupt: (sid) => interrupts.push(sid) });
   services.push(svc);
@@ -152,5 +153,37 @@ describe("browser tabs through the ComputerV2 service", () => {
     expect(r.isError).toBe(true);
     expect(text(r)).toContain("the user pressed Stop in the browser");
     expect(w.interrupts).toEqual(["s1"]);
+  }, 30_000);
+
+  // The review of 2026-10-20: a tab of a user's browser is in one of its windows — one another session holds as an app
+  // window is refused (matched on the window's title: its active tab's), and the whole browser held app-wide is refused.
+  macOnly("browsers.tab: a tab in a window another session holds as an app is refused, naming the holder; another window's tab binds", async () => {
+    const w = world();
+    w.fake.apps.push({ name: "Google Chrome", bundleId: "com.google.Chrome", pid: 610, running: true });
+    w.fake.handlers["target.bind"] = () => ({ targetId: "tc1", app: { name: "Google Chrome", bundleId: "com.google.Chrome", pid: 610 }, window: { id: 70, title: "Inbox", frame: [0, 0, 800, 600] } });
+    w.fake.handlers["screen.windows"] = () => ({ windows: [
+      { app: "Google Chrome", bundleId: "com.google.Chrome", pid: 610, windowId: 70, title: "Inbox", frame: [0, 0, 800, 600], onScreen: true },
+      { app: "Google Chrome", bundleId: "com.google.Chrome", pid: 610, windowId: 71, title: "Docs", frame: [0, 0, 800, 600], onScreen: true },
+    ] });
+    const other = await w.svc.run({ sessionId: "s_other", vision: true, model: "anthropic/claude-opus-5-5" }, { code: "const c = await apps.open('Google Chrome', { emit: false })" });
+    expect(other.isError).toBe(false);
+    const inbox = w.chrome.addTab({ url: "https://mail.example/", title: "Inbox", nodes: [{ id: 1, role: "text", name: "hi" }] }, { tabKey: "9" });
+    inbox.active = true; inbox.windowId = 1;
+    const background = w.chrome.addTab({ url: "https://mail.example/2", title: "Thread", nodes: [{ id: 1, role: "text", name: "hi" }] }, { tabKey: "8" });
+    background.windowId = 1;
+    const docs = w.chrome.addTab({ url: "https://docs.example/", title: "Docs", nodes: [{ id: 1, role: "text", name: "hi" }] }, { tabKey: "10" });
+    docs.active = true; docs.windowId = 2;
+    const held = await w.run("for (const id of ['chrome:9', 'chrome:8']) { try { await browsers.tab(id); print('bound') } catch (e) { print(e.name, e.message) } }");
+    expect(text(held).match(/TargetBusy That window of Google Chrome is held by another session \(s_other\)/g)?.length).toBe(2);
+    expect(text(held)).not.toContain("bound");
+    const free = await w.run("const d = await browsers.tab('chrome:10'); print('bound', d.id)");
+    expect(text(free)).toContain("bound chrome:10");
+    // A tab whose window can't be told is taken to be in the held one.
+    const lost = w.chrome.addTab({ url: "https://x.example/", title: "X", nodes: [{ id: 1, role: "text", name: "hi" }] }, { tabKey: "11" });
+    lost.active = true;
+    expect(text(await w.run("try { await browsers.tab('chrome:11') } catch (e) { print(e.name) }"))).toContain("TargetBusy");
+    // Released: the tab binds.
+    await w.svc.run({ sessionId: "s_other", vision: true, model: "anthropic/claude-opus-5-5" }, { code: "await apps.release()" });
+    expect(text(await w.run("await browsers.tab('chrome:9'); print('bound')"))).toContain("bound");
   }, 30_000);
 });

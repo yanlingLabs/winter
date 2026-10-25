@@ -1760,7 +1760,7 @@
                 "maxLength": 12
               },
               "options": {
-                "minItems": 2,
+                "default": [],
                 "maxItems": 4,
                 "type": "array",
                 "items": {
@@ -1785,6 +1785,11 @@
               },
               "multiSelect": {
                 "type": "boolean"
+              },
+              "placeholder": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 80
               }
             },
             "required": [

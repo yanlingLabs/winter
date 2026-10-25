@@ -629,6 +629,23 @@ public struct CancelParams: Codable, Sendable, Equatable {
 }
 public typealias CancelResult = CUEmpty
 
+/// `work.lift` (1.22.0): the user's work mark on these apps lifts (their message to the session — "go ahead" — or the
+/// session releasing them).
+public struct WorkLiftParams: Codable, Sendable, Equatable {
+    public var pids: [Int32]
+    /// Why, for the log only (`message`, `released`).
+    public var reason: String?
+    public init(pids: [Int32], reason: String? = nil) {
+        self.pids = pids
+        self.reason = reason
+    }
+}
+public struct WorkLiftResult: Codable, Sendable, Equatable {
+    /// The pids whose mark was there and lifted.
+    public var lifted: [Int32]
+    public init(lifted: [Int32]) { self.lifted = lifted }
+}
+
 public struct TurnEndedParams: Codable, Sendable, Equatable {
     public var sessionId: String
     public init(sessionId: String) {

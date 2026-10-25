@@ -549,8 +549,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Haptics.messageSent()
             }
         )
-        pill.onEsc = { [weak self] in
-            guard let self, self.appModel?.session.state.turnRunning == true else { return false }
+        pill.onEsc = { [weak self, weak pill] in
+            // A sent message's turn may not have reached the feed yet (`awaitingTurnStart`): the daemon has started
+            // it, so Esc interrupts it rather than putting the pill away.
+            guard let self, self.appModel?.session.state.turnRunning == true || pill?.awaitingTurnStart == true else { return false }
             Task { await self.appModel?.interruptTurn() }
             return true
         }

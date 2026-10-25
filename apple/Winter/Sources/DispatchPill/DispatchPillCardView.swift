@@ -55,15 +55,26 @@ struct DispatchPillCardView: View {
             section(.header)
             if flat {
                 section(.content)
+            } else if contentHeight <= bodyCap {
+                // A body that FITS is laid out flat, never in a scroll view (user, 2026-10-20: "the question cards don't
+                // let me select an option"). The pill is a non-activating panel over another app: AppKit asks the HIT
+                // view whether it acts on the first click, and a `ScrollView`'s clip view and SwiftUI containers say no —
+                // so every click on an option (the body) only tried to make the panel key and was lost, while the
+                // header and the ✓ row, on the pill's own `FirstClickHostingView`, worked. Flat, the body is that view's
+                // too (`DispatchPillQuestionClickTests`).
+                section(.content)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
             } else {
+                // Taller than the cap: it scrolls. (Its controls keep the scroll view's first-click limit — a long
+                // approval summary's allow-always rows, a long plan; question cards stay far below the cap.)
                 ScrollView(.vertical) {
                     section(.content)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { contentHeight = $0 }
                 }
-                .frame(height: min(contentHeight, bodyCap))
-                .scrollDisabled(contentHeight <= bodyCap)
-                .scrollIndicators(contentHeight > bodyCap ? .automatic : .never)
+                .frame(height: bodyCap)
+                .scrollIndicators(.automatic)
             }
             section(.actions)
         }
@@ -265,12 +276,16 @@ private struct DispatchPillChoiceRow: View {
 
 /// A one-line text field in the card's capsule: an option's "Other…", a note, a plan's requested changes. Clicking it
 /// gives the pill the keyboard (the panel engages on the click, `DispatchPillController.handleRestingMouseDown`);
-/// Return does what the card's blue circle does.
+/// Return does what the card's blue circle does. `autoFocus` (a question with no options, 2026-10-20) makes it the
+/// panel's first responder as it shows: once the pill has the keyboard, keys type the answer instead of setting the card
+/// aside (`dispatchPillKeyIsTyping` sees a field being edited).
 private struct DispatchPillCardField: View {
     let placeholder: String
     @Binding var text: String
     var enabled = true
+    var autoFocus = false
     let onSubmit: () -> Void
+    @FocusState private var focused: Bool
 
     var body: some View {
         let filled = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -279,7 +294,9 @@ private struct DispatchPillCardField: View {
             .font(Typography.composerField())
             .foregroundStyle(Color.white)
             .disabled(!enabled)
+            .focused($focused)
             .onSubmit(onSubmit)
+            .onAppear { if autoFocus { focused = true } }
             .padding(.horizontal, 14)
             .frame(height: DispatchPillChoiceRow.height)
             // Filled = a shade brighter, never a stroke: a 1 pt stroke on a capsule end rasterises as a stray tick.
@@ -382,7 +399,8 @@ private struct DispatchPillApprovalBody: View {
 // MARK: - Question
 
 /// One question at a time: the question in the pill's type, its options as compact rows (multiple choice shows its
-/// boxes and "Choose any"), an Other field, a note when the ask allows one; then ‹ back, and the blue ✓ — Next before
+/// boxes and "Choose any"), the free-text box (always — alone and focused when the question has no options, its hint
+/// `questionFieldPlaceholder`; a multiple-choice question's typed text joins its picks), a note when the ask allows one; then ‹ back, and the blue ✓ — Next before
 /// the last question, Send on it, enabled by `dispatchPillQuestionAdvance`. Choosing never sends by itself; Return in
 /// a field does what ✓ does, and only when ✓ is enabled.
 private struct DispatchPillQuestionBody: View {
@@ -443,11 +461,14 @@ private struct DispatchPillQuestionBody: View {
                         }
                     }
                 }
+                // The free-text box, always: under the options, or alone (and focused) when there are none.
                 DispatchPillCardField(
-                    placeholder: "Other…",
+                    placeholder: questionFieldPlaceholder(question),
                     text: Binding(get: { draft.wrappedValue.otherTexts[index] ?? "" },
-                                  set: { draft.wrappedValue.setOtherText($0, forQuestion: index) }),
+                                  set: { draft.wrappedValue.setOtherText($0, forQuestion: index,
+                                                                         multiSelect: question.multiSelect) }),
                     enabled: !isInFlight,
+                    autoFocus: questionFieldTakesFocus(question),
                     onSubmit: { go(index: index, draft: draft) }
                 )
                 if questionAllowsNotes(question), draft.wrappedValue.notesOpen.contains(index) {

@@ -53,8 +53,8 @@ enum DispatchPillMetrics {
     static let previewVerticalInset: CGFloat = 12
     /// Between the prompt line and the reply.
     static let previewLineGap: CGFloat = 4
-    /// How many lines of the reply a pinned turn shows.
-    static let previewReplyLines = 2
+    /// The most of the screen's visible height a pinned turn grows to before its reply scrolls inside it.
+    static let previewMaxScreenShare: CGFloat = 0.6
     /// The text width inside a pinned turn.
     static var previewTextWidth: CGFloat { expandedWidth - 2 * leadingPadding }
     /// How far above the Dock (the visible frame's bottom edge) the pill's bottom sits.
@@ -95,6 +95,8 @@ enum DispatchPillMetrics {
     static let maxMorphBlur: CGFloat = 8
     /// Points of remaining spring travel per point of blur.
     static let morphBlurFalloff: CGFloat = 12
+    /// The working plume's fade-in: quick — it starts with Enter's compress.
+    static let plumeFadeIn: Double = 0.12
     /// A content swap (pill ↔ card): the share of the shape's travel during which the new content stays hidden —
     /// it fades and sharpens in over the last 38 %.
     static let contentRevealStart: CGFloat = 0.62
@@ -141,8 +143,14 @@ func dispatchPillMainSize(
     case .compact:
         return CGSize(width: DispatchPillMetrics.compactWidth, height: DispatchPillMetrics.pillHeight)
     case .expanded:
-        let total = previewHeight ?? max(DispatchPillMetrics.pillHeight,
-                                         composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
+        // A pinned turn shows its whole reply, up to its own ceiling (`dispatchPillPreviewCeiling`); the typing pill
+        // keeps `maxExpandedHeight`.
+        if let previewHeight {
+            return CGSize(width: DispatchPillMetrics.expandedWidth,
+                          height: min(max(previewHeight, DispatchPillMetrics.pillHeight),
+                                      dispatchPillPreviewCeiling(visibleFrame: visibleFrame)))
+        }
+        let total = max(DispatchPillMetrics.pillHeight, composerContentHeight + DispatchPillMetrics.composerVerticalPadding)
         return CGSize(width: DispatchPillMetrics.expandedWidth,
                       height: min(max(total, DispatchPillMetrics.pillHeight), DispatchPillMetrics.maxExpandedHeight))
     case .fullScreen:
@@ -412,8 +420,7 @@ func dispatchPillRevealsReply(
 
 // MARK: - Swiping through turns
 
-/// What the swiped-to-turn band shows: the turn's prompt, shortened to one line, and the first line
-/// of its reply.
+/// What the swiped-to-turn band shows: the turn's prompt, shortened to one line, and its whole reply.
 struct DispatchPillTurnPreview: Equatable {
     let prompt: String
     let reply: String
@@ -421,35 +428,44 @@ struct DispatchPillTurnPreview: Equatable {
     let position: String
 }
 
-/// PURE: a pinned turn's height — the prompt line and as many reply lines as the reply needs (up to
-/// `previewReplyLines`), all at the composer's own text size, plus the insets. `lineHeight` and
-/// `replyWidth` are measured by the caller (`dispatchPillPreviewHeight(reply:)`).
-func dispatchPillPreviewHeight(replyWidth: CGFloat, lineHeight: CGFloat) -> CGFloat {
-    let lines = min(DispatchPillMetrics.previewReplyLines,
-                    max(1, Int((replyWidth / DispatchPillMetrics.previewTextWidth).rounded(.up))))
+/// PURE: where a click on a scrolling pinned turn counts as a click on it (canvas coordinates): the main pill, less
+/// the trailing strip its scroller sits in.
+func dispatchPillReplyClickArea(canvasSize: CGSize, mainSize: CGSize) -> CGRect {
+    let main = dispatchPillMainRect(canvasSize: canvasSize, mainSize: mainSize)
+    return CGRect(x: main.minX, y: main.minY,
+                  width: max(0, main.width - DispatchPillMetrics.leadingPadding - ExpandedPillTurnPreview.scrollerGap - 6),
+                  height: main.height)
+}
+
+/// PURE: the tallest a pinned turn gets — `previewMaxScreenShare` of the screen's visible height, never less than the
+/// typing pill's own ceiling. Past it the reply scrolls inside the pill; it is never cut.
+func dispatchPillPreviewCeiling(visibleFrame: CGRect) -> CGFloat {
+    max(DispatchPillMetrics.maxExpandedHeight, (visibleFrame.height * DispatchPillMetrics.previewMaxScreenShare).rounded(.down))
+}
+
+/// PURE: a pinned turn's height — the prompt line and the WHOLE reply as laid out (`replyHeight`, at
+/// `previewTextWidth`), plus the insets; never smaller than the capsule, never taller than `ceiling`. `lineHeight` and
+/// `replyHeight` are measured by the caller (`dispatchPillPreviewHeight(reply:ceiling:)`, or the reply's own layout).
+func dispatchPillPreviewHeight(replyHeight: CGFloat, lineHeight: CGFloat, ceiling: CGFloat) -> CGFloat {
     let height = 2 * DispatchPillMetrics.previewVerticalInset + lineHeight
-        + DispatchPillMetrics.previewLineGap + CGFloat(lines) * lineHeight
-    return ceil(max(DispatchPillMetrics.pillHeight, height))
+        + DispatchPillMetrics.previewLineGap + max(lineHeight, replyHeight)
+    return min(max(DispatchPillMetrics.pillHeight, ceil(height)), max(DispatchPillMetrics.pillHeight, ceiling))
 }
 
 /// The prompt line of a turn the user did not start — Dispatch reporting on its child sessions.
 let dispatchPillSessionUpdateLabel = "Update from your sessions"
 
-/// The longest a preview line gets before it is cut with "…".
+/// The longest the prompt line gets before it is cut with "…". The reply is never cut.
 let dispatchPillPreviewPromptLimit = 90
-let dispatchPillPreviewReplyLimit = 140
 
 /// PURE: the preview for `exchanges[index]`, or `nil` when the index is out of range.
-func dispatchPillTurnPreview(exchanges: [Exchange], index: Int) -> DispatchPillTurnPreview? {
+/// `replyText` reads the reply as plain words (`dispatchPillReplyText`; the controller passes a memoized one).
+func dispatchPillTurnPreview(exchanges: [Exchange], index: Int,
+                             replyText: (String) -> String = dispatchPillReplyText) -> DispatchPillTurnPreview? {
     guard exchanges.indices.contains(index) else { return nil }
     let exchange = exchanges[index]
     let prompt = dispatchPillShortened(exchange.prompt, limit: dispatchPillPreviewPromptLimit)
-    let firstLine = exchange.reply
-        .components(separatedBy: .newlines)
-        .map { $0.trimmingCharacters(in: .whitespaces) }
-        .first { !$0.isEmpty } ?? ""
-    let reply = dispatchPillShortened(dispatchPillStrippingMarkdownLead(firstLine),
-                                      limit: dispatchPillPreviewReplyLimit)
+    let reply = replyText(exchange.reply)
     return DispatchPillTurnPreview(
         // A turn with no prompt is Dispatch's own: the daemon woke it to report on the sessions it
         // spawned (`dispatch-wake`, which `SessionReducer` opens as a promptless exchange).
@@ -467,7 +483,107 @@ func dispatchPillShortened(_ text: String, limit: Int) -> String {
     return String(collapsed.prefix(limit - 1)).trimmingCharacters(in: .whitespaces) + "…"
 }
 
-/// A reply's first line is often a markdown heading or bullet; the preview shows its words.
+/// PURE: the WHOLE reply as a pinned turn shows it (user, 2026-10-20: "it should show the full answer"), read as plain
+/// words where that is safe and left alone where it is not:
+/// - a fenced code block (``` or ~~~) is kept VERBATIM — indentation, `#`, `**`, `- `/`+ ` and all — and only its
+///   fence lines are dropped;
+/// - a paragraph that looks like a diff (a line opening with `+`, `@@`, `+++` or `---`) is kept verbatim too;
+/// - otherwise a heading's marks go only for `#`…`######` FOLLOWED BY A SPACE at the line's start ("#1 priority"
+///   stays), a quote's `> ` goes, a `- ` or `* ` bullet is drawn as "•" (a `+ ` line is left as written), and `**`
+///   goes only as a balanced bold pair outside inline code;
+/// - runs of blank lines fold to one, none at either end.
+func dispatchPillReplyText(_ reply: String) -> String {
+    let rawLines = reply.components(separatedBy: .newlines)
+    // Diff-looking paragraphs (runs of non-blank lines outside fences), by line index.
+    var verbatim = Set<Int>()
+    var fenced = false
+    var paragraph: [Int] = []
+    func closeParagraph() {
+        let diff = paragraph.contains { i in
+            let t = rawLines[i].trimmingCharacters(in: .whitespaces)
+            return t.hasPrefix("+") || t.hasPrefix("@@") || t.hasPrefix("---")
+        }
+        if diff { verbatim.formUnion(paragraph) }
+        paragraph = []
+    }
+    for (i, raw) in rawLines.enumerated() {
+        let t = raw.trimmingCharacters(in: .whitespaces)
+        if dispatchPillIsFence(t) { closeParagraph(); fenced.toggle(); continue }
+        if fenced { continue }
+        if t.isEmpty { closeParagraph() } else { paragraph.append(i) }
+    }
+    closeParagraph()
+
+    var lines: [String] = []
+    fenced = false
+    for (i, raw) in rawLines.enumerated() {
+        let trimmed = raw.trimmingCharacters(in: .whitespaces)
+        if dispatchPillIsFence(trimmed) { fenced.toggle(); continue }
+        if fenced || verbatim.contains(i) {
+            lines.append(String(raw.reversed().drop { $0 == " " || $0 == "\t" }.reversed()))
+            continue
+        }
+        if trimmed.isEmpty {
+            if let last = lines.last, !last.isEmpty { lines.append("") }
+            continue
+        }
+        lines.append(dispatchPillPlainLine(raw))
+    }
+    while lines.last?.isEmpty == true { lines.removeLast() }
+    while lines.first?.isEmpty == true { lines.removeFirst() }
+    return lines.joined(separator: "\n")
+}
+
+/// A code fence line: three or more backticks or tildes at its start.
+func dispatchPillIsFence(_ trimmed: String) -> Bool {
+    trimmed.hasPrefix("```") || trimmed.hasPrefix("~~~")
+}
+
+/// One prose line (outside code) as plain words: heading marks only before a space, a quote's `> `, a `- `/`* `
+/// bullet as "•" (keeping its indent), balanced `**` pairs outside inline code.
+func dispatchPillPlainLine(_ raw: String) -> String {
+    let indent = String(raw.prefix { $0 == " " || $0 == "\t" }.prefix(6)).replacingOccurrences(of: "\t", with: "  ")
+    var s = Substring(raw.trimmingCharacters(in: .whitespaces))
+    let hashes = s.prefix { $0 == "#" }
+    if (1...6).contains(hashes.count), s.dropFirst(hashes.count).first == " " {
+        s = s.dropFirst(hashes.count + 1)
+    } else if s.hasPrefix("> ") {
+        s = s.dropFirst(2)
+    } else if s == ">" {
+        s = ""
+    }
+    var bullet = false
+    if s.hasPrefix("- ") || s.hasPrefix("* ") {
+        s = s.dropFirst(2)
+        bullet = true
+    }
+    let words = dispatchPillStrippingBold(String(s).trimmingCharacters(in: .whitespaces))
+    return bullet ? indent + "• " + words : words
+}
+
+/// `**bold**` pairs dropped to their words, outside `inline code` only; an unbalanced `**` (or one in code) stays.
+func dispatchPillStrippingBold(_ line: String) -> String {
+    // Split on backticks: even segments are prose, odd ones are inline code (kept as written, ticks and all).
+    let segments = line.components(separatedBy: "`")
+    guard segments.count > 1 || line.contains("**") else { return line }
+    let codeIsClosed = segments.count % 2 == 1
+    var out: [String] = []
+    for (i, segment) in segments.enumerated() {
+        let isCode = i % 2 == 1 && (codeIsClosed || i < segments.count - 1)
+        out.append(isCode ? segment : dispatchPillStrippingBoldPairs(segment))
+    }
+    return out.joined(separator: "`")
+}
+
+private func dispatchPillStrippingBoldPairs(_ text: String) -> String {
+    guard text.contains("**") else { return text }
+    let pattern = #"\*\*(?=\S)(.+?)(?<=\S)\*\*"#
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { return text }
+    let range = NSRange(text.startIndex..., in: text)
+    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1")
+}
+
+/// A reply's line is often a markdown heading or bullet; the preview shows its words.
 func dispatchPillStrippingMarkdownLead(_ line: String) -> String {
     var s = Substring(line)
     while let first = s.first, first == "#" || first == ">" { s = s.dropFirst() }

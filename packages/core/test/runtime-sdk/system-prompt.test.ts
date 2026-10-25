@@ -10,7 +10,7 @@ import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chatSystemPrompt } from "../../src/agent/chat-prompt";
-import { ContextAssembler, DISPATCH_IMAGE_PATH_GUIDANCE, IMAGE_PATH_GUIDANCE } from "../../src/agent/context";
+import { BASE_PROMPT, ContextAssembler, DISPATCH_IMAGE_PATH_GUIDANCE, IMAGE_PATH_GUIDANCE } from "../../src/agent/context";
 import { dispatchSystemPrompt } from "../../src/agent/dispatch-prompt";
 import type { ResolvedStyle } from "../../src/agent/output-styles";
 import { sessionTmpDir } from "../../src/agent/session-tmp";
@@ -386,6 +386,85 @@ describe("dispatch's base prompt follows which computer tool was built", () => {
     expect(at("dispatch", "ComputerV2")).toContain("select:ComputerV2`");
     expect(at("chat", false)).toBe(at("chat", true));
     expect(at("code", false)).toBe(at("code", true));
+  });
+});
+
+// 2026-10-20 (a live Dispatch run): it asked two rounds of prose questions (68 s) before looking at the page already
+// open, and never used AskUserQuestion — the code prompt's "ask via the tool" rule lives in BASE_PROMPT, which dispatch
+// replaces. Then a point click in background Safari did nothing and was reported anyway.
+describe("dispatch's base prompt — act first, ask with the tool, click by ref", () => {
+  test("the act-first section: look before asking, and a question goes through AskUserQuestion, one round at most", () => {
+    for (const exaKeyPresent of [true, false]) {
+      for (const computerOffered of ["ComputerV2", "Computer", false] as const) {
+        const text = dispatchSystemPrompt({ exaKeyPresent, computerOffered });
+        expect(text).toContain("# Act first; ask with the tool");
+        // 2026-10-20: the reply shows in the pill's small card — very brief, straight to the point.
+        expect(text).toContain("# Answer briefly");
+        expect(text).toContain("Answer very briefly and straight to the point: lead with the answer or the result");
+        // Brevity never drops what the other sections ask for: outcomes, openable paths, a stopped session's place, and
+        // act-first's candidates as a short list.
+        expect(text).toContain("but always the outcomes and the file paths the user can open, and where a stopped session got to");
+        expect(text).toContain("Use a short list for several things: what the user asked for, or the candidates you found for them to pick from");
+        expect(text).not.toContain("Use a short list only when");
+        expect(text).toContain("When a request can be acted on, act on it — a sensible default beats a question.");
+        expect(text).toContain("\"Find me X\", \"look around\" or \"show me\" means LOOK");
+        expect(text).toContain("use AskUserQuestion — 2–4 concrete options, your recommendation first — never a question in prose that ends your turn");
+        expect(text).toContain("At most one question round per request; if the answer is \"I don't know\", pick the default yourself and say which.");
+        expect(text).toContain("When you ask the user with AskUserQuestion, prefer 2–4 concrete options with your recommendation first; ask a free-text question (no options) only when the answer can't be predicted, like a name or a value.");
+        // It names the search tool the session HAS.
+        expect(text).toContain(exaKeyPresent ? "Search" : "WebSearch");
+        if (exaKeyPresent) expect(text).not.toContain("WebSearch");
+      }
+    }
+    // Only a session that can see the screen is told to use the app or page already open.
+    expect(dispatchSystemPrompt({ computerOffered: "ComputerV2" })).toContain("use the app or page already open (or Search)");
+    expect(dispatchSystemPrompt({ computerOffered: false })).not.toContain("the app or page already open");
+    expect(dispatchSystemPrompt({ computerOffered: false })).toContain("means LOOK: use Search or WebFetch");
+  });
+
+  // 2026-10-20 (live): Dispatch bound Chrome, spawned a child for the same window with the user's account address in its
+  // prompt, and the child was locked out of the app for three minutes.
+  test("quick app work stays with Dispatch, big app work may go to a session once its apps are released; release on request; no personal details", () => {
+    for (const computerOffered of ["ComputerV2", "Computer"] as const) {
+      const text = dispatchSystemPrompt({ computerOffered });
+      expect(text).toContain("Quick work in the user's apps — looking, clicking, reading account pages — you do yourself.");
+      expect(text).toContain("Hand big or long app work to a session when it helps — but release the apps you hold first (apps.release(), or tell the child which you hold)");
+      expect(text).toContain("When you're asked to release apps you hold, release them and reply.");
+      expect(text).toContain("Don't put the user's account addresses or other personal details in a child's prompt unless the task needs them.");
+      expect(text).not.toContain("stays with you");
+    }
+    const off = dispatchSystemPrompt({ computerOffered: false });
+    expect(off).not.toContain("Quick work in the user's apps");
+    expect(off).not.toContain("apps.release");
+    expect(off).toContain("Don't put the user's account addresses or other personal details in a child's prompt unless the task needs them.");
+  });
+
+  test("the routing line: answering directly means from what it knows, not a question back", () => {
+    expect(dispatchSystemPrompt()).toContain("answer directly (from what you know — not a question back) < Search < Read < Bash < ComputerV2 < SpawnSession.");
+  });
+
+  test("ComputerV2 only: click by ref, a point click last, and check a click meant to open or navigate before reporting it", () => {
+    const text = dispatchSystemPrompt({ computerOffered: "ComputerV2" });
+    expect(text).toContain("Click by the ref that state() or find() gives you");
+    expect(text).toContain("inspect([x, y]) turns a point in a screenshot into one; a bare point click is the last resort");
+    expect(text).toContain("After a click meant to open or navigate something, check that it did");
+    expect(text).toContain("extras.currentURL()");
+    for (const other of [dispatchSystemPrompt({ computerOffered: "Computer" }), dispatchSystemPrompt({ computerOffered: false })]) {
+      expect(other).not.toContain("Click by the ref");
+      expect(other).not.toContain("extras.currentURL()");
+    }
+  });
+
+  test("chat and code are unaffected; code's BASE_PROMPT names the question tool as the model sees it", () => {
+    const w = world();
+    const code = winterSystemPromptFor(w.assembler, { mode: "code", primary: w.cwd, cwd: w.cwd });
+    const chat = winterSystemPromptFor(w.assembler, { mode: "chat", primary: w.cwd, cwd: w.cwd });
+    for (const text of [code, chat]) {
+      expect(text).not.toContain("# Act first; ask with the tool");
+      expect(text).not.toContain("# Answer briefly");
+    }
+    expect(BASE_PROMPT).toContain("ALWAYS ask via the AskUserQuestion tool — never pose the question as prose");
+    expect(BASE_PROMPT).not.toContain("ask_user");
   });
 });
 

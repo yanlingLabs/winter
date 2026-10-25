@@ -3,8 +3,16 @@ import { readResolvedManifestVersion } from "@yanlinglabs/winter-runtime-sdk";
 
 /** The exact peer versions this daemon was written against (P8b-3). The ^ ranges in package.json
  *  are what INSTALLS; these are what the tests PROVE installed. Bump together with the pins. */
-export const REQUIRED_WINTER_AGENT_SDK = "0.0.53";
-/** Bumped to 0.0.53 (2026-10-07): a host tool's MCP `image` item reaches the model as an image block (the
+export const REQUIRED_WINTER_AGENT_SDK = "0.0.55";
+/** Bumped to 0.0.55 (2026-10-20): AskUserQuestion takes free-text questions — `options` may be left out (the user
+ *  types the answer), a menu question keeps 2–4 options plus the always-there typed answer, and an optional
+ *  `placeholder` hints the box; the daemon's question bridge and every card match it (they land together). Also: a
+ *  write root on a case-sensitive volume refuses a command while a letter-case variant of it exists next to it.
+ *  Earlier: bumped to 0.0.54 (2026-10-20): a Bash or Monitor command the macOS sandbox refused ends in a
+ *  `<sandbox_violations>` block naming each refused operation and path, so the model knows the sandbox stopped it
+ *  and can ask to run outside it (Dispatch's `open` failed silently before). Also a sandbox profile fix for a write
+ *  root holding `"`, the cold resume of a saved sub-agent, and the Cowork guest pieces (inert here).
+ *  Earlier: bumped to 0.0.53 (2026-10-07): a host tool's MCP `image` item reaches the model as an image block (the
  *  `sdk_mcp_call` bridge used to join it into the result's text as base64). This daemon now returns every image a
  *  capability call stages — Computer's and Browser's screenshots — as such an item (`capabilities/server.ts`'s
  *  `resultWithImages`), so the model finally SEES them; on an older runtime that would be base64 text, which is

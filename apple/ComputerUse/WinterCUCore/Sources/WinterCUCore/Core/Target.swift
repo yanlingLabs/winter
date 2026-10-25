@@ -77,6 +77,20 @@ final class CUTarget: @unchecked Sendable {
     }
     private var _lastFullRead: (roots: [CUNode], atMs: Double)?
 
+    /// How many elements that last full read did not reach (nil: it was complete) — a `find` answered from it says so.
+    var lastFullReadUnread: Int? {
+        get { lock.lock(); defer { lock.unlock() }; return _lastFullReadUnread }
+        set { lock.lock(); _lastFullReadUnread = newValue; lock.unlock() }
+    }
+    private var _lastFullReadUnread: Int?
+
+    /// The page (or window) a `find` already read deeper on: the deeper read runs at most once per page.
+    var deepFindKey: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _deepFindKey }
+        set { lock.lock(); _deepFindKey = newValue; lock.unlock() }
+    }
+    private var _deepFindKey: String?
+
     /// Where the agent cursor was last sent (screen points): the place for cursor events that have none of
     /// their own (waits, refusals, captions, done).
     var cursorPoint: CGPoint? {

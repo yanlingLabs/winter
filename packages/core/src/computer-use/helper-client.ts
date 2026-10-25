@@ -404,10 +404,10 @@ export class HelperClient {
 
   /** A request whose answer nobody waits for (`turn.ended`, `session.ended`, `script.active`) — only when
    *  already connected: telling a helper that is not running anything is pointless, so never launches one. */
-  tell(method: string, params: Record<string, unknown>): void {
+  tell(method: string, params: Record<string, unknown>, onError?: (err: unknown) => void): void {
     const conn = this.conn;
     if (conn === undefined) return;
-    this.send(conn, method, params, 10_000).catch(() => { /* best effort */ });
+    this.send(conn, method, params, 10_000).catch((err) => { try { onError?.(err); } catch { /* best effort */ } });
   }
 
   /** What Settings → Computer Use shows. Never launches the helper; asks a connected one for its status. */

@@ -149,6 +149,7 @@ public final class RPCDispatcher: @unchecked Sendable {
         engine("screen.screenshot") { try await $0.screenScreenshot($1 as ScreenScreenshotParams) }
         engine("screen.appAt") { try await $0.screenAppAt($1 as ScreenAppAtParams) }
         engine("visit.close") { try await $0.visitClose($1 as VisitCloseParams) }
+        engine("work.lift") { try await $0.workLift($1 as WorkLiftParams) }
 
         routes["script.active"] = { [core, coordinator] params, _ in
             let p = try RPCDispatcher.decode(ScriptActiveParams.self, params)

@@ -274,6 +274,11 @@ export function createAutomationRuntime(deps: AutomationRuntimeDeps): Automation
       if (t.emit === false) extra.emit = false;
       return call("apps.open", undefined, { app, ...extra }).then(toApp);
     },
+    // Lets go of a bound app (its handle, a name or a bundle id) — or, with none, of every app this session holds.
+    release: (app?: unknown) => {
+      const id = app !== null && typeof app === "object" ? targets.get(app) : undefined;
+      return call("apps.release", undefined, id !== undefined ? { targetId: id } : app === undefined ? {} : { app });
+    },
   });
   const browsers = Object.freeze({
     list: (o?: unknown) => call("browsers.list", undefined, opts(o)),

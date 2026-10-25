@@ -94,6 +94,8 @@ describe("C1: no lock outlives its script", () => {
     await w.run("const n = await apps.open('Notes'); n.click(1); n.click(2);");
     await Bun.sleep(1_500);
     expect(w.svc.locks.holder("com.apple.Notes:501")).toBeUndefined();
+    // (The first session lets go of Notes: an app one session holds, no other binds — the lock is what this checks.)
+    await w.run("await apps.release()");
     const t0 = Date.now();
     const r2 = await w.run("const m = await apps.open('Notes'); print('bound')", { sessionId: "s2" });
     expect(text(r2)).toContain("bound");

@@ -106,6 +106,10 @@ export interface BrowserEngineDeps {
   installed?(bundleId: string): boolean;
   /** Did the user allow this app beyond one call (the service's policy)? */
   persistentlyAllowed?(sessionId: string, bundleId: string): boolean;
+  /** Holds (the service's `heldBrowserWindow`): the refusal when another session holds this browser app-wide, or the
+   *  window a user's-browser tab is in (`activeTitle`: the title of that window's active tab — what its window shows);
+   *  undefined when nothing stops the bind. */
+  heldElsewhere?(sessionId: string, bundleId: string, name: string, activeTitle: string | undefined): Promise<string | undefined>;
   /** Stop the script a session is running now (the extension's Stop button). */
   stopScript?(sessionId: string, reason: string): void;
   /** Is the session running a main-thread turn now (a daemon restart's orphaned agent tabs stay open while it is)? */
@@ -629,6 +633,16 @@ export class BrowserEngine {
     }
   }
 
+  /** Is Winter for Chrome connected in the browser with this bundle id? Its own instance when one is registered, else any
+   *  of its family's; undefined for an app that is not a browser of the Chromium family (the app guides' switch). */
+  connectedForBundle(bundleId: string): boolean | undefined {
+    const family = browserForBundleId(bundleId)?.family;
+    if (family === undefined) return undefined;
+    const rows = this.deps.registry.list();
+    const own = rows.filter((r) => r.bundleId !== undefined && r.bundleId.toLowerCase() === bundleId.toLowerCase());
+    return (own.length > 0 ? own : rows.filter((r) => r.family === family)).some((r) => r.connected);
+  }
+
   /** The backends for `computerUse.status` and `browsers.list()`. */
   listRows(): BrowserListRow[] {
     const rows = new Map<string, BrowserListRow>();
@@ -1034,6 +1048,18 @@ export class BrowserEngine {
   }
 
   /** `yours`: an agent tab this session still owns — a kept one is the user's (it follows the user-tab rule). */
+  /** The title of the active tab of the window a user's-browser tab is in — what that window's title shows — or
+   *  undefined when it can't be told (no window id, the listing failed). Read for the holds only, never shown. */
+  private async activeTitleOfTabWindow(backend: BackendId, tabKey: string): Promise<string | undefined> {
+    const transport = this.deps.registry.get(backend);
+    if (transport === undefined || !transport.connected) return undefined;
+    let tabs: TransportTab[];
+    try { tabs = await transport.listTabs(); } catch { return undefined; }
+    const tab = tabs.find((t) => t.tabKey === tabKey);
+    if (tab?.windowId === undefined) return undefined;
+    return tabs.find((t) => t.windowId === tab.windowId && t.active)?.title;
+  }
+
   private async tabRows(scope: TabRunScope, backend: BackendId): Promise<TabRow[]> {
     const s = this.session(scope.sessionId);
     if (this.familyOf(backend) === "winter") {
@@ -1166,6 +1192,15 @@ export class BrowserEngine {
     const s = this.session(scope.sessionId);
     const known = s.byTab.get(tabKeyOf(backend, tabKey));
     const wasBound = known !== undefined && s.bindings.get(known)?.lost === undefined;
+    // A tab of a user's browser is in one of its windows: one another session holds as an app window (or the whole
+    // browser held app-wide) is refused, naming the holder (the review of 2026-10-20).
+    if (!wasBound && !this.isWintersOwn(backend) && !this.isHeadless(backend) && this.deps.heldElsewhere !== undefined) {
+      const bundleId = this.bundleIdOf(backend);
+      if (bundleId !== undefined) {
+        const refusal = await this.deps.heldElsewhere(scope.sessionId, bundleId, this.browserName(backend), await this.activeTitleOfTabWindow(backend, tabKey));
+        if (refusal !== undefined) throw new AutomationFailure("TargetBusy", refusal);
+      }
+    }
     const handle = await this.bind(scope, backend, tabKey, url, false);
     const driver = this.driverFor(backend, tabKey);
     const base = scope.diffBases.get(scope.sessionId, handle.targetId);

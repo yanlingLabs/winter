@@ -4,7 +4,7 @@ import XCTest
 final class RoundTripTests: XCTestCase {
     func fixtureURLs() throws -> [URL] {
         let urls = Bundle.module.urls(forResourcesWithExtension: "json", subdirectory: "Fixtures") ?? []
-        XCTAssertEqual(urls.count, 94, "expected 94 fixtures — regenerate via pnpm protocol:generate")
+        XCTAssertEqual(urls.count, 95, "expected 95 fixtures — regenerate via pnpm protocol:generate")
         return urls
     }
 
@@ -20,6 +20,40 @@ final class RoundTripTests: XCTestCase {
             let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
             XCTAssertNotNil(obj?["type"] as? String, "re-encoded JSON lost the type discriminator for \(url.lastPathComponent)")
         }
+    }
+
+    /// Free-text questions (2026-10-20): a question with NO `options` key decodes as an empty menu and keeps its
+    /// `placeholder`; a menu question keeps both; re-encoding writes `options: []` (what an older client needs) and
+    /// leaves an absent placeholder absent.
+    func testFreeTextQuestionDecodes() throws {
+        let url = try XCTUnwrap(Bundle.module.url(forResource: "question_free_text", withExtension: "json", subdirectory: "Fixtures"))
+        let raw = try JSONSerialization.jsonObject(with: Data(contentsOf: url)) as? [String: Any]
+        let rawFirst = (raw?["questions"] as? [[String: Any]])?.first
+        XCTAssertNil(rawFirst?["options"], "the fixture must carry NO options key, or this test proves nothing")
+        guard case .questionAsked(let asked) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: url)) else {
+            return XCTFail("question_free_text did not decode as .questionAsked")
+        }
+        XCTAssertEqual(asked.questions.count, 2)
+        XCTAssertEqual(asked.questions[0].options, [])
+        XCTAssertTrue(asked.questions[0].isFreeText)
+        XCTAssertEqual(asked.questions[0].placeholder, "e.g. feature/login-retry")
+        XCTAssertEqual(asked.questions[1].options.map(\.label), ["macOS", "iOS"])
+        XCTAssertFalse(asked.questions[1].isFreeText)
+        XCTAssertEqual(asked.questions[1].placeholder, "Another target")
+
+        let reencoded = try JSONEncoder().encode(SessionEvent.questionAsked(asked))
+        let obj = try JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        let first = (obj?["questions"] as? [[String: Any]])?.first
+        XCTAssertEqual((first?["options"] as? [Any])?.count, 0, "re-encode writes the empty menu, never drops the key")
+
+        // An older-shaped question (no placeholder) stays placeholder-less through a round trip.
+        let oldURL = try XCTUnwrap(Bundle.module.url(forResource: "question_asked", withExtension: "json", subdirectory: "Fixtures"))
+        guard case .questionAsked(let old) = try JSONDecoder().decode(SessionEvent.self, from: Data(contentsOf: oldURL)) else {
+            return XCTFail("question_asked did not decode")
+        }
+        XCTAssertNil(old.questions[0].placeholder)
+        let oldObj = try JSONSerialization.jsonObject(with: JSONEncoder().encode(SessionEvent.questionAsked(old))) as? [String: Any]
+        XCTAssertNil((oldObj?["questions"] as? [[String: Any]])?.first?["placeholder"])
     }
 
     /// ComputerV2 wake triggers (2026-10-12): the pair decodes field for field, the element label present and absent.
