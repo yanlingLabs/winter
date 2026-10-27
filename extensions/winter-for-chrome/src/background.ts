@@ -137,6 +137,9 @@ openskyConnection = new HostConnection(api, opensky, openskyLink, {
 
 /** The stored consent, as last read or set (what the popup's switch shows). */
 let openskyConsent = false;
+/** opensky's controller failed to start (its record may not be loaded, leftover debuggers not detached): its port is
+ *  never opened in this worker, whatever the switch says. */
+let openskyBroken = false;
 
 async function openskyAllowed(): Promise<boolean> {
   try { openskyConsent = (await api.storage.local.get([OPENSKY_CONSENT_KEY]))[OPENSKY_CONSENT_KEY] === true; } catch { openskyConsent = false; }
@@ -153,7 +156,9 @@ void openskyAllowed(); // the popup's switch shows the stored consent from the w
 // on its way, and opensky never connects before either record is loaded.
 const winterStarted = controller.start();
 const openskyStarted = opensky.start();
-let openskyQueue: Promise<void> = Promise.allSettled([winterStarted, openskyStarted]).then(() => undefined);
+let openskyQueue: Promise<void> = Promise.allSettled([winterStarted, openskyStarted]).then(([, o]) => {
+  if (o.status === "rejected") openskyBroken = true;
+});
 function openskyStep(step: () => Promise<void>): Promise<void> {
   const next = openskyQueue.then(step);
   openskyQueue = next.catch((err: unknown) => log(`opensky: ${err instanceof Error ? err.message : String(err)}`));
@@ -166,6 +171,7 @@ function setOpensky(allowed: boolean): Promise<void> {
     await api.storage.local.set({ [OPENSKY_CONSENT_KEY]: allowed });
     openskyConsent = allowed;
     if (allowed) {
+      if (openskyBroken) throw new Error("opensky could not start in this browser — reload the extension");
       opensky.reopen();
       openskyConnection?.start();
     } else {

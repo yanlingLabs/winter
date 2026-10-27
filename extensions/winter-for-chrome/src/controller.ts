@@ -499,11 +499,16 @@ export class ExtensionController {
       } else {
         grouped = await this.chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } });
         const title = groupTitle(sessionTitle, this.client.name);
-        if (this.closed) throw new Error("turned off");
+        if (this.closed) {
+          // Turned off while the browser grouped it: closed again, like a tab opened then.
+          try { await this.chrome.tabs.remove(tab.id); } catch { /* already gone */ }
+          throw new ExtensionError("not_allowed", `${this.client.name} is turned off in this browser`);
+        }
         await this.book.addGroup(grouped, sessionId, title);
         await this.chrome.tabGroups.update(grouped, { title, color: "blue" });
       }
     } catch (err) {
+      if (err instanceof ExtensionError) throw err;
       this.opts.log?.(`tab ${tab.id}: could not put it in its Winter group (${err instanceof Error ? err.message : String(err)}) — it stays Winter's, ungrouped`);
     }
     let titles: Map<number, string> | undefined;
