@@ -14,7 +14,7 @@
 import { Resvg } from "@resvg/resvg-js";
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { extensionManifest, FLAVORS, HOST_NAME, PRODUCT_NAMES, type Flavor } from "../src/manifest";
+import { extensionManifest, FLAVORS, HOST_NAME, OPENSKY_HOST_NAME, PRODUCT_NAMES, type Flavor } from "../src/manifest";
 
 const ROOT = resolve(import.meta.dir, "..");
 const REPO = resolve(ROOT, "..", "..");
@@ -74,7 +74,11 @@ async function buildFlavor(flavor: Flavor, outRoot: string): Promise<string> {
     format: "esm",
     minify: false,
     splitting: false,
-    define: { __WINTER_HOST_NAME__: JSON.stringify(HOST_NAME[flavor]), __WINTER_PRODUCT_NAME__: JSON.stringify(PRODUCT_NAMES[flavor]) },
+    define: {
+      __WINTER_HOST_NAME__: JSON.stringify(HOST_NAME[flavor]),
+      __OPENSKY_HOST_NAME__: JSON.stringify(OPENSKY_HOST_NAME[flavor]),
+      __WINTER_PRODUCT_NAME__: JSON.stringify(PRODUCT_NAMES[flavor]),
+    },
   });
   if (!built.success) throw new Error(`bundling failed:\n${built.logs.map((l) => String(l)).join("\n")}`);
   for (const file of ["background.js", "popup.js"]) {

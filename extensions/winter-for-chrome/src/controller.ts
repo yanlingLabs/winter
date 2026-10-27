@@ -63,8 +63,34 @@ const AS_IS = Symbol("as is");
 /** The answer when the browser ended the debugger session to navigate (the daemon reads `data.navigated`). */
 export const NAVIGATED_IN_NEW_SESSION = "the page was navigated, but the browser started a new debugging session for it — read the page again";
 const DEBUGGER_PROTOCOL_VERSION = "1.3";
-const ATTACHED_KEY = "winterAttached";
-const ALIVE_KEY = "winterAlive";
+
+/**
+ * Who a controller serves. Winter is the first client; the next version adds ONE more, opt-in: opensky, a separate computer-use
+ * tool with its own signed native host, connected only while the user's consent in the popup is on (background.ts).
+ * Each client has its OWN controller — its own agent-tab book, debugger sessions and storage keys — so isolation holds
+ * by construction: a controller only ever sees the debugger sessions it attached. A `restricted` client may use only
+ * `SECOND_CLIENT_METHODS`, and only on the tabs it opened itself; the CDP allowlist and the "winter" world rules (the
+ * guard) are the same for every client.
+ */
+export interface ClientProfile {
+  id: string;
+  /** What the user sees: the tab group's prefix, the working pill, the toolbar's Stop. */
+  name: string;
+  /** Prefixes the client's storage keys (`<prefix>Agents`, `<prefix>Attached`, `<prefix>Alive`). */
+  storagePrefix: string;
+  restricted: boolean;
+}
+
+export const WINTER_CLIENT: ClientProfile = { id: "winter", name: "Winter", storagePrefix: "winter", restricted: false };
+export const OPENSKY_CLIENT: ClientProfile = { id: "opensky", name: "opensky", storagePrefix: "opensky", restricted: true };
+
+/** What a restricted (second) client may ask. Withheld: `tabs.present` (the only call that brings a tab forward),
+ *  `windows.list`, history and bookmarks (the user's grants to Winter), downloads (one browser-wide filename hook),
+ *  and wake watches. */
+export const SECOND_CLIENT_METHODS: ReadonlySet<string> = new Set([
+  "ping", "tabs.list", "tabs.create", "tabs.close", "tabs.mute", "tabs.keep", "group.update",
+  "debugger.attach", "debugger.detach", "cdp.send", "cdp.subscribe", "overlay",
+]);
 
 /** Why the service worker started: the browser started, the extension was installed or updated, or it simply woke. */
 export type LaunchKind = "startup" | "install" | "update";
@@ -82,6 +108,11 @@ interface Attached {
 const isRecord = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 export interface ControllerOptions {
+  /** Which client this controller serves (default Winter, `WINTER_CLIENT`). */
+  client?: ClientProfile;
+  /** True when ANOTHER client's controller owns the tab: it is refused here and left out of `tabs.list` and `tab.gone`
+   *  — no client sees, drives or closes another's tabs. */
+  foreignTab?(tabId: number): boolean;
   /** Sends one notification to the daemon. */
   notify(method: string, params: Record<string, unknown>): void;
   /** How many tabs are being driven now (the toolbar button turns into Stop while it is more than 0). */
@@ -126,8 +157,11 @@ export class ExtensionController {
   /** 1.2.0: wake triggers' watches (no debugger). */
   private readonly watches: WatchBook;
 
+  readonly client: ClientProfile;
+
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
-    this.book = new AgentBook(chrome);
+    this.client = opts.client ?? WINTER_CLIENT;
+    this.book = new AgentBook(chrome, `${this.client.storagePrefix}Agents`);
     this.clock = opts.clock ?? realClock;
     this.idleMs = opts.idleDetachMs ?? IDLE_DETACH_MS;
     this.library = new Library(chrome, {
@@ -137,6 +171,14 @@ export class ExtensionController {
       ...(opts.log === undefined ? {} : { log: opts.log }),
     });
     this.watches = new WatchBook(chrome, { notify: (method, params) => this.opts.notify(method, params), clock: this.clock, ...(opts.log === undefined ? {} : { log: opts.log }) });
+  }
+
+  private get attachedKey(): string { return `${this.client.storagePrefix}Attached`; }
+  private get aliveKey(): string { return `${this.client.storagePrefix}Alive`; }
+
+  /** Whether this client opened the tab and still holds it (another controller's `foreignTab`). */
+  ownsTab(tabId: number): boolean {
+    return this.book.sessionOfTab(tabId) !== undefined || this.attached.has(tabId);
   }
 
   /** A watcher's runtime message (`winter.wake.event` / `winter.wake.alive`); false when it is not one. */
@@ -171,20 +213,23 @@ export class ExtensionController {
     this.chrome.tabs.onActivated.addListener((info) => this.onActivated(info));
     this.chrome.tabGroups.onRemoved.addListener((group) => { void this.book.dropGroup(group.id); });
     this.chrome.action.onClicked.addListener(() => this.stopDriven());
-    this.library.start();
-    this.watches.start();
+    // A restricted client has neither (they hook browser-wide events: downloads' filenames, every tab's updates).
+    if (!this.client.restricted) {
+      this.library.start();
+      this.watches.start();
+    }
 
     // storage.session holds the "alive" mark for this browser session AND this version of the extension. Present: the
     // worker merely restarted. Absent: the browser started, or the extension was installed or updated — onStartup /
     // onInstalled says which (after a browser start every recorded id is stale; after an update the tabs are still
     // Winter's). No word in time is treated as a browser start: Winter would rather forget a tab than take a user's.
-    const alive = (await this.chrome.storage.session.get([ALIVE_KEY]))[ALIVE_KEY] === true;
+    const alive = (await this.chrome.storage.session.get([this.aliveKey]))[this.aliveKey] === true;
     const kind = alive ? undefined : await this.launchKind();
     if (kind === "startup") await this.book.clear();
     else await this.book.load();
     // What happened in a tab while no worker ran is unknown: leaving any agent tab may ask, until it next loads.
     for (const tabId of this.book.tabIds()) this.mayPrompt.add(tabId);
-    await this.chrome.storage.session.set({ [ALIVE_KEY]: true });
+    await this.chrome.storage.session.set({ [this.aliveKey]: true });
     await this.recoverAttached();
   }
 
@@ -198,7 +243,7 @@ export class ExtensionController {
 
   /** Debuggers and overlays a previous run of the worker left behind: nothing is bound to them any more. */
   private async recoverAttached(): Promise<void> {
-    const stored = (await this.chrome.storage.session.get([ATTACHED_KEY]))[ATTACHED_KEY];
+    const stored = (await this.chrome.storage.session.get([this.attachedKey]))[this.attachedKey];
     const ids = Array.isArray(stored) ? stored.filter((x): x is number => Number.isInteger(x)) : [];
     for (const tabId of ids) {
       if (this.attached.has(tabId)) continue;
@@ -210,7 +255,7 @@ export class ExtensionController {
   }
 
   private async saveAttached(): Promise<void> {
-    try { await this.chrome.storage.session.set({ [ATTACHED_KEY]: [...this.attached.keys()] }); } catch { /* best effort */ }
+    try { await this.chrome.storage.session.set({ [this.attachedKey]: [...this.attached.keys()] }); } catch { /* best effort */ }
   }
 
   /** The tab ids attached right now (tests, status). */
@@ -221,6 +266,9 @@ export class ExtensionController {
   /** One daemon request. Throws `ExtensionError` (typed) or `UnknownMethod`. */
   async handle(method: string, rawParams: unknown): Promise<unknown> {
     const params = isRecord(rawParams) ? rawParams : {};
+    if (this.client.restricted && !SECOND_CLIENT_METHODS.has(method)) {
+      throw new ExtensionError("not_allowed", `${this.client.name} can't use ${method} in this browser`);
+    }
     switch (method) {
       case "ping": return {};
       case "tabs.list": return { tabs: await this.listTabs() };
@@ -269,6 +317,13 @@ export class ExtensionController {
     for (const tabId of [...this.attached.keys()]) await this.detach(tabId);
   }
 
+  /** The user took this client's access away: everything released, and the tabs it opened are the user's from now on
+   *  (its record is cleared, so they are no longer refused to any client). */
+  async disown(): Promise<void> {
+    await this.releaseAll();
+    await this.book.clear();
+  }
+
   /** A library refusal as the daemon reads it (`not_allowed` with `data.permission`). */
   private async libraryCall<T>(fn: () => Promise<T>): Promise<T> {
     try { return await fn(); } catch (err) {
@@ -290,10 +345,15 @@ export class ExtensionController {
 
   // ── tabs ─────────────────────────────────────────────────────────────────────────────────────────────────────────
 
+  /** The request's tab — never one another client holds, and for a restricted client only one it opened itself. */
   private tabId(params: Record<string, unknown>): number {
     const key = params.tabKey;
     const id = typeof key === "string" && /^\d{1,10}$/.test(key) ? Number(key) : Number.NaN;
     if (!Number.isSafeInteger(id)) throw new ExtensionError("tab_gone", "no such tab");
+    if (this.opts.foreignTab?.(id) === true) throw new ExtensionError("not_allowed", "that tab belongs to another app");
+    if (this.client.restricted && !this.ownsTab(id)) {
+      throw new ExtensionError("not_allowed", `${this.client.name} works only in the tabs it opened`);
+    }
     return id;
   }
 
@@ -329,7 +389,10 @@ export class ExtensionController {
     const tabs = await this.chrome.tabs.query({});
     let titles: Map<number, string> | undefined;
     try { titles = new Map((await this.chrome.tabGroups.query({})).map((g) => [g.id, g.title ?? ""])); } catch { titles = undefined; }
-    return tabs.filter((t) => t.id !== undefined && !t.incognito).map((t) => this.wire(t, titles));
+    return tabs
+      .filter((t) => t.id !== undefined && !t.incognito && this.opts.foreignTab?.(t.id) !== true
+        && (!this.client.restricted || this.ownsTab(t.id)))
+      .map((t) => this.wire(t, titles));
   }
 
   private async createTab(params: Record<string, unknown>): Promise<WireTab> {
@@ -362,7 +425,7 @@ export class ExtensionController {
         grouped = groupId;
       } else {
         grouped = await this.chrome.tabs.group({ tabIds: [tab.id], createProperties: { windowId } });
-        const title = groupTitle(sessionTitle);
+        const title = groupTitle(sessionTitle, this.client.name);
         await this.book.addGroup(grouped, sessionId, title);
         await this.chrome.tabGroups.update(grouped, { title, color: "blue" });
       }
@@ -460,6 +523,8 @@ export class ExtensionController {
   private async keepTab(tabId: number, rawGroup?: unknown): Promise<void> {
     const tab = await this.getTab(tabId);
     if (this.book.sessionOfTab(tabId) === undefined) return; // already the user's
+    // A restricted client hands a tab back plainly: putting it in one of the user's groups is Winter's alone.
+    if (this.client.restricted && rawGroup !== undefined) throw new ExtensionError("not_allowed", `${this.client.name} can't put a tab in the user's groups`);
     const name = typeof rawGroup === "string" ? rawGroup.trim().replace(/\s+/g, " ").slice(0, 80) : "";
     if (rawGroup !== undefined && name === "") throw new ExtensionError("not_allowed", "a kept tab's group is a name");
     await this.book.dropTab(tabId);
@@ -500,7 +565,7 @@ export class ExtensionController {
     const p: { title?: string; color?: GroupColor; collapsed?: boolean } = {};
     if (title !== undefined) {
       if (typeof title !== "string" || title.trim() === "") throw new ExtensionError("not_allowed", "a group's title is a name");
-      p.title = groupTitle(title);
+      p.title = groupTitle(title, this.client.name);
     }
     if (color !== undefined) {
       if (typeof color !== "string" || !(GROUP_COLORS as readonly string[]).includes(color)) throw new ExtensionError("not_allowed", `a group's color is one of ${GROUP_COLORS.join(", ")}`);
@@ -842,7 +907,9 @@ export class ExtensionController {
     const cursor = c !== undefined && typeof c.x === "number" && typeof c.y === "number" && typeof c.kind === "string" ? { x: c.x, y: c.y, kind: c.kind } : undefined;
     const changed = a.overlay !== active;
     a.overlay = active;
-    await this.paintOverlay(tabId, { active, ...(cursor === undefined ? {} : { cursor }) });
+    // The pill names who is working: Winter's own default label, another client's name in its place.
+    const label = this.client.id === WINTER_CLIENT.id ? undefined : `${this.client.name} is working — stop it from the toolbar`;
+    await this.paintOverlay(tabId, { active, ...(cursor === undefined ? {} : { cursor }), ...(label === undefined ? {} : { label }) });
     if (changed) this.drivenChanged();
   }
 
@@ -915,6 +982,9 @@ export class ExtensionController {
   }
 
   private onTabRemoved(tabId: number): void {
+    // Whose it was, decided before the book forgets it: a restricted client hears only of its own tabs, and no client
+    // of another's.
+    const tell = this.opts.foreignTab?.(tabId) !== true && (!this.client.restricted || this.ownsTab(tabId));
     const a = this.attached.get(tabId);
     if (a?.idle !== undefined) this.clock.clearTimeout(a.idle);
     if (a !== undefined) {
@@ -930,7 +1000,7 @@ export class ExtensionController {
     this.settleWaiters.get(tabId)?.();
     this.removedWaiters.get(tabId)?.();
     this.removedWaiters.delete(tabId);
-    this.gone(tabId, "closed");
+    if (tell) this.gone(tabId, "closed");
   }
 
   /** The user made `info.tabId` active. Winter never does: an agent tab the user visited may have their gesture — until

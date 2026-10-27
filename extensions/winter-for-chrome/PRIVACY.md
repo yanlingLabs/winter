@@ -75,11 +75,31 @@ any time:
   the folder Winter works in; the entry is then removed from the browser's downloads list. Other downloads are never
   touched. macOS may ask you once whether Winter may access your Downloads folder.
 
+## A second app: opensky (only if you switch it on)
+
+From the next version the extension can also serve **opensky**, a separate computer-use app on your Mac, through opensky's
+own native host (`com.opensky.browser`). It is **off** until you turn on "Let opensky use this browser too" in the
+extension's toolbar menu; installing opensky does not turn it on, and while it is off the extension never connects to
+opensky at all. Turning it off disconnects opensky at once, detaches from its tabs and hands them to you.
+
+While it is on, opensky gets much less than Winter:
+
+- it works only in the tabs it opens itself (in background tab groups named "opensky · …"), never in your tabs and
+  never in Winter's, and it does not see your other tabs listed;
+- it cannot bring a tab or window to the front, list your windows, search your history or bookmarks, save downloads, or
+  set up watches;
+- the same pages are off limits as for Winter, and it reads and acts on its own tabs the same way Winter does (the
+  debugging interface, the browser's notice, the same allowed commands).
+
+What opensky does with what it reads is covered by opensky's own privacy policy, not this one. Winter never sees
+opensky's tabs, and opensky never sees Winter's.
+
 ## Where it goes
 
 Everything the extension reads is sent to one place: the Winter app installed on the same Mac, over the browser's native
-messaging channel (to the native host `com.winter.browser`, which is part of Winter). It is not sent to yanlingLabs or
-to any other server by the extension.
+messaging channel (to the native host `com.winter.browser`, which is part of Winter) — or, only for opensky's own tabs
+and only while you have switched opensky on, to the opensky app on the same Mac (its host `com.opensky.browser`). It is
+not sent to yanlingLabs or to any other server by the extension.
 
 ## What it stores on your device
 
@@ -88,7 +108,9 @@ The extension keeps a few small records in the browser's extension storage on yo
 - a random identifier for this browser profile, so Winter recognises the same browser after a restart;
 - the identifiers of the tabs and tab groups Winter opened, so it never mistakes one of your tabs for its own (this
   record is cleared when the browser restarts);
-- which tabs it is currently attached to, so it can detach from them cleanly (cleared when the browser quits).
+- which tabs it is currently attached to, so it can detach from them cleanly (cleared when the browser quits);
+- if you use opensky: whether you switched it on, and a separate identifier, tab record and attachment record of its own
+  (never shared with Winter's).
 
 What Winter waits for in a tab is kept only in the extension's memory while it waits, never stored.
 
@@ -123,6 +145,8 @@ not receive your conversations or page content. Winter keeps its session history
 
 - **Stop:** while Winter is working in any tab, the extension's toolbar button turns into a red STOP button. One click
   stops Winter in every tab of this browser.
+- **opensky:** off unless you switch it on in the toolbar menu; switching it off disconnects it at once. STOP stops
+  opensky in its tabs too.
 - **Winter's settings:** in the Winter app you choose whether Winter may use computer and browser control at all, and
   which apps and browsers it may use.
 - **Remove it:** uninstalling the extension ends all of the above and deletes its stored records.

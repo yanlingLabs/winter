@@ -29,6 +29,10 @@ export const FLAVORS: readonly Flavor[] = ["dev", "store", "edge"];
 
 export const HOST_NAME: Readonly<Record<Flavor, string>> = { dev: "com.winter.browser.dev", store: "com.winter.browser", edge: "com.winter.browser" };
 
+/** Next version: opensky's own native host (a second, opt-in client — connected only after the user turns it on in the popup).
+ *  Its manifest lists this extension's ids in `allowed_origins`; the dev build talks to opensky's dev host. */
+export const OPENSKY_HOST_NAME: Readonly<Record<Flavor, string>> = { dev: "com.opensky.browser.dev", store: "com.opensky.browser", edge: "com.opensky.browser" };
+
 /** The name the user sees (the manifest, the toolbar, the popup and the status sentences; src/product.ts at run time). */
 export const PRODUCT_NAMES: Readonly<Record<Flavor, string>> = { dev: "Winter for Chrome", store: "Winter for Chrome", edge: "Winter for Edge" };
 

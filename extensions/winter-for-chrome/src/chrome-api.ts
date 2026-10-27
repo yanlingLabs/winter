@@ -69,6 +69,8 @@ export interface MessageSender {
   tab?: ChromeTab;
   /** The frame a content script's message came from (0: the tab's top frame). */
   frameId?: number;
+  /** The sending page's URL (the popup's own, for a message from the popup). */
+  url?: string;
 }
 
 /** `chrome.downloads.DownloadItem`, as far as Winter for Chrome reads it. */

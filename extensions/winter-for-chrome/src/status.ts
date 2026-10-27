@@ -32,9 +32,47 @@ export function statusSentence(s: ExtensionStatus): string {
 
 export const STOP_BADGE = "STOP";
 
+/** A second client's link (opensky): what the popup shows under its switch. It never touches the toolbar badge, which
+ *  stays Winter's — except for Stop, which `StatusBoard.setDriven` counts for every client. */
+export class ClientLink {
+  private current: ExtensionStatus | undefined;
+
+  constructor(readonly name: string) {}
+
+  /** Undefined while the user has not allowed the client (its port is never opened). */
+  get(): ExtensionStatus | undefined {
+    return this.current;
+  }
+
+  set(next: ExtensionStatus): void {
+    this.current = next;
+  }
+
+  clear(): void {
+    this.current = undefined;
+  }
+
+  /** One sentence for the popup. */
+  sentence(): string {
+    const s = this.current;
+    if (s === undefined) return `Off — ${this.name} can't use this browser.`;
+    switch (s.state) {
+      case "connecting": return `Connecting to ${this.name}…`;
+      case "connected": return `Connected to ${this.name}.`;
+      case "host-missing": return `${this.name} isn't installed on this Mac, or this browser can't find it yet.`;
+      case "no-daemon": return `${this.name} isn't running.`;
+      case "unverified": return `The ${this.name} on this Mac could not be verified, so ${PRODUCT_NAME} is not talking to it.`;
+      case "mismatch": return `${this.name} and ${PRODUCT_NAME} don't speak the same version — update the older one.`;
+      case "refused": case "unavailable": return s.message;
+    }
+  }
+}
+
 export class StatusBoard {
   private current: ExtensionStatus = { state: "connecting" };
   private driven = 0;
+  /** Driven tabs per client ("Winter", and opensky when it is allowed): the toolbar's Stop names who it stops. */
+  private drivenBy = new Map<string, number>();
   private waiting = 0;
   private needs = 0;
 
@@ -53,11 +91,20 @@ export class StatusBoard {
     this.render();
   }
 
-  /** How many tabs Winter is driving now. More than none turns the toolbar button into Stop. */
-  setDriven(count: number): void {
-    if (count === this.driven) return;
-    this.driven = count;
+  /** How many tabs a client (Winter by default) is driving now. More than none, from any client, turns the toolbar
+   *  button into Stop — and its click stops every client's driven tabs. */
+  setDriven(count: number, client = "Winter"): void {
+    if ((this.drivenBy.get(client) ?? 0) === count) return;
+    if (count === 0) this.drivenBy.delete(client);
+    else this.drivenBy.set(client, count);
+    this.driven = [...this.drivenBy.values()].reduce((a, b) => a + b, 0);
     this.render();
+  }
+
+  /** Who is driving now, in the order they started ("Winter", "Winter and opensky"). */
+  drivers(): string {
+    const names = [...this.drivenBy.keys()];
+    return names.length === 0 ? "Winter" : names.join(" and ");
   }
 
   /** How many tabs Winter handed to the user and waits on (a blue "!" badge; the popup offers Done). */
@@ -80,7 +127,9 @@ export class StatusBoard {
       void this.chrome.action.setPopup({ popup: "" }).catch(() => undefined);
       void this.chrome.action.setBadgeText({ text: STOP_BADGE }).catch(() => undefined);
       void this.chrome.action.setBadgeBackgroundColor({ color: "#c62828" }).catch(() => undefined);
-      void this.chrome.action.setTitle({ title: `Stop Winter — it is working in ${this.driven === 1 ? "a tab" : `${this.driven} tabs`} of this browser` }).catch(() => undefined);
+      const who = this.drivers();
+      const pronoun = this.drivenBy.size > 1 ? "they are" : "it is";
+      void this.chrome.action.setTitle({ title: `Stop ${who} — ${pronoun} working in ${this.driven === 1 ? "a tab" : `${this.driven} tabs`} of this browser` }).catch(() => undefined);
       return;
     }
     const ok = this.current.state === "connected";

@@ -10,6 +10,8 @@
     #backend { color: #5b6476; font-size: 12px; }
     #waiting, #driving { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
     button { font: inherit; padding: 4px 12px; }
+    #opensky { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
+    #opensky label { display: block; margin: 3px 0; }
     #permissions { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(127, 127, 127, 0.25); }
     #permissions label { display: block; margin: 3px 0; }
     #permissions label.needed { font-weight: 600; color: #b3541e; }
@@ -28,6 +30,11 @@
     <label><input type="checkbox" data-permission="history"> find pages in your history</label>
     <label><input type="checkbox" data-permission="bookmarks"> find pages in your bookmarks</label>
     <label><input type="checkbox" data-permission="downloads"> save files a page makes</label>
+  </div>
+  <div id="opensky">
+    <label><input type="checkbox" id="opensky-allowed"> Let opensky use this browser too</label>
+    <p class="small" id="opensky-status">Off — opensky can't use this browser.</p>
+    <p class="small">It works only in tabs it opens itself, never in yours or Winter's, and can't see your history, bookmarks or downloads.</p>
   </div>
   <div id="waiting" hidden>
     <p><strong>Winter is waiting for you on this tab.</strong> Finish what it asked, then press Done.</p>

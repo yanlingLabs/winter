@@ -473,7 +473,41 @@ a dev or release binary contains neither variable name (`checkSignedBrowserHost`
 
 A test build serves the dev extension ids.
 
-## 10. Compatibility and versioning
+## 10. A second client: opensky (extension, next version; unreleased)
+
+The extension can serve one more native host besides Winter's: **opensky**, a separate computer-use app. It is opt-in
+and isolated by construction; nothing in hops 2–5 above changes for Winter.
+
+- **Consent.** The worker opens a port to opensky's host only while `storage.local.openskyConsent` is `true`, set
+  only by the popup's own switch ("Let opensky use this browser too"; `winter.setOpensky`, accepted only from the
+  extension's `popup.html`, never from a content script). It is off by default; installing opensky's host manifest grants
+  nothing. Turning it off closes the port (no reconnect), detaches every debugger and overlay of opensky's, and clears
+  opensky's tab record — its tabs become the user's.
+- **Host names.** `com.opensky.browser` (store and Edge builds) and `com.opensky.browser.dev` (the dev build). opensky
+  writes its own host manifest; its `allowed_origins` lists this extension's ids — `chrome-extension://flfkppajaamjgfmdljlklfdffkdcmicc/`
+  (Chrome Web Store), `chrome-extension://bapmmpefcbjabfdfeehimdhldpjaoemd/` (Edge Add-ons) and, for the dev host only,
+  `chrome-extension://jikdcokcpbacalfeipkognejnlnobbbf/`. The extension cannot verify who answers that name (unlike
+  Winter's host, which code-sign-checks the daemon): the user's switch and the restrictions below are the whole gate.
+- **Wire.** The same JSON-RPC as §4–§5 — the same `hello` (with its own `instanceId`, kept under
+  `storage.local.openskyInstanceId`), the same `host.status`, the same errors — over its own port.
+- **Its own controller.** A second `ExtensionController` (`OPENSKY_CLIENT`): its own agent-tab book
+  (`openskyAgents`), attached record (`openskyAttached`), alive mark (`openskyAlive`), group prefix ("opensky · …") and
+  working pill ("opensky is working — stop it from the toolbar"). Debugger events reach a controller only for tabs it
+  attached.
+- **Methods.** Only `ping`, `tabs.list`, `tabs.create`, `tabs.close`, `tabs.mute`, `tabs.keep` (without `group`),
+  `group.update`, `debugger.attach`, `debugger.detach`, `cdp.send`, `cdp.subscribe` and `overlay`
+  (`SECOND_CLIENT_METHODS`); everything else is `not_allowed`. Withheld: `tabs.present` (the one view-moving call),
+  `windows.list`, `history.search`, `bookmarks.search`, `downloads.*` and `watch.*`. The library and watch arms are
+  never started for it.
+- **Tabs.** Every `tabKey` must name a tab opensky opened (its book) or holds (attached); `tabs.list` lists only those;
+  `tab.gone` reaches it only for those. Each controller refuses (`not_allowed`) and leaves out of `tabs.list` and
+  `tab.gone` every tab the OTHER holds, so Winter never sees, drives or closes opensky's tabs either. The CDP allowlist
+  and the world rules (§7.3) are the same for both.
+- **Stop.** The toolbar's STOP counts both clients' driven tabs and names who is working; one click sends `stop.pressed`
+  to each client for its own driven tabs. The badge otherwise stays Winter's: opensky's link state shows only in the
+  popup, under its switch.
+
+## 11. Compatibility and versioning
 
 - **Bump either number** on any observable change to what it covers, in all three places together (the parity test
   fails until they agree).
@@ -486,4 +520,5 @@ A test build serves the dev extension ids.
 | --- | --- | --- | --- | --- |
 | 1 | 1 | 1.9.0 | 1.0.0 | Initial. |
 | 1 | 1 | (unchanged) | 1.1.0 | ComputerV2 Phase 3, additive behind `hello.features`: the Phase 3 allowlist (`cdp3`), the hand-off (`tabs.present`, `user.done`), `tabs.mute`, `group.update`, `tabs.keep { group }`, `windows.list`, `Tab` facts, and under the optional permissions `history.search`, `bookmarks.search`, `downloads.arm`/`release` and `download`. More browser channels and their manifest directories. |
+| 1 | 1 | (unchanged) | next (unreleased) | The opt-in second client opensky (§10): its own native host, consent-gated in the popup, a restricted method set on its own tabs only, separate storage; Winter's protocol unchanged. |
 | 1 | 1 | (unchanged) | 1.2.0 | Wake triggers, additive behind `hello.features` (`watch`): `watch.arm`, `watch.cancel` and `watch.event` — the page watcher injected with `chrome.scripting` into the extension's own isolated world, no debugger, no new permission (§5.5). |
