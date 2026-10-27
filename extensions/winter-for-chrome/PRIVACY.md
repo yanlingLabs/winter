@@ -80,7 +80,7 @@ any time:
 From the next version the extension can also serve **opensky**, a separate computer-use app on your Mac, through opensky's
 own native host (`com.opensky.browser`). It is **off** until you turn on "Let opensky use this browser too" in the
 extension's toolbar menu; installing opensky does not turn it on, and while it is off the extension never connects to
-opensky at all. Turning it off disconnects opensky at once, detaches from its tabs and hands them to you.
+opensky at all. Turning it off disconnects opensky at once, detaches from its tabs, takes them out of opensky's tab groups and hands them to you.
 
 While it is on, opensky gets much less than Winter:
 

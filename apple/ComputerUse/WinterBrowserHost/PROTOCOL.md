@@ -482,7 +482,7 @@ and isolated by construction; nothing in hops 2–5 above changes for Winter.
   only by the popup's own switch ("Let opensky use this browser too"; `winter.setOpensky`, accepted only from the
   extension's `popup.html`, never from a content script). It is off by default; installing opensky's host manifest grants
   nothing. Turning it off closes the port (no reconnect), detaches every debugger and overlay of opensky's, and clears
-  opensky's tab record — its tabs become the user's. Requests already being answered finish first (at most 10 s); one that would still take
+  opensky's tab record, taking its tabs out of its "opensky · …" groups (as `keep` does) — they become the user's. Requests already being answered finish first (at most 10 s); one that would still take
   something after that undoes what it got (a tab it was
   opening is closed again, a debugger it was attaching detached). Connecting and each flip of the switch run in one
   queue, in order.

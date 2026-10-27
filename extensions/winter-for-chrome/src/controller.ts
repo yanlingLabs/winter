@@ -384,6 +384,20 @@ export class ExtensionController {
       this.clock.clearTimeout(timer);
     }
     await this.releaseAll();
+    // Like `keep()`, the tabs leave the client's groups as they become the user's: no "opensky · …" group is left with
+    // tabs nobody holds. Best effort — a tab the browser will not ungroup stays where it is, the user's either way.
+    const grouped: number[] = [];
+    for (const tabId of this.book.tabIds()) {
+      try {
+        const tab = await this.chrome.tabs.get(tabId);
+        if (this.book.isWinterGroup(tab.groupId)) grouped.push(tabId);
+      } catch { /* closed meanwhile */ }
+    }
+    if (grouped.length > 0) {
+      try { await this.chrome.tabs.ungroup(grouped); } catch (err) {
+        this.opts.log?.(`could not take ${grouped.length} tab(s) out of the ${this.client.name} groups: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     await this.book.clear();
   }
 

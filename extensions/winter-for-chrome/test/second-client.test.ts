@@ -151,6 +151,20 @@ describe("each client's tabs are its own", () => {
     expect(chrome.tabs_.has(Number(skyTab))).toBe(true);
     expect(await listed(winter)).toContain(skyTab);
   });
+
+  test("disown takes its tabs out of the opensky groups (like keep), and leaves the user's groups alone", async () => {
+    const a = await openIn(sky, "o_1", "One");
+    const b = await openIn(sky, "o_1", "One");
+    const c = await openIn(sky, "o_2", "Two");
+    const w = await openIn(winter, "s_1");
+    const winterGroup = chrome.tabs_.get(Number(w))!.groupId;
+    await sky.disown();
+    for (const t of [a, b, c]) {
+      expect(chrome.tabs_.has(Number(t))).toBe(true);
+      expect(chrome.tabs_.get(Number(t))!.groupId).toBe(-1);
+    }
+    expect(chrome.tabs_.get(Number(w))!.groupId).toBe(winterGroup);
+  });
 });
 
 describe("races (the review's findings)", () => {
