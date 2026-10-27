@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import { HostConnection } from "../src/connection";
 import { ExtensionController, ExtensionError, OPENSKY_CLIENT, SECOND_CLIENT_METHODS } from "../src/controller";
 import { OPENSKY_HOST_NAME } from "../src/manifest";
+import { SECOND_CLIENT_FEATURES } from "../src/protocol";
 import { ClientLink, StatusBoard } from "../src/status";
 import { FakeChrome, FakePort, flush, ManualClock } from "./fake-chrome";
 
@@ -26,7 +27,8 @@ beforeEach(async () => {
   winter = new ExtensionController(chrome, {
     notify: (method, params) => winterNotes.push({ method, params }),
     onDriven: (n) => status.setDriven(n),
-    foreignTab: (tabId) => sky.ownsTab(tabId),
+    foreignTab: (tabId) => sky.heldTab(tabId),
+    foreignGroup: (groupId) => sky.ownsGroup(groupId),
     clock,
     launchHintMs: 1000,
   });
@@ -34,7 +36,8 @@ beforeEach(async () => {
     client: OPENSKY_CLIENT,
     notify: (method, params) => skyNotes.push({ method, params }),
     onDriven: (n) => status.setDriven(n, OPENSKY_CLIENT.name),
-    foreignTab: (tabId) => winter.ownsTab(tabId),
+    foreignTab: (tabId) => winter.heldTab(tabId),
+    foreignGroup: (groupId) => winter.ownsGroup(groupId),
     clock,
     launchHintMs: 1000,
   });
@@ -150,6 +153,66 @@ describe("each client's tabs are its own", () => {
   });
 });
 
+describe("races (the review's findings)", () => {
+  test("turned off while an attach is in flight: the debugger is detached again, nothing held", async () => {
+    const skyTab = await openIn(sky, "o_1");
+    const attaching = code(sky.handle("debugger.attach", { tabKey: skyTab }));
+    const off = sky.disown();
+    expect(await attaching).toBe("not_allowed");
+    await off;
+    expect(chrome.attachedDebuggers.has(Number(skyTab))).toBe(false);
+    expect(sky.attachedTabs()).toEqual([]);
+    expect(sky.ownsTab(Number(skyTab))).toBe(false);
+    expect(await code(winter.handle("debugger.attach", { tabKey: skyTab }))).toBe("ok");
+  });
+
+  test("turned off while a tab is opening: it is closed again and never recorded", async () => {
+    const before = chrome.tabs_.size;
+    const opening = code(sky.handle("tabs.create", { url: "https://example.com/", sessionId: "o_1", sessionTitle: "x" }));
+    const off = sky.disown();
+    expect(await opening).toBe("not_allowed");
+    await off;
+    await flush();
+    expect(chrome.tabs_.size).toBe(before);
+    const local = (await chrome.storage.local.get(["openskyAgents"])) as Record<string, unknown>;
+    expect(JSON.stringify(local.openskyAgents ?? {})).not.toMatch(/\d{3}/);
+    expect(await code(sky.handle("ping", {}))).toBe("not_allowed");
+    sky.reopen();
+    expect(await code(sky.handle("ping", {}))).toBe("ok");
+  });
+
+  test("tab.gone routing does not depend on which controller hears the close first", async () => {
+    // A fresh pair whose opensky controller registers its listeners FIRST.
+    chrome = new FakeChrome();
+    const w: { method: string; params: Record<string, unknown> }[] = [];
+    const o: { method: string; params: Record<string, unknown> }[] = [];
+    let first!: ExtensionController;
+    const skyFirst = new ExtensionController(chrome, { client: OPENSKY_CLIENT, notify: (m, p) => o.push({ method: m, params: p }), foreignTab: (id) => first.heldTab(id), clock, launchHintMs: 1000 });
+    first = new ExtensionController(chrome, { notify: (m, p) => w.push({ method: m, params: p }), foreignTab: (id) => skyFirst.heldTab(id), clock, launchHintMs: 1000 });
+    skyFirst.noteLaunch("install");
+    first.noteLaunch("install");
+    await skyFirst.start();
+    await first.start();
+    const skyTab = await openIn(skyFirst, "o_1");
+    const winterTab = await openIn(first, "s_1");
+    await chrome.closeTab(Number(skyTab));
+    await chrome.closeTab(Number(winterTab));
+    await flush();
+    expect(w.filter((n) => n.method === "tab.gone").map((n) => n.params.tabKey)).toEqual([winterTab]);
+    expect(o.filter((n) => n.method === "tab.gone").map((n) => n.params.tabKey)).toEqual([skyTab]);
+  });
+
+  test("Winter's keep({ group }) never joins one of opensky's groups", async () => {
+    const skyTab = await openIn(sky, "o_1", "X");
+    const skyGroup = chrome.tabs_.get(Number(skyTab))!.groupId;
+    const winterTab = await openIn(winter, "s_1");
+    await winter.handle("tabs.keep", { tabKey: winterTab, group: "opensky · X" });
+    const kept = chrome.tabs_.get(Number(winterTab))!;
+    expect(kept.groupId).not.toBe(skyGroup);
+    expect(kept.groupId).toBeGreaterThan(0);
+  });
+});
+
 describe("the toolbar's Stop", () => {
   test("stops every client's driven tabs and names who is working", async () => {
     const skyTab = await openIn(sky, "o_1");
@@ -174,7 +237,7 @@ describe("the toolbar's Stop", () => {
 describe("its connection", () => {
   function connect(): { conn: HostConnection; link: ClientLink } {
     const link = new ClientLink(OPENSKY_CLIENT.name);
-    const conn = new HostConnection(chrome, sky, link, { hostName: OPENSKY_HOST_NAME.store, instanceKey: "openskyInstanceId", peer: "opensky", clock });
+    const conn = new HostConnection(chrome, sky, link, { hostName: OPENSKY_HOST_NAME.store, instanceKey: "openskyInstanceId", peer: "opensky", features: SECOND_CLIENT_FEATURES, clock });
     return { conn, link };
   }
 
@@ -186,7 +249,9 @@ describe("its connection", () => {
     const port = chrome.ports.at(-1) as FakePort;
     await port.deliver({ method: "host.status", params: { daemon: "connected" } });
     await flush();
-    const hello = port.sent.at(-1) as { params: { instanceId: string } };
+    const hello = port.sent.at(-1) as { params: { instanceId: string; features: string[] } };
+    // Offered only what it may use.
+    expect(hello.params.features).toEqual(["cdp3", "mute", "group", "tabFacts"]);
     const stored = (await chrome.storage.local.get(["openskyInstanceId", "instanceId"])) as Record<string, unknown>;
     expect(hello.params.instanceId).toBe(stored.openskyInstanceId as string);
     expect(stored.instanceId).toBeUndefined();

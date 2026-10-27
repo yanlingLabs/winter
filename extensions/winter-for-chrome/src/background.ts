@@ -5,6 +5,7 @@
 import type { ChromeApi, ChromePort, MessageSender } from "./chrome-api";
 import { HostConnection } from "./connection";
 import { ExtensionController, OPENSKY_CLIENT } from "./controller";
+import { SECOND_CLIENT_FEATURES } from "./protocol";
 import { ClientLink, StatusBoard, statusSentence } from "./status";
 
 /** The native-messaging host this build talks to: `com.winter.browser` (store) or `com.winter.browser.dev` (dev). Set by
@@ -115,36 +116,58 @@ const controller: ExtensionController = new ExtensionController(api, {
   onDriven: (count) => status.setDriven(count),
   onWaiting: (count) => status.setWaiting(count),
   onNeeds: (needs) => status.setNeeds(needs.length),
-  foreignTab: (tabId) => opensky.ownsTab(tabId),
+  foreignTab: (tabId) => opensky.heldTab(tabId),
+  foreignGroup: (groupId) => opensky.ownsGroup(groupId),
   log,
 });
 const opensky: ExtensionController = new ExtensionController(api, {
   client: OPENSKY_CLIENT,
   notify: (method, params) => openskyConnection?.notify(method, params),
   onDriven: (count) => status.setDriven(count, OPENSKY_CLIENT.name),
-  foreignTab: (tabId) => controller.ownsTab(tabId),
+  foreignTab: (tabId) => controller.heldTab(tabId),
+  foreignGroup: (groupId) => controller.ownsGroup(groupId),
   log: (line) => log(`opensky: ${line}`),
 });
 connection = new HostConnection(api, controller, status, { hostName: __WINTER_HOST_NAME__, log });
 const openskyLink = new ClientLink(OPENSKY_CLIENT.name);
 openskyConnection = new HostConnection(api, opensky, openskyLink, {
-  hostName: __OPENSKY_HOST_NAME__, instanceKey: "openskyInstanceId", peer: OPENSKY_CLIENT.name, log: (line) => log(`opensky: ${line}`),
+  hostName: __OPENSKY_HOST_NAME__, instanceKey: "openskyInstanceId", peer: OPENSKY_CLIENT.name, features: SECOND_CLIENT_FEATURES,
+  log: (line) => log(`opensky: ${line}`),
 });
 
+/** The stored consent, as last read or set (what the popup's switch shows). */
+let openskyConsent = false;
+
 async function openskyAllowed(): Promise<boolean> {
-  try { return (await api.storage.local.get([OPENSKY_CONSENT_KEY]))[OPENSKY_CONSENT_KEY] === true; } catch { return false; }
+  try { openskyConsent = (await api.storage.local.get([OPENSKY_CONSENT_KEY]))[OPENSKY_CONSENT_KEY] === true; } catch { openskyConsent = false; }
+  return openskyConsent;
+}
+
+void openskyAllowed(); // the popup's switch shows the stored consent from the worker's first moment
+
+/** Every change to opensky's port — the start-up connect and each flip of the switch — runs in this one chain, in order,
+ *  so a switch turned off can never lose to a connect already on its way. */
+let openskyQueue: Promise<void> = Promise.resolve();
+function openskyStep(step: () => Promise<void>): Promise<void> {
+  const next = openskyQueue.then(step);
+  openskyQueue = next.catch((err: unknown) => log(`opensky: ${err instanceof Error ? err.message : String(err)}`));
+  return next;
 }
 
 /** The popup's switch for opensky: on opens its port, off closes it and gives its tabs back to the user. */
-async function setOpensky(allowed: boolean): Promise<void> {
-  await api.storage.local.set({ [OPENSKY_CONSENT_KEY]: allowed });
-  if (allowed) {
-    openskyConnection?.start();
-  } else {
-    await openskyConnection?.stop();
-    await opensky.disown();
-    openskyLink.clear();
-  }
+function setOpensky(allowed: boolean): Promise<void> {
+  return openskyStep(async () => {
+    await api.storage.local.set({ [OPENSKY_CONSENT_KEY]: allowed });
+    openskyConsent = allowed;
+    if (allowed) {
+      opensky.reopen();
+      openskyConnection?.start();
+    } else {
+      await openskyConnection?.stop();
+      await opensky.disown();
+      openskyLink.clear();
+    }
+  });
 }
 
 /** A message from this extension's own popup (not a content script in a tab, whose sender has a tab). */
@@ -173,7 +196,7 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({
       state: s.state, sentence: statusSentence(s), waiting: controller.waitingTabs(), driven: status.drivenTabs(), drivers: status.drivers(),
       needs: controller.neededPermissions(), ...(s.state === "connected" ? { backend: s.backend } : {}),
-      opensky: { allowed: o !== undefined, state: o?.state ?? "off", sentence: openskyLink.sentence() },
+      opensky: { allowed: openskyConsent, state: o?.state ?? (openskyConsent ? "connecting" : "off"), sentence: openskyConsent && o === undefined ? "Connecting to opensky…" : openskyLink.sentence() },
     });
   } else if (m.type === "winter.userDone" && typeof m.tabId === "number" && typeof m.done === "boolean") {
     // The popup's Done / Stop waiting for a tab Winter handed to the user.
@@ -191,12 +214,14 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return undefined;
 });
 
-void controller.start().then(() => connection?.start(), (err: unknown) => {
-  log(`could not start: ${err instanceof Error ? err.message : String(err)}`);
+// Both controllers start (each one's listeners, its record of its tabs, and the debuggers a previous worker left attached
+// for it detached) before EITHER port opens: until both records are loaded, neither can tell the other's tabs from the
+// user's. opensky's port then opens only with the user's consent.
+const winterStarted = controller.start();
+const openskyStarted = opensky.start();
+void Promise.allSettled([winterStarted, openskyStarted]).then(([w, o]) => {
+  if (w.status === "rejected") log(`could not start: ${w.reason instanceof Error ? w.reason.message : String(w.reason)}`);
+  if (o.status === "rejected") log(`opensky: could not start: ${o.reason instanceof Error ? o.reason.message : String(o.reason)}`);
   connection?.start();
-});
-// opensky's controller always starts (its listeners, and the debuggers a previous worker left attached for it, are
-// detached); its port opens only with the user's consent.
-void opensky.start().then(async () => { if (await openskyAllowed()) openskyConnection?.start(); }, (err: unknown) => {
-  log(`opensky: could not start: ${err instanceof Error ? err.message : String(err)}`);
+  if (o.status === "fulfilled") void openskyStep(async () => { if (await openskyAllowed()) openskyConnection?.start(); });
 });

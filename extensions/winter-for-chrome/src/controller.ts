@@ -113,6 +113,8 @@ export interface ControllerOptions {
   /** True when ANOTHER client's controller owns the tab: it is refused here and left out of `tabs.list` and `tab.gone`
    *  — no client sees, drives or closes another's tabs. */
   foreignTab?(tabId: number): boolean;
+  /** True when ANOTHER client's controller owns the tab group: never a group a kept tab joins by name. */
+  foreignGroup?(groupId: number): boolean;
   /** Sends one notification to the daemon. */
   notify(method: string, params: Record<string, unknown>): void;
   /** How many tabs are being driven now (the toolbar button turns into Stop while it is more than 0). */
@@ -158,6 +160,9 @@ export class ExtensionController {
   private readonly watches: WatchBook;
 
   readonly client: ClientProfile;
+  private readonly closedHeld = new Set<number>();
+  /** Set by `disown` until `reopen`: every request is refused, and one already in flight undoes what it got. */
+  private closed = false;
 
   constructor(private readonly chrome: ChromeApi, private readonly opts: ControllerOptions) {
     this.client = opts.client ?? WINTER_CLIENT;
@@ -176,9 +181,27 @@ export class ExtensionController {
   private get attachedKey(): string { return `${this.client.storagePrefix}Attached`; }
   private get aliveKey(): string { return `${this.client.storagePrefix}Alive`; }
 
-  /** Whether this client opened the tab and still holds it (another controller's `foreignTab`). */
+  /** Whether this client opened the tab and still holds it. */
   ownsTab(tabId: number): boolean {
     return this.book.sessionOfTab(tabId) !== undefined || this.attached.has(tabId);
+  }
+
+  /** Another controller's `foreignTab`: a tab this client holds, or held until the browser closed or replaced it (tab ids
+   *  are never reused within a browser session, so the answer cannot depend on which controller heard the close first).
+   *  A tab given back to the user (`keep`, `disown`) is not remembered: it is the user's. */
+  heldTab(tabId: number): boolean {
+    return this.ownsTab(tabId) || this.closedHeld.has(tabId);
+  }
+
+  /** Another controller's `foreignGroup`. */
+  ownsGroup(groupId: number): boolean {
+    return this.book.isWinterGroup(groupId);
+  }
+
+  /** Remembers a tab this client held when the browser closed or replaced it (bounded; see `heldTab`). */
+  private noteClosedHeld(tabId: number): void {
+    this.closedHeld.add(tabId);
+    if (this.closedHeld.size > 1000) this.closedHeld.delete(this.closedHeld.values().next().value!);
   }
 
   /** A watcher's runtime message (`winter.wake.event` / `winter.wake.alive`); false when it is not one. */
@@ -266,6 +289,7 @@ export class ExtensionController {
   /** One daemon request. Throws `ExtensionError` (typed) or `UnknownMethod`. */
   async handle(method: string, rawParams: unknown): Promise<unknown> {
     const params = isRecord(rawParams) ? rawParams : {};
+    if (this.closed) throw new ExtensionError("not_allowed", `${this.client.name} is turned off in this browser`);
     if (this.client.restricted && !SECOND_CLIENT_METHODS.has(method)) {
       throw new ExtensionError("not_allowed", `${this.client.name} can't use ${method} in this browser`);
     }
@@ -320,8 +344,14 @@ export class ExtensionController {
   /** The user took this client's access away: everything released, and the tabs it opened are the user's from now on
    *  (its record is cleared, so they are no longer refused to any client). */
   async disown(): Promise<void> {
+    this.closed = true;
     await this.releaseAll();
     await this.book.clear();
+  }
+
+  /** The user turned the client on again. */
+  reopen(): void {
+    this.closed = false;
   }
 
   /** A library refusal as the daemon reads it (`not_allowed` with `data.permission`). */
@@ -415,6 +445,11 @@ export class ExtensionController {
     // In the BACKGROUND: the user's active tab and window never change.
     const tab = await this.chrome.tabs.create({ url, active: false, windowId });
     if (tab.id === undefined) throw new ExtensionError("cdp_error", "the browser opened no tab");
+    if (this.closed) {
+      // Turned off while the browser opened it: closed again, never recorded.
+      try { await this.chrome.tabs.remove(tab.id); } catch { /* already gone */ }
+      throw new ExtensionError("not_allowed", `${this.client.name} is turned off in this browser`);
+    }
     // From here on the tab exists and is Winter's: it is returned whatever the grouping does, so it can be driven and
     // closed like any other agent tab — a failed group step must never leave an untracked tab behind.
     await this.book.addTab(tab.id, sessionId);
@@ -531,7 +566,8 @@ export class ExtensionController {
     if (this.book.isWinterGroup(tab.groupId)) await this.chrome.tabs.ungroup([tabId]);
     if (name === "") return;
     try {
-      const existing = (await this.chrome.tabGroups.query({})).find((g) => g.windowId === tab.windowId && (g.title ?? "") === name && !this.book.isWinterGroup(g.id));
+      const existing = (await this.chrome.tabGroups.query({})).find((g) => g.windowId === tab.windowId && (g.title ?? "") === name && !this.book.isWinterGroup(g.id)
+        && this.opts.foreignGroup?.(g.id) !== true);
       if (existing !== undefined) {
         await this.chrome.tabs.group({ tabIds: [tabId], groupId: existing.id });
       } else {
@@ -608,6 +644,11 @@ export class ExtensionController {
         throw new ExtensionError("attach_refused", /another debugger/i.test(message)
           ? "another debugger is already attached to this tab (DevTools or another extension)"
           : `the browser would not let Winter control this tab: ${message}`);
+      }
+      if (this.closed) {
+        // Turned off while the browser attached: nothing of it may stay.
+        try { await this.chrome.debugger.detach({ tabId }); } catch { /* already gone */ }
+        throw new ExtensionError("not_allowed", `${this.client.name} is turned off in this browser`);
       }
       this.attached.set(tabId, { tabId, guard: new TabGuard(), subscribed: new Set(), overlay: false, pageEvents: false });
       this.goneSent.delete(tabId);
@@ -798,6 +839,7 @@ export class ExtensionController {
    */
   private async leaveReplacedTab(oldId: number, newId: number, a: Attached, method: string, params: Record<string, unknown>): Promise<never> {
     const sessionId = this.book.sessionOfTab(oldId);
+    this.noteClosedHeld(oldId);
     await this.book.dropTab(oldId);
     if (sessionId !== undefined) await this.book.addTab(newId, sessionId);
     // A wake trigger's watches follow the tab (they are re-injected into its new document).
@@ -985,6 +1027,7 @@ export class ExtensionController {
     // Whose it was, decided before the book forgets it: a restricted client hears only of its own tabs, and no client
     // of another's.
     const tell = this.opts.foreignTab?.(tabId) !== true && (!this.client.restricted || this.ownsTab(tabId));
+    if (this.ownsTab(tabId)) this.noteClosedHeld(tabId);
     const a = this.attached.get(tabId);
     if (a?.idle !== undefined) this.clock.clearTimeout(a.idle);
     if (a !== undefined) {

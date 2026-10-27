@@ -39,6 +39,8 @@ export interface ConnectionOptions {
   instanceKey?: string;
   /** Who is at the other end, in what the user reads (default Winter). */
   peer?: string;
+  /** What `hello` offers (default `EXTENSION_FEATURES`, all of them). */
+  features?: readonly string[];
   clock?: Clock;
   log?(line: string): void;
 }
@@ -196,7 +198,7 @@ export class HostConnection {
     this.helloId = id;
     this.post({
       jsonrpc: "2.0", id, method: "hello",
-      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...EXTENSION_FEATURES] },
+      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...(this.opts.features ?? EXTENSION_FEATURES)] },
     });
   }
 

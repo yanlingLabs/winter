@@ -85,9 +85,11 @@ opensky at all. Turning it off disconnects opensky at once, detaches from its ta
 While it is on, opensky gets much less than Winter:
 
 - it works only in the tabs it opens itself (in background tab groups named "opensky · …"), never in your tabs and
-  never in Winter's, and it does not see your other tabs listed;
-- it cannot bring a tab or window to the front, list your windows, search your history or bookmarks, save downloads, or
-  set up watches;
+  never in Winter's, and it does not see your other tabs listed. Its tabs are ordinary tabs of your browser profile, so
+  a site you are signed in to is signed in there too, and opensky can read and act on it as you;
+- it cannot bring a tab or window to the front, list your windows, search your history or bookmarks, use the browser's
+  downloads (your Downloads folder or its list), or set up watches. Like Winter, it can read a file that a page in one
+  of its own tabs sends, as the page receives it;
 - the same pages are off limits as for Winter, and it reads and acts on its own tabs the same way Winter does (the
   debugging interface, the browser's notice, the same allowed commands).
 
