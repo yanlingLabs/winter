@@ -22,7 +22,8 @@
 // WHO SEES IT — THE RULE. Under Bun, updating `process.env.PATH` does NOT reach a spawn that passes
 // no `env`: `Bun.spawn`/`Bun.spawnSync`/`child_process.spawnSync`/`execFileSync` without an `env`
 // option keep the process's ORIGINAL environment (measured, Bun 1.3.14); only async
-// `child_process.spawn` re-reads it. So: A SPAWN THAT NEEDS THE USER'S TOOLS MUST PASS AN `env`
+// `child_process.spawn` re-read it. Bun 1.4.2 re-reads for `child_process.spawnSync`/`execFileSync` too, but
+// `Bun.spawn`/`Bun.spawnSync` still keep the original, so the rule below is unchanged. So: A SPAWN THAT NEEDS THE USER'S TOOLS MUST PASS AN `env`
 // DERIVED FROM `process.env` AT SPAWN TIME. Every spawn that matters does today — `buildChildEnv`
 // (the Winter child, its Bash tool and its stdio MCP servers — the daemon's MCP status probe included, WS-25), the hook runner, the plugin supervisor, the
 // background-task registry; the router and SDK wrappers spawn with `env: options.env`.

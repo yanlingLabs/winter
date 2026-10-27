@@ -252,8 +252,9 @@ const pre = preflight({
       return out === "" ? null : `working tree not clean — commit or stash changes before releasing`;
     },
     // The shipped `winter-core` is compiled by THIS bun, and CI tests with `.bun-version` — they must be
-    // the same Bun, or CI proves a different binary (CI on "latest" went red on 1.4.2 while releases
-    // built with 1.3.14: bun:ffi's executable-memory need and a stdin EPIPE both differ between them).
+    // the same Bun, or CI proves a different binary (CI on "latest" once went red on 1.4.2 while releases
+    // were built with 1.3.14: bun:ffi's executable-memory need and a stdin EPIPE differ between those two; the
+    // pin is now 1.4.x, which has the stricter EPIPE behaviour and needs no unsigned executable memory).
     bunVersion: () => {
       const pinned = readFileSync(join(ROOT, ".bun-version"), "utf8").trim();
       return Bun.version === pinned ? null : `this bun is ${Bun.version} but .bun-version pins ${pinned} — release with the pinned Bun (CI tests that one)`;
