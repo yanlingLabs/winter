@@ -145,9 +145,15 @@ async function openskyAllowed(): Promise<boolean> {
 
 void openskyAllowed(); // the popup's switch shows the stored consent from the worker's first moment
 
-/** Every change to opensky's port — the start-up connect and each flip of the switch — runs in this one chain, in order,
- *  so a switch turned off can never lose to a connect already on its way. */
-let openskyQueue: Promise<void> = Promise.resolve();
+// Both controllers start (each one's listeners, its record of its tabs, and the debuggers a previous worker left attached
+// for it detached). Winter's port opens once Winter has started and opensky's RECORD is loaded (so Winter can tell
+// opensky's tabs from the user's; tabs opensky is still detaching count as opensky's) — never waiting on opensky's
+// detaching. Every change to opensky's port — the start-up connect and each flip of the switch — runs in one chain
+// that begins only after BOTH have fully started, in order, so a switch turned off can never lose to a connect already
+// on its way, and opensky never connects before either record is loaded.
+const winterStarted = controller.start();
+const openskyStarted = opensky.start();
+let openskyQueue: Promise<void> = Promise.allSettled([winterStarted, openskyStarted]).then(() => undefined);
 function openskyStep(step: () => Promise<void>): Promise<void> {
   const next = openskyQueue.then(step);
   openskyQueue = next.catch((err: unknown) => log(`opensky: ${err instanceof Error ? err.message : String(err)}`));
@@ -214,14 +220,13 @@ api.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return undefined;
 });
 
-// Both controllers start (each one's listeners, its record of its tabs, and the debuggers a previous worker left attached
-// for it detached) before EITHER port opens: until both records are loaded, neither can tell the other's tabs from the
-// user's. opensky's port then opens only with the user's consent.
-const winterStarted = controller.start();
-const openskyStarted = opensky.start();
-void Promise.allSettled([winterStarted, openskyStarted]).then(([w, o]) => {
+// opensky's record failing to load (its start rejecting) must not keep Winter from connecting.
+const openskyRecord = Promise.race([opensky.recordLoaded(), openskyStarted]);
+void Promise.allSettled([winterStarted, openskyRecord]).then(([w]) => {
   if (w.status === "rejected") log(`could not start: ${w.reason instanceof Error ? w.reason.message : String(w.reason)}`);
-  if (o.status === "rejected") log(`opensky: could not start: ${o.reason instanceof Error ? o.reason.message : String(o.reason)}`);
   connection?.start();
-  if (o.status === "fulfilled") void openskyStep(async () => { if (await openskyAllowed()) openskyConnection?.start(); });
 });
+void openskyStarted.then(
+  () => openskyStep(async () => { if (await openskyAllowed()) openskyConnection?.start(); }),
+  (err: unknown) => log(`opensky: could not start: ${err instanceof Error ? err.message : String(err)}`),
+);

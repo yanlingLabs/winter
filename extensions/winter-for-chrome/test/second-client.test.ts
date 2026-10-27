@@ -213,6 +213,34 @@ describe("races (the review's findings)", () => {
   });
 });
 
+describe("start order", () => {
+  test("a tab a previous worker left attached for opensky is opensky's to Winter until opensky's start has detached it", async () => {
+    await chrome.storage.session.set({ openskyAttached: [101], openskyAlive: true });
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const realDetach = chrome.debugger.detach;
+    chrome.debugger.detach = async (target) => { await gate; return realDetach(target); };
+    const again = new ExtensionController(chrome, { client: OPENSKY_CLIENT, notify: () => undefined, clock, launchHintMs: 1000 });
+    const started = again.start();
+    await again.recordLoaded();
+    expect(again.heldTab(101)).toBe(true); // Winter's foreignTab: refused while the detach is pending
+    release();
+    await started;
+    expect(again.heldTab(101)).toBe(false);
+    chrome.debugger.detach = realDetach;
+  });
+
+  test("turning off waits for a request already being answered, then releases", async () => {
+    const skyTab = await openIn(sky, "o_1");
+    await sky.handle("debugger.attach", { tabKey: skyTab });
+    const sending = code(sky.handle("cdp.send", { tabKey: skyTab, method: "Runtime.enable", params: {} }));
+    await sky.disown();
+    expect(await sending).toBe("ok");
+    expect(chrome.attachedDebuggers.has(Number(skyTab))).toBe(false);
+    expect(await code(sky.handle("cdp.send", { tabKey: skyTab, method: "Runtime.enable", params: {} }))).toBe("not_allowed");
+  });
+});
+
 describe("the toolbar's Stop", () => {
   test("stops every client's driven tabs and names who is working", async () => {
     const skyTab = await openIn(sky, "o_1");

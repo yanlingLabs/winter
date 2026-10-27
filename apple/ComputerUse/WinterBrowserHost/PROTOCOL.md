@@ -482,7 +482,8 @@ and isolated by construction; nothing in hops 2–5 above changes for Winter.
   only by the popup's own switch ("Let opensky use this browser too"; `winter.setOpensky`, accepted only from the
   extension's `popup.html`, never from a content script). It is off by default; installing opensky's host manifest grants
   nothing. Turning it off closes the port (no reconnect), detaches every debugger and overlay of opensky's, and clears
-  opensky's tab record — its tabs become the user's; a request still in flight then undoes what it got (a tab it was
+  opensky's tab record — its tabs become the user's. Requests already being answered finish first (at most 10 s); one that would still take
+  something after that undoes what it got (a tab it was
   opening is closed again, a debugger it was attaching detached). Connecting and each flip of the switch run in one
   queue, in order.
 - **Host names.** `com.opensky.browser` (store and Edge builds) and `com.opensky.browser.dev` (the dev build). opensky
@@ -508,8 +509,9 @@ and isolated by construction; nothing in hops 2–5 above changes for Winter.
   `tab.gone` reaches it only for those. Each controller refuses (`not_allowed`) and leaves out of `tabs.list` and
   `tab.gone` every tab the OTHER holds — or held until the browser closed or replaced it, so which controller hears a
   close first does not matter — so Winter never sees, drives or closes opensky's tabs either. Winter's
-  `tabs.keep { group }` never joins one of opensky's groups. Both controllers finish starting (records loaded, leftover
-  debuggers detached) before either port opens. The CDP allowlist
+  `tabs.keep { group }` never joins one of opensky's groups. Winter's port opens once Winter has started and opensky's
+  record is loaded (tabs opensky is still detaching from a previous worker count as opensky's until they are);
+  opensky's port, and every flip of its switch, waits until both have fully started. The CDP allowlist
   and the world rules (§7.3) are the same for both.
 - **Stop.** The toolbar's STOP counts both clients' driven tabs and names who is working; one click sends `stop.pressed`
   to each client for its own driven tabs. The badge otherwise stays Winter's: opensky's link state shows only in the
