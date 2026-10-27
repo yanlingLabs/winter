@@ -777,7 +777,10 @@ test("anti-wiring: no src file imports the channel, it has no barrel export, nei
   expect(existsSync(module)).toBe(true);
   const sources = readdirSync(packages, { withFileTypes: true }).filter(entry => entry.isDirectory() && existsSync(join(packages, entry.name, "src"))).flatMap(entry => sourceFiles(join(packages, entry.name, "src")));
   expect(sources.length).toBeGreaterThan(100); expect(sources).toContain(module);
-  for (const file of sources.filter(candidate => candidate !== module)) {
+  // The transport (guest-file-port.ts) is the one module that may name the channel; its own test pins that nothing imports it.
+  const port = join(packages, "core", "src", "cowork", "guest-file-port.ts");
+  expect(readFileSync(port, "utf8")).toMatch(/from "\.\/guest-file-channel"/);
+  for (const file of sources.filter(candidate => candidate !== module && candidate !== port)) {
     const text = readFileSync(file, "utf8");
     for (const needle of ["guest-file-channel", "createCoworkGuestFileClient", "CoworkGuestFileFramePort", "CoworkGuestFileAuthorityPort", "parseCoworkGuestFileRequest", "parseCoworkGuestFileResponse",
       "parseCoworkGuestRelativePath", "COWORK_GUEST_FILE_", "CoworkGuestFileClient"])
