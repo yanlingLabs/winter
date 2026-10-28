@@ -21,11 +21,13 @@ export class AgentBook {
   private readonly groups = new Map<number, Group>();
   private readonly tabs = new Map<number, string>();
 
-  constructor(private readonly chrome: ChromeApi) {}
+  /** `storageKey`: one record per client (Winter's `winterAgents`; a second client, opensky, keeps its own — its tabs are
+   *  never in Winter's book, nor Winter's in its). */
+  constructor(private readonly chrome: ChromeApi, private readonly storageKey: string = STORAGE_KEY) {}
 
   /** Loads the record and forgets tabs and groups that no longer exist. */
   async load(): Promise<void> {
-    const stored = (await this.chrome.storage.local.get([STORAGE_KEY]))[STORAGE_KEY];
+    const stored = (await this.chrome.storage.local.get([this.storageKey]))[this.storageKey];
     this.groups.clear();
     this.tabs.clear();
     if (typeof stored === "object" && stored !== null) {
@@ -109,7 +111,7 @@ export class AgentBook {
 
   private async save(): Promise<void> {
     await this.chrome.storage.local.set({
-      [STORAGE_KEY]: {
+      [this.storageKey]: {
         groups: Object.fromEntries([...this.groups].map(([id, g]) => [String(id), g])),
         tabs: Object.fromEntries([...this.tabs].map(([id, s]) => [String(id), s])),
       },
@@ -117,9 +119,9 @@ export class AgentBook {
   }
 }
 
-/** "Winter · <title>", the title cut to keep the group's chip readable. */
-export function groupTitle(sessionTitle: string): string {
+/** "<prefix> · <title>" ("Winter · …", or a second client's own name), the title cut to keep the group's chip readable. */
+export function groupTitle(sessionTitle: string, prefix = "Winter"): string {
   const t = sessionTitle.trim().replace(/\s+/g, " ");
   const cut = t.length > 40 ? `${t.slice(0, 39)}…` : t;
-  return cut === "" ? "Winter" : `Winter · ${cut}`;
+  return cut === "" ? prefix : `${prefix} · ${cut}`;
 }

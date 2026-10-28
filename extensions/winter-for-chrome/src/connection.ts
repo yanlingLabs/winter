@@ -7,9 +7,15 @@ import { realClock } from "./chrome-api";
 import { ExtensionError, UnknownMethod, type ExtensionController } from "./controller";
 import { PRODUCT_NAME } from "./product";
 import { EXTENSION_FEATURES, EXTENSION_PROTOCOL, RPC_ERROR, RPC_METHOD_NOT_FOUND } from "./protocol";
-import type { StatusBoard } from "./status";
+import type { ExtensionStatus } from "./status";
 
 const INSTANCE_KEY = "instanceId";
+
+/** Where a connection reports how its link stands: Winter's toolbar `StatusBoard`, or a second client's own record
+ *  (which never touches the badge). */
+export interface LinkStatus {
+  set(next: ExtensionStatus): void;
+}
 /** The host takes at most 16 MiB from the extension (a native message larger than that is refused). */
 export const MAX_MESSAGE_BYTES = 16 * 1024 * 1024;
 const BACKOFF_MIN_MS = 1000;
@@ -28,6 +34,13 @@ function messageBytes(message: unknown): number {
 
 export interface ConnectionOptions {
   hostName: string;
+  /** The storage.local key of this connection's instance id (default `instanceId`, Winter's): each client gets its own,
+   *  so no id links one app's view of this browser to another's. */
+  instanceKey?: string;
+  /** Who is at the other end, in what the user reads (default Winter). */
+  peer?: string;
+  /** What `hello` offers (default `EXTENSION_FEATURES`, all of them). */
+  features?: readonly string[];
   clock?: Clock;
   log?(line: string): void;
 }
@@ -40,11 +53,12 @@ export class HostConnection {
   private retryTimer: unknown;
   private instanceId: string | undefined;
   private readonly clock: Clock;
+  private stopped = false;
 
   constructor(
     private readonly chrome: ChromeApi,
     private readonly controller: ExtensionController,
-    private readonly status: StatusBoard,
+    private readonly status: LinkStatus,
     private readonly opts: ConnectionOptions,
   ) {
     this.clock = opts.clock ?? realClock;
@@ -53,18 +67,24 @@ export class HostConnection {
   /** The id this browser profile keeps across worker restarts, so Winter gives it the same backend id back. */
   async instance(): Promise<string> {
     if (this.instanceId !== undefined) return this.instanceId;
-    const stored = (await this.chrome.storage.local.get([INSTANCE_KEY]))[INSTANCE_KEY];
+    const key = this.opts.instanceKey ?? INSTANCE_KEY;
+    const stored = (await this.chrome.storage.local.get([key]))[key];
     if (typeof stored === "string" && /^[A-Za-z0-9-]{8,64}$/.test(stored)) {
       this.instanceId = stored;
     } else {
       this.instanceId = this.chrome.randomUUID();
-      await this.chrome.storage.local.set({ [INSTANCE_KEY]: this.instanceId });
+      await this.chrome.storage.local.set({ [key]: this.instanceId });
     }
     return this.instanceId;
   }
 
+  private get peer(): string {
+    return this.opts.peer ?? "Winter";
+  }
+
   start(): void {
     if (this.port !== undefined) return;
+    this.stopped = false;
     this.status.set({ state: "connecting" });
     let port: ChromePort;
     try {
@@ -78,6 +98,20 @@ export class HostConnection {
     this.port = port;
     port.onMessage.addListener((m) => { void this.onMessage(port, m); });
     port.onDisconnect.addListener(() => this.onDisconnect(port));
+  }
+
+  /** Closes the port for good (until the next `start`): no reconnect, every debugger and overlay released. A second
+   *  client's link ends this way when the user turns its access off. */
+  async stop(): Promise<void> {
+    this.stopped = true;
+    if (this.retryTimer !== undefined) this.clock.clearTimeout(this.retryTimer);
+    this.retryTimer = undefined;
+    const port = this.port;
+    this.port = undefined;
+    this.helloId = undefined;
+    this.backoff = BACKOFF_MIN_MS;
+    try { port?.disconnect(); } catch { /* already gone */ }
+    await this.controller.releaseAll();
   }
 
   /** Sends one notification to the daemon (dropped while there is no port). */
@@ -114,6 +148,7 @@ export class HostConnection {
   }
 
   private schedule(): void {
+    if (this.stopped) return;
     if (this.retryTimer !== undefined) this.clock.clearTimeout(this.retryTimer);
     const delay = this.backoff;
     this.backoff = Math.min(this.backoff * 2, BACKOFF_MAX_MS);
@@ -149,7 +184,7 @@ export class HostConnection {
         this.status.set({ state: "unverified" });
         break;
       case "refused":
-        this.status.set({ state: "refused", message: typeof p.reason === "string" ? p.reason : "Winter refused the connection" });
+        this.status.set({ state: "refused", message: typeof p.reason === "string" ? p.reason : `${this.peer} refused the connection` });
         break;
       default:
         return;
@@ -163,7 +198,7 @@ export class HostConnection {
     this.helloId = id;
     this.post({
       jsonrpc: "2.0", id, method: "hello",
-      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...EXTENSION_FEATURES] },
+      params: { protocol: EXTENSION_PROTOCOL, extensionVersion: this.chrome.extensionVersion, instanceId: await this.instance(), features: [...(this.opts.features ?? EXTENSION_FEATURES)] },
     });
   }
 
@@ -177,7 +212,7 @@ export class HostConnection {
     }
     const error = isRecord(m.error) ? m.error : {};
     const data = isRecord(error.data) ? error.data : {};
-    const message = typeof error.message === "string" ? error.message : `Winter refused ${PRODUCT_NAME}`;
+    const message = typeof error.message === "string" ? error.message : `${this.peer} refused ${PRODUCT_NAME}`;
     if (data.code === "protocol_mismatch") {
       this.status.set({ state: "mismatch", message });
       return;

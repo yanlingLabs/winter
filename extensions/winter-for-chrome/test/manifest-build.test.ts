@@ -5,7 +5,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ALLOWED_EXACT_CALLS, build, devKey, FORBIDDEN_IN_BUNDLE, forbiddenHits } from "../scripts/build";
-import { extensionManifest, FLAVORS, HOST_NAME, MINIMUM_CHROME_VERSION, PRODUCT_NAMES } from "../src/manifest";
+import { extensionManifest, FLAVORS, HOST_NAME, MINIMUM_CHROME_VERSION, OPENSKY_HOST_NAME, PRODUCT_NAMES } from "../src/manifest";
 import { drawOverlay, OVERLAY_TAG } from "../src/overlay";
 
 const idFromKey = (key: string): string =>
@@ -35,6 +35,7 @@ describe("the manifest", () => {
     expect("key" in extensionManifest("edge")).toBe(false);
     expect(() => extensionManifest("dev")).toThrow(/key/);
     expect(HOST_NAME).toEqual({ dev: "com.winter.browser.dev", store: "com.winter.browser", edge: "com.winter.browser" });
+    expect(OPENSKY_HOST_NAME).toEqual({ dev: "com.opensky.browser.dev", store: "com.opensky.browser", edge: "com.opensky.browser" });
   });
 
   test("the name the user sees: Winter for Chrome, and Winter for Edge on Edge Add-ons", () => {
@@ -53,11 +54,13 @@ describe("the build", () => {
     const out = mkdtempSync(join(tmpdir(), "wfc-build-"));
     try {
       const [devDir, storeDir, edgeDir] = await build(["dev", "store", "edge"], out);
-      for (const [dir, host] of [[devDir!, HOST_NAME.dev], [storeDir!, HOST_NAME.store], [edgeDir!, HOST_NAME.edge]] as const) {
+      for (const [dir, host, sky] of [[devDir!, HOST_NAME.dev, OPENSKY_HOST_NAME.dev], [storeDir!, HOST_NAME.store, OPENSKY_HOST_NAME.store], [edgeDir!, HOST_NAME.edge, OPENSKY_HOST_NAME.edge]] as const) {
         expect(readdirSync(dir).sort()).toEqual(["background.js", "icons", "manifest.json", "popup.html", "popup.js"]);
         expect(readdirSync(join(dir, "icons")).sort()).toEqual(["128.png", "16.png", "32.png", "48.png"]);
         const bundle = readFileSync(join(dir, "background.js"), "utf8");
         expect(bundle).toContain(JSON.stringify(host));
+        expect(bundle).toContain(JSON.stringify(sky));
+        expect(bundle).not.toContain("__OPENSKY_HOST_NAME__");
         for (const file of ["background.js", "popup.js"]) {
           const text = readFileSync(join(dir, file), "utf8");
           expect({ file, hits: forbiddenHits(text).map((f) => f.why) }).toEqual({ file, hits: [] });

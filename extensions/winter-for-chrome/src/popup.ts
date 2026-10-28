@@ -14,6 +14,26 @@ const stopButton = document.getElementById("stop");
 const driving = document.getElementById("driving");
 const drivingLine = document.getElementById("driving-line");
 const stopAllButton = document.getElementById("stop-all");
+const openskyBox = document.getElementById("opensky-allowed") as HTMLInputElement | null;
+const openskyLine = document.getElementById("opensky-status");
+
+/** opensky's switch: off by default; turning it on is the only way its native host is ever connected. */
+function openskySwitch(o: { allowed?: boolean; sentence?: string } | undefined): void {
+  if (openskyBox === null) return;
+  openskyBox.checked = o?.allowed === true;
+  if (openskyLine !== null && o?.sentence !== undefined) openskyLine.textContent = o.sentence;
+  openskyBox.addEventListener("change", () => {
+    const allowed = openskyBox.checked;
+    openskyBox.disabled = true;
+    void chrome.runtime.sendMessage({ type: "winter.setOpensky", allowed }).then(
+      (r: { ok?: boolean } | undefined) => {
+        if (r?.ok !== true) openskyBox.checked = !allowed;
+        if (openskyLine !== null) openskyLine.textContent = openskyBox.checked ? "Connecting to opensky…" : "Off — opensky can't use this browser.";
+      },
+      () => { openskyBox.checked = !allowed; },
+    ).finally(() => { openskyBox.disabled = false; });
+  });
+}
 
 async function frontTabId(): Promise<number | undefined> {
   // This window's tabs, and the one in front (read only: nothing here moves anything).
@@ -43,8 +63,9 @@ async function permissionSwitches(needed: string[]): Promise<void> {
 }
 
 chrome.runtime.sendMessage({ type: "winter.status" }).then(
-  async (r: { state?: string; sentence?: string; backend?: { id: string; name: string }; waiting?: number[]; driven?: number; needs?: string[] } | undefined) => {
+  async (r: { state?: string; sentence?: string; backend?: { id: string; name: string }; waiting?: number[]; driven?: number; drivers?: string; needs?: string[]; opensky?: { allowed?: boolean; sentence?: string } } | undefined) => {
     void permissionSwitches(r?.needs ?? []);
+    openskySwitch(r?.opensky);
     if (line !== null) line.textContent = r?.sentence ?? `${PRODUCT_NAME} is starting…`;
     if (backend !== null && r?.backend !== undefined) backend.textContent = `Winter calls this browser "${r.backend.id}".`;
     document.body.dataset.state = r?.state ?? "connecting";
@@ -57,7 +78,9 @@ chrome.runtime.sendMessage({ type: "winter.status" }).then(
     const driven = r?.driven ?? 0;
     if (driven > 0 && driving !== null) {
       driving.hidden = false;
-      if (drivingLine !== null) drivingLine.textContent = `Winter is also working in ${driven === 1 ? "a tab" : `${driven} tabs`} of this browser.`;
+      const who = r?.drivers ?? "Winter";
+      if (drivingLine !== null) drivingLine.textContent = `${who} ${who.includes(" and ") ? "are" : "is"} also working in ${driven === 1 ? "a tab" : `${driven} tabs`} of this browser.`;
+      if (stopAllButton !== null) stopAllButton.textContent = `Stop ${who}`;
       stopAllButton?.addEventListener("click", () => { void chrome.runtime.sendMessage({ type: "winter.stopDriven" }).finally(() => window.close()); });
     }
   },

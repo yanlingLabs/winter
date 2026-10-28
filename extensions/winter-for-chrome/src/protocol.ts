@@ -11,6 +11,9 @@ export const EXTENSION_PROTOCOL = 1;
  *  every name it knows, and offers a Phase 3 member only when its feature is named here). */
 export const EXTENSION_FEATURES = ["cdp3", "present", "userDone", "mute", "group", "keepGroup", "windows", "history", "bookmarks", "downloads", "tabFacts", "watch"] as const;
 
+/** What a restricted second client (opensky) is offered: never a feature whose methods it is refused. */
+export const SECOND_CLIENT_FEATURES = ["cdp3", "mute", "group", "tabFacts"] as const;
+
 /** The error codes this side answers with (`error.data.code`) — the daemon's TransportErrorCode set. */
 export type ErrorCode = "disconnected" | "tab_gone" | "attach_refused" | "not_allowed" | "cdp_error" | "timeout";
 
