@@ -491,6 +491,10 @@ and isolated by construction; nothing in hops 2–5 above changes for Winter.
   (Chrome Web Store), `chrome-extension://bapmmpefcbjabfdfeehimdhldpjaoemd/` (Edge Add-ons) and, for the dev host only,
   `chrome-extension://jikdcokcpbacalfeipkognejnlnobbbf/`. The extension cannot verify who answers that name (unlike
   Winter's host, which code-sign-checks the daemon): the user's switch and the restrictions below are the whole gate.
+  Chrome tells an extension nothing about the process behind a host name, and Winter's own host name has the same gap
+  at this hop. The planned closing of it is pairing: the host holds a private key in the Keychain that only code signed
+  by its team may use, the extension stores the public half on the first connect, and every later connect answers a
+  fresh challenge signed with that key.
 - **Wire.** The same JSON-RPC as §4–§5 — the same `hello` (with its own `instanceId`, kept under
   `storage.local.openskyInstanceId`), the same `host.status`, the same errors — over its own port.
 - **Its own controller.** A second `ExtensionController` (`OPENSKY_CLIENT`): its own agent-tab book
